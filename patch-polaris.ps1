@@ -12,6 +12,7 @@
     -Out DIR             output directory                       (default .\out)
     -SelfTest            qemu-emulate the driver load (R5 II registration)
     -NoFixTypo           do NOT correct the upstream "EOS 5Rm2" model typo
+    -NoUsb1              do NOT swap the usb1 iolib; patch ptp2 + pgphoto only
     -Image NAME          docker image tag              (default polaris-patcher)
 
   READ THE README AND DISCLAIMERS FIRST. Tested ONLY against FwVer 4.0.0.32
@@ -23,6 +24,7 @@ param(
   [string]$Out = "",
   [switch]$SelfTest,
   [switch]$NoFixTypo,
+  [switch]$NoUsb1,
   [string]$Image = "polaris-patcher"
 )
 $ErrorActionPreference = "Stop"
@@ -51,11 +53,13 @@ try {
   Write-Host "[*] building docker image '$Image' (first run only)..."
   docker build -q -t $Image -f (Join-Path $Here "docker\Dockerfile") $Here | Out-Null
 
-  $fix = if ($NoFixTypo) { "0" } else { "1" }
-  $st  = if ($SelfTest)  { "1" } else { "0" }
+  $fix  = if ($NoFixTypo) { "0" } else { "1" }
+  $st   = if ($SelfTest)  { "1" } else { "0" }
+  $usb1 = if ($NoUsb1)    { "0" } else { "1" }
   Write-Host "[*] running patcher..."
   docker run --rm `
     -e LIBGPHOTO2_VERSION=$Libgphoto2 -e FIX_R5M2_TYPO=$fix -e SELFTEST=$st `
+    -e SWAP_USB1=$usb1 `
     -v "${In}:/in:ro" -v "${Out}:/out" `
     $Image
 

@@ -74,15 +74,41 @@ if [ "${REMOVE_EXIT_REMOTEMODE:-0}" = "1" ]; then
   grep -q 'skip exit-side remote-mode toggle' camlibs/ptp2/library.c && echo "[build] camera_exit SetRemoteMode toggle removed" || { echo "[build] ERROR: exit-remotemode patch did not match"; exit 1; }
 fi
 
+# --- usb1 iolib (port/USB transport) -----------------------------------------
+#  The stock on-disk usb1.so is a STANDARD libgphoto2 usb1 iolib built against
+#  libusb-1.0 (its DT_NEEDED lists libusb-1.0.so.0, which the device ships in
+#  /app/lib and pgphoto's port loader dlopen's at runtime — unlike ptp2, the
+#  port layer is NOT statically dispatched). So the ABI-faithful replacement is
+#  ALSO libusb-based, linked against the DEVICE's own libusb-1.0.so.0 soname
+#  (staged by patch.sh in $DEV). We enable it here and harvest usb1.so below.
+#
+#  The device libusb-1.0.so.0 itself NEEDs libudev.so.1 (which lives in the
+#  rootfs, not staged here). That only matters for configure's libusb_init
+#  link-test; `-Wl,--allow-shlib-undefined` lets that test pass. usb1.so never
+#  references any udev symbol, so udev does NOT enter usb1.so's own DT_NEEDED
+#  (verified against stock in patch.sh).
+#
+#  usb1 is built ONLY when patch.sh staged the device libusb in $DEV (i.e. the
+#  usb1 swap is enabled). Otherwise libusb-1.0 is explicitly turned OFF so the
+#  build stays ptp2-only and byte-identical to the legacy path — even though the
+#  image now ships libusb headers, they must not auto-enable a usb1 we can't link.
+CONF_ARGS=(--host="$XT" --prefix=/opt/lg
+  --disable-static --disable-nls --disable-rpath --disable-docs
+  --with-camlibs=ptp2 --without-libxml-2.0 --without-jpeg --without-libcurl
+  CC="${XT}-gcc" CXX="${XT}-g++" AR="${XT}-ar" RANLIB="${XT}-ranlib"
+  STRIP="${XT}-strip" LD="${XT}-ld"
+  LIBEXIF_CFLAGS="-I/usr/include" LIBEXIF_LIBS="-L$DEV -lexif")
+if [ -f "$DEV/libusb-1.0.so.0" ]; then
+  CONF_ARGS+=(CPPFLAGS="-I/usr/include -I/usr/include/libusb-1.0"
+    LDFLAGS="-L$DEV -Wl,-rpath-link,$DEV -Wl,--allow-shlib-undefined"
+    LIBUSB_CFLAGS="-I/usr/include/libusb-1.0" LIBUSB_LIBS="-L$DEV -lusb-1.0")
+else
+  CONF_ARGS+=(CPPFLAGS="-I/usr/include"
+    LDFLAGS="-L$DEV -Wl,-rpath-link,$DEV"
+    --with-libusb-1.0=no --with-libusb=no)
+fi
 if [ ! -f config.status ]; then
-  ./configure --host="$XT" --prefix=/opt/lg \
-    --disable-static --disable-nls --disable-rpath --disable-docs \
-    --with-camlibs=ptp2 --without-libxml-2.0 --without-jpeg --without-libcurl \
-    CC="${XT}-gcc" CXX="${XT}-g++" AR="${XT}-ar" RANLIB="${XT}-ranlib" \
-    STRIP="${XT}-strip" LD="${XT}-ld" \
-    CPPFLAGS="-I/usr/include" \
-    LDFLAGS="-L$DEV -Wl,-rpath-link,$DEV" \
-    LIBEXIF_CFLAGS="-I/usr/include" LIBEXIF_LIBS="-L$DEV -lexif" >/dev/null
+  ./configure "${CONF_ARGS[@]}" >/dev/null
 fi
 make -j"$(nproc)" >/tmp/make.log 2>&1 || { tail -40 /tmp/make.log; exit 1; }
 
@@ -90,3 +116,25 @@ BUILT="$(find camlibs -name ptp2.so | head -1)"
 [ -n "$BUILT" ] || { echo "[build] ptp2.so not produced"; exit 1; }
 cp "$BUILT" /work/out/ptp2.so
 echo "[build] ptp2.so built: $(stat -c %s /work/out/ptp2.so) bytes"
+
+# Harvest the usb1 iolib (from libgphoto2_port). Non-fatal here — patch.sh
+# requires it only when the usb1 swap is enabled, and verifies it fully.
+USB1_BUILT="$(find libgphoto2_port -name usb1.so | head -1)"
+if [ -n "$USB1_BUILT" ]; then
+  cp "$USB1_BUILT" /work/out/usb1.so
+  # libtool over-links libgphoto2_port.la's dependency chain, adding a spurious
+  # libltdl.so.7 to usb1.so's DT_NEEDED that the STOCK usb1.so does not carry.
+  # usb1.so references no lt_dl* symbol, so drop it to match stock's NEEDED set
+  # exactly (patch.sh's DT_NEEDED ⊆ stock check would otherwise abort).
+  if "$XT-readelf" -d /work/out/usb1.so 2>/dev/null | grep -q 'libltdl\.so\.7'; then
+    if "$XT-nm" -D --undefined-only /work/out/usb1.so | grep -qE '\blt_dl'; then
+      echo "[build] WARNING: usb1.so references lt_dl* — NOT stripping libltdl"
+    else
+      patchelf --remove-needed libltdl.so.7 /work/out/usb1.so
+      echo "[build] usb1.so: dropped over-linked libltdl.so.7 (unreferenced)"
+    fi
+  fi
+  echo "[build] usb1.so built: $(stat -c %s /work/out/usb1.so) bytes"
+else
+  echo "[build] NOTE: usb1.so not produced (libusb not detected) — usb1 swap unavailable"
+fi

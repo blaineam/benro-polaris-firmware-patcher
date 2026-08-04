@@ -51,21 +51,35 @@ If any of the above is unacceptable to you, **do not use this tool.**
 
 ## What it actually changes
 
-Exactly two files inside the firmware's `appfs`, nothing else:
+Up to **three** files inside the firmware's `appfs`, nothing else:
 
-1. **`/app/lib/libgphoto2/2.5.27.1/ptp2.so`** → freshly cross-compiled from the
-   libgphoto2 version you choose (default 2.5.34), built for the device's exact
-   ABI (32-bit ARM, soft-float EABI, glibc 2.24).
-2. **`/app/bin/pgphoto`** → **14 bytes** of edits, all reversible:
-   - **3 gates** (`mov r3,r0` → `mov r3,#0`) that make it load the driver above
+1. **`/app/lib/libgphoto2/2.5.27.1/ptp2.so`** (camera driver / camlib) → freshly
+   cross-compiled from the libgphoto2 version you choose (default 2.5.34), built
+   for the device's exact ABI (32-bit ARM, soft-float EABI, glibc 2.24).
+2. **`/app/lib/libgphoto2_port/0.12.0/usb1.so`** (USB transport / iolib) →
+   freshly cross-compiled from the **same** libgphoto2 release, ABI-matched and
+   linked against the device's **own** `libusb-1.0.so.0`, so its `DT_NEEDED` is
+   byte-for-byte the stock iolib's. This is the first step toward replacing the
+   whole libgphoto2 stack, not just the camlib. Skip it with `--no-usb1`
+   (`-NoUsb1`) to patch the camlib + `pgphoto` only.
+3. **`/app/bin/pgphoto`** → **14 bytes** of edits, all reversible:
+   - **3 gates** (`mov r3,r0` → `mov r3,#0`) that make it load the driver in (1)
      instead of its compiled-in 2.5.27 copy;
    - **`resetUsb` → return 0** (stops the cold-connect USB-reset re-enumeration
      storm);
    - **skip `ARG_LIST_FILES`** in `cameraInit` (stops the multi-minute full-card
      PTP file scan that blocks live view/capture at connect).
 
-All patch sites are discovered from `pgphoto`'s symbol table; the tool refuses
-to run if it can't find exactly what it expects.
+The `pgphoto` patch sites are discovered from its symbol table, and the usb1
+swap is gated behind full ABI/dependency/symbol verification (see below); the
+tool refuses to run if it can't find or verify exactly what it expects.
+
+> **Why `pgphoto` needs 3 gates for the camlib but the usb1 iolib needs none:**
+> Benro compiled the `ptp2` camlib *statically* into `pgphoto` and short-circuits
+> its dispatch, so the on-disk `ptp2.so` is a dead filename marker until the gates
+> re-route to it. The **port layer is different** — `pgphoto` `dlopen`s the iolibs
+> from disk with no short-circuit, so the stock `usb1.so` is live code and simply
+> replacing it takes effect. See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
 Every other file (kernel `uImage`, `rootfs.ubifs`, gimbal MCU blobs, U-Boot
 environment `config`, all other `appfs` files) is copied **byte-for-byte
@@ -120,6 +134,7 @@ Options (both launchers):
 | `--out` / `-Out` | `./out` | Output directory |
 | `--selftest` / `-SelfTest` | off | Emulate the driver load under qemu and confirm the R5 II registers |
 | `--no-fix-typo` / `-NoFixTypo` | off | Keep libgphoto2's upstream `EOS 5Rm2` model-name typo |
+| `--no-usb1` / `-NoUsb1` | off | Do **not** swap the `usb1` iolib; patch only the `ptp2` camlib + `pgphoto` |
 
 Output:
 - `out/FwPkt/` — the unpacked custom firmware
@@ -145,7 +160,12 @@ verifies the package (MD5), reboots, and U-Boot writes it.
   **cannot** test real USB capture (there's no camera in the container).
 - The tool aborts unless: the rebuilt driver's glibc symbol ceiling ≤ 2.24,
   every core symbol it imports is provided by the device's stock core, and the
-  `pgphoto` patch changes **exactly 3 bytes**.
+  `pgphoto` patch changes **exactly 14 bytes**.
+- For the **usb1** iolib it additionally aborts unless: soft-float EABI, glibc
+  ceiling ≤ 2.24, it exports the three iolib entry points the port loader looks
+  up, its `DT_NEEDED` is a **subset** of the stock `usb1.so`'s (no new shared
+  library), every core/port symbol it imports is in the device's port core, and
+  every `libusb_*` symbol it imports is in the device's own `libusb-1.0.so.0`.
 
 ## License
 

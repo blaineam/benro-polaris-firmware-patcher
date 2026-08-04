@@ -28,6 +28,9 @@ die(){ printf '\033[1;31m[abort]\033[0m %s\n' "$*" >&2; exit 1; }
 LIBGPHOTO2_VERSION="${LIBGPHOTO2_VERSION:-2.5.34}"
 FIX_R5M2_TYPO="${FIX_R5M2_TYPO:-1}"
 SELFTEST="${SELFTEST:-0}"
+# Also swap the usb1 port/iolib (USB transport) alongside the ptp2 camlib.
+# 1 = swap usb1.so too (default); 0 = ptp2-only (legacy behaviour).
+SWAP_USB1="${SWAP_USB1:-1}"
 XT=arm-linux-gnueabi
 W=/work
 mkdir -p "$W"
@@ -73,6 +76,21 @@ STOCK_PTP2="$(find "$APP/lib/libgphoto2" -name ptp2.so | head -1)"
 CAMLIB_DIR="$(dirname "$STOCK_PTP2")"
 log "camlib dir        : /app/lib/libgphoto2/$(basename "$CAMLIB_DIR")"
 
+# Locate the stock usb1 iolib (port/USB transport). Unlike ptp2, pgphoto's port
+# loader dlopen's this file at runtime (verified: gp_port_set_info →
+# lt_dlopenext + lt_dlsym("gp_port_library_operations"), no static short-circuit),
+# so replacing it actually takes effect. Its dir name encodes the port ABI rev.
+STOCK_USB1=""
+if [ "$SWAP_USB1" = "1" ]; then
+  STOCK_USB1="$(find "$APP/lib/libgphoto2_port" -name usb1.so | head -1)"
+  if [ -n "$STOCK_USB1" ]; then
+    log "iolib dir         : /app/lib/libgphoto2_port/$(basename "$(dirname "$STOCK_USB1")")"
+  else
+    warn "usb1.so not found inside appfs — disabling usb1 swap (ptp2-only)"
+    SWAP_USB1=0
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Analyse pgphoto: trampoline target + the three static-dispatch gates
 # ---------------------------------------------------------------------------
@@ -95,10 +113,19 @@ log "list-files gate   : $LISTFILES (skip full-card PTP scan at connect → read
 # 3. Stage the device's own link libraries (exact soname / ABI match)
 # ---------------------------------------------------------------------------
 DEV=/work/devlibs; rm -rf "$DEV"; mkdir -p "$DEV"
-for l in libexif.so.12 libltdl.so.7; do
+# libexif/libltdl: link targets for ptp2.  libusb-1.0: link target for usb1
+# (device's OWN soname/ABI, so the rebuilt usb1.so binds the exact libusb the
+# device ships).  Each staged with a plain `.so` symlink for -l<name>.
+STAGE_LIBS="libexif.so.12 libltdl.so.7"
+[ "$SWAP_USB1" = "1" ] && STAGE_LIBS="$STAGE_LIBS libusb-1.0.so.0"
+for l in $STAGE_LIBS; do
   s="$(find "$APP/lib" -name "${l}*" ! -name '*.la' | sort | tail -1)"
   [ -n "$s" ] && { cp -a "$s" "$DEV/$l"; ln -sf "$l" "$DEV/${l%.so.*}.so"; }
 done
+if [ "$SWAP_USB1" = "1" ] && [ ! -f "$DEV/libusb-1.0.so.0" ]; then
+  warn "device libusb-1.0.so.0 not found in appfs — disabling usb1 swap (ptp2-only)"
+  SWAP_USB1=0
+fi
 cp -a "$(find "$APP/lib" -name 'libgphoto2.so.6*'      ! -name '*.la'|sort|tail -1)" "$DEV/dev_libgphoto2.so.6"
 cp -a "$(find "$APP/lib" -name 'libgphoto2_port.so.12*' ! -name '*.la'|sort|tail -1)" "$DEV/dev_libgphoto2_port.so.12"
 
@@ -136,6 +163,44 @@ MISSING="$(comm -23 "$W/need.txt" "$W/prov.txt" || true)"
 [ -z "$MISSING" ] || die "rebuilt driver needs core symbols the device lacks:\n$MISSING"
 log "  all core symbols resolve against the device's stock core ✓"
 
+# ---------------------------------------------------------------------------
+# 5b. Verify the rebuilt usb1 iolib (fail-safe, same rigour as ptp2).
+#     Aborts on ANY mismatch so a bad usb1.so can never reach the firmware.
+# ---------------------------------------------------------------------------
+NEW_USB1="$W/out/usb1.so"
+if [ "$SWAP_USB1" = "1" ]; then
+  [ -f "$NEW_USB1" ] || die "usb1 swap requested but usb1.so was not built (libusb detection failed) — aborting"
+  log "verifying rebuilt usb1.so…"
+  UFLAGS="$($XT-readelf -h "$NEW_USB1" | awk -F: '/Flags/{print $2}')"
+  grep -q 'soft-float' <<<"$UFLAGS" || die "usb1 ABI mismatch: expected soft-float EABI, got:$UFLAGS"
+  UMAXGLIBC="$($XT-readelf --dyn-syms "$NEW_USB1" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)"
+  log "  ABI=$UFLAGS  glibc_ceiling=$UMAXGLIBC"
+  case "$UMAXGLIBC" in GLIBC_2.4|GLIBC_2.5|GLIBC_2.6|GLIBC_2.7|GLIBC_2.8|GLIBC_2.9|GLIBC_2.1[0-9]|GLIBC_2.2[0-4]) : ;;
+    *) die "usb1 glibc ceiling $UMAXGLIBC exceeds device glibc 2.24 — iolib would not load";; esac
+  # it must export the three iolib entry points the port loader lt_dlsym's.
+  for e in gp_port_library_type gp_port_library_list gp_port_library_operations; do
+    $XT-nm -D --defined-only "$NEW_USB1" | awk '{print $3}' | grep -qx "$e" \
+      || die "rebuilt usb1.so is missing iolib entry point '$e' — aborting"
+  done
+  # DT_NEEDED ⊆ the STOCK usb1.so's NEEDED: never introduce a shared library the
+  # stock iolib did not already depend on (and the device therefore provably has).
+  $XT-readelf -d "$STOCK_USB1" | awk -F'[][]' '/\(NEEDED\)/{print $2}' | sort -u >"$W/usb1_stock_needed.txt"
+  $XT-readelf -d "$NEW_USB1"   | awk -F'[][]' '/\(NEEDED\)/{print $2}' | sort -u >"$W/usb1_new_needed.txt"
+  EXTRA="$(comm -23 "$W/usb1_new_needed.txt" "$W/usb1_stock_needed.txt" || true)"
+  [ -z "$EXTRA" ] || die "rebuilt usb1.so pulls in libs the stock usb1.so did not:\n$EXTRA"
+  log "  DT_NEEDED ⊆ stock usb1.so ($(tr '\n' ' ' <"$W/usb1_new_needed.txt")) ✓"
+  # every gp_/gpi_ (core/port) symbol it imports must be provided by the device
+  # port core; every libusb_* import must be provided by the device's libusb.
+  $XT-nm -D --undefined-only "$NEW_USB1" | awk '{print $2}' | grep -E '^(gp_|gpi_)' | sort -u >"$W/usb1_need.txt"
+  MISSING_U="$(comm -23 "$W/usb1_need.txt" "$W/prov.txt" || true)"
+  [ -z "$MISSING_U" ] || die "rebuilt usb1.so needs core/port symbols the device lacks:\n$MISSING_U"
+  $XT-nm -D --undefined-only "$NEW_USB1" | awk '{print $2}' | grep -iE '^libusb_' | sort -u >"$W/usb1_needusb.txt"
+  $XT-nm -D --defined-only "$DEV/libusb-1.0.so.0" | awk '{print $3}' | sort -u >"$W/usb1_provusb.txt"
+  MISSING_LU="$(comm -23 "$W/usb1_needusb.txt" "$W/usb1_provusb.txt" || true)"
+  [ -z "$MISSING_LU" ] || die "rebuilt usb1.so needs libusb symbols the device's libusb-1.0 lacks:\n$MISSING_LU"
+  log "  all core/port + libusb symbols resolve on-device ✓ ($(wc -l <"$W/usb1_needusb.txt"|tr -d ' ') libusb imports)"
+fi
+
 if [ "$SELFTEST" = "1" ] && command -v qemu-arm-static >/dev/null 2>&1; then
   /opt/patcher/selftest.sh "$APP" "$NEW_PTP2" "$DEV" || warn "selftest reported an issue (non-fatal)"
 fi
@@ -151,12 +216,18 @@ DIFFB="$( { cmp -l "$PG" "$W/pgphoto.patched" || true; } | wc -l | tr -d ' ')"
 log "  pgphoto patched: 14 bytes (gates + resetUsb + list-files skip) ✓"
 
 # ---------------------------------------------------------------------------
-# 7. Swap the two files into the tree (preserve original owner/mode)
+# 7. Swap the rebuilt files into the tree (preserve original owner/mode)
+#    ptp2.so (camlib) + pgphoto (14-byte patch) always; usb1.so (iolib) when enabled.
 # ---------------------------------------------------------------------------
 O_UID="$(stat -c %u "$STOCK_PTP2")"; O_GID="$(stat -c %g "$STOCK_PTP2")"; O_MODE="$(stat -c %a "$STOCK_PTP2")"
 install -m "$O_MODE" -o "$O_UID" -g "$O_GID" "$NEW_PTP2"            "$STOCK_PTP2"
 P_UID="$(stat -c %u "$PG")"; P_GID="$(stat -c %g "$PG")"; P_MODE="$(stat -c %a "$PG")"
 install -m "$P_MODE" -o "$P_UID" -g "$P_GID" "$W/pgphoto.patched"  "$PG"
+if [ "$SWAP_USB1" = "1" ]; then
+  U_UID="$(stat -c %u "$STOCK_USB1")"; U_GID="$(stat -c %g "$STOCK_USB1")"; U_MODE="$(stat -c %a "$STOCK_USB1")"
+  install -m "$U_MODE" -o "$U_UID" -g "$U_GID" "$NEW_USB1"          "$STOCK_USB1"
+  log "swapped usb1 iolib: /app/lib/libgphoto2_port/$(basename "$(dirname "$STOCK_USB1")")/usb1.so"
+fi
 
 # ---------------------------------------------------------------------------
 # 8. Repack appfs (geometry read from the stock image) + regenerate firmwareInfo

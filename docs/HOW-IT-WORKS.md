@@ -10,7 +10,11 @@ NAND layout (`mtdparts`): `u-boot.bin`, `factoryParam`, `userParam`, `uImage`,
 `rootfs.ubifs` (40M), `appfs.ubifs` (81M). Camera control lives in the **appfs**
 (`/app`).
 
-## Why swapping the `.so` alone does nothing
+## Why swapping the camlib `.so` alone does nothing
+
+(This applies to the **camlib** — `ptp2.so`. The **port iolib** — `usb1.so` — is
+different: `pgphoto` `dlopen`s it, so replacing it *does* take effect. See
+*Also swapping the `usb1` iolib* below.)
 
 Camera control is `/app/bin/pgphoto` (supervised by `polestar_app`). It does
 **not** dynamically load the on-disk `ptp2.so`; it has libgphoto2's core **and**
@@ -99,6 +103,82 @@ the new `ptp2.so` so the symbol resolves to pgphoto's own implementation,
 operating on the running core's own filesystem structures. Zero struct-layout
 risk. (See `container/polaris_shim.c.in`.)
 
+## Also swapping the `usb1` iolib (USB transport)
+
+The `ptp2` camlib is only the *driver*; the bytes actually move over USB through
+libgphoto2's **port** layer and its `usb1` iolib
+(`/app/lib/libgphoto2_port/0.12.0/usb1.so`). Updating that too is the first step
+toward replacing the whole stack, not just the camlib.
+
+### The port layer is `dlopen`ed — unlike the camlib
+
+The camlib needs three `pgphoto` gates because Benro compiled `ptp2` **statically**
+into `pgphoto` and short-circuits its dispatch (`strstr(name,"ptp2")` → static
+`camera_init`), so the on-disk `ptp2.so` is a dead marker until the gates re-route
+to `lt_dlopenext`. The **port layer has no such short-circuit.** In the stock
+binary:
+
+```c
+// gp_port_info_list_load  → lt_dlforeachfile(IOLIBS dir, foreach_func)
+// foreach_func            → lt_dlopenext(iolib); lt_dlsym("gp_port_library_type"/"_list")
+// gp_port_set_info        → lt_dlopenext(iolib); lt_dlsym("gp_port_library_operations")
+```
+
+`pgphoto` unconditionally `dlopen`s every iolib in the directory and binds the
+selected one's `gp_port_library_operations`. (Confirmed by disassembly: those
+call sites carry no `strstr`/`strcmp` guard, and `pgphoto` does **not** define
+`gp_port_library_type/list/operations` itself — they come from the loaded `.so`.)
+So the stock `usb1.so` is **live code**, and simply replacing the file takes
+effect — **no `pgphoto` edit is needed for the iolib.**
+
+### It's libusb-based, and the device has libusb
+
+The stock `usb1.so` is an ordinary libgphoto2 `usb1` iolib built against
+**libusb-1.0**: its `DT_NEEDED` is `libgphoto2_port.so.12`, `libusb-1.0.so.0`,
+`libpthread.so.0`, `libc.so.6`, and it imports the `libusb_*` API. The device
+ships `libusb-1.0.so.0` in `/app/lib`, which is what `pgphoto`'s loader resolves
+at `dlopen` time.
+
+> A note on a red herring: `pgphoto` *itself* has **zero** `libusb` symbols and no
+> `libusb`/`udev` in its own `DT_NEEDED` — it reaches for raw `USBDEVFS` ioctls
+> only for Benro's own `resetUsb`/`scanUsb` helpers. That is *not* evidence that
+> the transport is raw-usbfs: `libusb` is a dependency of the **`dlopen`ed**
+> `usb1.so`, not of `pgphoto`, so it never appears in `pgphoto`'s symbol table.
+> The rebuilt `usb1.so` therefore matches stock: **libusb-based, not raw usbfs.**
+
+### The rebuild
+
+From the **same** libgphoto2 release as the camlib, the tool builds
+`libgphoto2_port`'s `usb1` iolib (`--with-libusb-1.0`), ABI-matched (soft-float
+EABI, glibc-2.24 ceiling) and linked against the **device's own**
+`libusb-1.0.so.0` soname (staged from the appfs), so it binds the exact libusb
+the device runs. libtool over-links a spurious `libltdl.so.7` into the iolib
+(via the port library's dependency chain); since `usb1.so` references no `lt_dl*`
+symbol, the tool drops that `DT_NEEDED` entry so the result matches stock's
+dependency set **exactly**.
+
+The device's `libusb-1.0.so.0` transitively needs `libudev.so.1` (in the rootfs).
+That only matters for `configure`'s `libusb_init` link-test, which
+`-Wl,--allow-shlib-undefined` satisfies; `usb1.so` never references a udev symbol,
+so **udev does not enter `usb1.so`'s `DT_NEEDED`** — verified against stock.
+
+### Fail-safe verification (aborts on any mismatch)
+
+Before the swap the tool requires the rebuilt `usb1.so` to be soft-float EABI with
+a glibc ceiling ≤ 2.24, to export `gp_port_library_type`/`_list`/`_operations`, to
+have a `DT_NEEDED` that is a **subset** of the stock `usb1.so`'s (no new shared
+library), to import only core/port symbols the device's `libgphoto2_port.so.12` /
+`libgphoto2.so.6` provide, and to import only `libusb_*` symbols the device's own
+`libusb-1.0.so.0` defines. Any failure aborts before anything is written.
+
+### ABI note (2.5.34 iolib ↔ 2.5.27 port core)
+
+Like the camlib, the rebuilt iolib is a newer libgphoto2 talking to `pgphoto`'s
+compiled-in 2.5.27 **port core** through the `GPPortOperations` table and the
+`gp_port_*` API. That interface is ABI-stable across all of 2.5.x (iolib version
+`0.12.x`, soname `.12`), and the symbol-resolution check above proves every call
+binds — the same guarantee that makes the camlib swap safe.
+
 ## Repacking
 
 `appfs` is extracted with `ubireader -k` (preserving uid/gid/mode/symlinks),
@@ -127,4 +207,11 @@ recoverability, not a guarantee; flash at your own risk.**
 - Aborts if the driver imports a **core symbol the device lacks**.
 - Aborts if the `pgphoto` patch touches anything other than **14 bytes**
   (3 gates + `resetUsb` return-0 + `ARG_LIST_FILES` skip).
+- For the **usb1 iolib** (when enabled): aborts unless it is soft-float EABI with
+  glibc ceiling ≤ 2.24, exports the three iolib entry points, its `DT_NEEDED` ⊆
+  the stock `usb1.so`'s, and every core/port and `libusb_*` symbol it imports is
+  provided by the device's port core / own `libusb-1.0.so.0`.
 - Leaves kernel, rootfs, gimbal blobs, and U-Boot env byte-identical.
+- Touches **at most three** appfs files (`ptp2.so`, `usb1.so`, `pgphoto`); every
+  other appfs file — including all other iolibs (`disk`/`serial`/`ptpip`/… ) — is
+  byte-identical to stock.

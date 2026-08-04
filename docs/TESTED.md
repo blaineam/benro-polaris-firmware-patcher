@@ -50,10 +50,35 @@ min_io 2048   LEB 126976   max_leb_cnt 660   fanout 8   compr lzo
 PEB 131072    vid_hdr_offset 2048   data_offset 4096   image_seq 958962934
 ```
 
+## `usb1` iolib swap (FwVer 4.0.0.32) — device-verified
+
+The USB transport iolib is swapped alongside the camlib:
+
+| | |
+|---|---|
+| File | `/app/lib/libgphoto2_port/0.12.0/usb1.so` |
+| Loaded by | `pgphoto` at runtime via `lt_dlopenext` (**not** statically dispatched — no gate needed) |
+| Stock `usb1.so` | libusb-based; `DT_NEEDED` = `libgphoto2_port.so.12`, `libusb-1.0.so.0`, `libpthread.so.0`, `libc.so.6`; glibc ceiling `GLIBC_2.4`; 85756 B |
+| Rebuilt `usb1.so` | libgphoto2 2.5.34 `usb1`, `--with-libusb-1.0`, linked against the device's own `libusb-1.0.so.0`; soft-float EABI; glibc ceiling `GLIBC_2.4`; **identical `DT_NEEDED`**; ~86028 B |
+
+Device libs the rebuilt iolib binds against (present in stock appfs `/app/lib`):
+`libgphoto2_port.so.12`, `libgphoto2.so.6`, `libusb-1.0.so.0`.
+
 ## ✅ Verified (offline / in emulation)
 
 - Rebuilt `ptp2.so` is **soft-float EABI5**, **glibc ceiling 2.4/2.7**
   (device has 2.24), sonames/`DT_NEEDED` all satisfiable on-device.
+- Rebuilt `usb1.so` is **soft-float EABI5**, **glibc ceiling 2.4**, exports the
+  three iolib entry points (`gp_port_library_type`/`_list`/`_operations`), its
+  `DT_NEEDED` is **identical to the stock `usb1.so`** (no new shared library),
+  all 10 core/port symbols it imports resolve against the device's
+  `libgphoto2_port.so.12` / `libgphoto2.so.6`, and all **29** `libusb_*` symbols
+  resolve against the device's own `libusb-1.0.so.0`.
+- With usb1 enabled, the repacked appfs differs from stock in **exactly three**
+  files (`pgphoto`, `ptp2.so`, `usb1.so`); every other iolib
+  (`disk`/`serial`/`ptpip`/`usbscsi`/`usbdiskdirect`) is byte-identical.
+- `ptp2.so` is byte-identical whether or not usb1 is swapped, and `--no-usb1`
+  reproduces the original two-file (`pgphoto` + `ptp2.so`) change.
 - **dlopen succeeds** against the device's *own* stock 2.5.27 core (qemu-arm):
   every symbol resolves; **all 2467 models register**.
 - **Canon EOS R5 Mark II registers**: USB `04a9:3314`, `ops=0x39`
@@ -79,6 +104,10 @@ Confirmed by the maintainer on a physical R5 Mark II:
 - The camera is **ready in seconds** on a cold connect (vs. a ~3-minute stall
   before the `resetUsb` + list-files edits), even with a card full of 8K video.
 - Survives reboot (UBIFS space_fixup set).
+- **The `usb1` iolib swap (the `port + camlib` build, `usb1` on by default)** is
+  flash-verified end-to-end: detection, live view, controls, and capture all work
+  and **survive a reboot**. The rebuilt 2.5.34 `usb1` (port 0.12.2) coexists fine
+  with `pgphoto`'s compiled-in 0.12.0 port core in practice.
 
 ## ❌ NOT tested
 
