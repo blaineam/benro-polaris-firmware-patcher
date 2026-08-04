@@ -1,0 +1,19 @@
+
+/* ---- polaris-patcher trampoline shim -------------------------------------
+ * The Benro Polaris on-disk libgphoto2.so.6 predates
+ * gp_filesystem_set_info_dirty().  The stock `pgphoto` binary, however,
+ * statically links a libgphoto2 core that DOES define it, at a fixed address
+ * (pgphoto is ET_EXEC, so the address is stable; the patcher discovers it via
+ * the symbol table and injects it below).  We resolve the symbol against that
+ * real implementation so this driver operates on the running core's own
+ * CameraFilesystem structures — identical layout, zero risk.  The address is
+ * only valid for the exact pgphoto this appfs ships; the two are packaged
+ * together and pgphoto is only NOP-patched (never relinked), so it never moves.
+ * ------------------------------------------------------------------------- */
+int gp_filesystem_set_info_dirty (CameraFilesystem *fs, const char *folder,
+                                  const char *filename, GPContext *context)
+{
+    int (*real)(CameraFilesystem *, const char *, const char *, GPContext *)
+        = (int (*)(CameraFilesystem *, const char *, const char *, GPContext *))@TRAMP@u;
+    return real (fs, folder, filename, context);
+}

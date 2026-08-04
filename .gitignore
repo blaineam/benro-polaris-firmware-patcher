@@ -1,0 +1,32 @@
+# NEVER commit firmware or firmware-derived blobs. This project distributes NO firmware.
+# Bring your own FwPkt; keep it out of the repo.
+FwPkt/
+FwPkt*.zip
+*.ubifs
+*.bin
+uImage
+config
+firmwareInfo
+crcInfo
+
+# Build inputs/outputs
+in/
+out/
+work/
+build/
+*.so
+pgphoto*
+ptp2*
+appfs*
+*.img
+
+# Toolchain source cache
+src/libgphoto2-*/
+*.tar.xz
+*.tar.bz2
+*.tar.gz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
