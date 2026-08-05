@@ -11,9 +11,12 @@
 #     --fwpkt PATH         stock FwPkt folder (has firmwareInfo) or FwPkt.zip  [required]
 #     --libgphoto2 VER     libgphoto2 release to build            (default 2.5.34)
 #     --out DIR            output directory                       (default ./out)
+#     --ptp2-only          conservative fallback: keep the stock 2.5.27 core, swap
+#                          only the ptp2 camlib + usb1 iolib (+ 14-byte pgphoto patch).
+#                          DEFAULT (no flag) is the full-libgphoto2 stack swap.
 #     --selftest           qemu-emulate the driver load (R5 II registration)
 #     --no-fix-typo        do NOT correct the upstream "EOS 5Rm2" model typo
-#     --no-usb1            do NOT swap the usb1 iolib; patch ptp2 + pgphoto only
+#     --no-usb1            (ptp2-only) do NOT swap the usb1 iolib; patch ptp2 + pgphoto only
 #     --image NAME         docker image tag              (default polaris-patcher)
 #
 #  READ THE README AND DISCLAIMERS FIRST.  Tested ONLY against FwVer 4.0.0.32
@@ -22,18 +25,19 @@
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-FWPKT=""; VER="2.5.34"; OUT="$HERE/out"; SELFTEST=0; FIXTYPO=1; SWAPUSB1=1; IMG="polaris-patcher"
+FWPKT=""; VER="2.5.34"; OUT="$HERE/out"; SELFTEST=0; FIXTYPO=1; SWAPUSB1=1; IMG="polaris-patcher"; MODE="full"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --fwpkt) FWPKT="$2"; shift 2;;
     --libgphoto2) VER="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
+    --ptp2-only) MODE="ptp2only"; shift;;
     --selftest) SELFTEST=1; shift;;
     --no-fix-typo) FIXTYPO=0; shift;;
     --no-usb1) SWAPUSB1=0; shift;;
     --image) IMG="$2"; shift 2;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 1;;
   esac
 done
@@ -65,8 +69,9 @@ mkdir -p "$OUT"
 echo "[*] building docker image '$IMG' (first run only)…"
 docker build -q -t "$IMG" -f "$HERE/docker/Dockerfile" "$HERE" >/dev/null
 
-echo "[*] running patcher…"
+echo "[*] running patcher (mode: $MODE)…"
 docker run --rm \
+  -e MODE="$MODE" \
   -e LIBGPHOTO2_VERSION="$VER" -e FIX_R5M2_TYPO="$FIXTYPO" -e SELFTEST="$SELFTEST" \
   -e SWAP_USB1="$SWAPUSB1" \
   -v "$IN":/in:ro -v "$OUT":/out \

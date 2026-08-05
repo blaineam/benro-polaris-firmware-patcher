@@ -10,9 +10,12 @@
     -FwPkt PATH          stock FwPkt folder (has firmwareInfo) or FwPkt.zip  [required]
     -Libgphoto2 VER      libgphoto2 release to build            (default 2.5.34)
     -Out DIR             output directory                       (default .\out)
+    -Ptp2Only            conservative fallback: keep the stock 2.5.27 core, swap only
+                         the ptp2 camlib + usb1 iolib (+ 14-byte pgphoto patch).
+                         DEFAULT (no flag) is the full-libgphoto2 stack swap.
     -SelfTest            qemu-emulate the driver load (R5 II registration)
     -NoFixTypo           do NOT correct the upstream "EOS 5Rm2" model typo
-    -NoUsb1              do NOT swap the usb1 iolib; patch ptp2 + pgphoto only
+    -NoUsb1              (ptp2-only) do NOT swap the usb1 iolib; patch ptp2 + pgphoto only
     -Image NAME          docker image tag              (default polaris-patcher)
 
   READ THE README AND DISCLAIMERS FIRST. Tested ONLY against FwVer 4.0.0.32
@@ -22,6 +25,7 @@ param(
   [Parameter(Mandatory=$true)][string]$FwPkt,
   [string]$Libgphoto2 = "2.5.34",
   [string]$Out = "",
+  [switch]$Ptp2Only,
   [switch]$SelfTest,
   [switch]$NoFixTypo,
   [switch]$NoUsb1,
@@ -56,8 +60,10 @@ try {
   $fix  = if ($NoFixTypo) { "0" } else { "1" }
   $st   = if ($SelfTest)  { "1" } else { "0" }
   $usb1 = if ($NoUsb1)    { "0" } else { "1" }
-  Write-Host "[*] running patcher..."
+  $mode = if ($Ptp2Only)  { "ptp2only" } else { "full" }
+  Write-Host "[*] running patcher (mode: $mode)..."
   docker run --rm `
+    -e MODE=$mode `
     -e LIBGPHOTO2_VERSION=$Libgphoto2 -e FIX_R5M2_TYPO=$fix -e SELFTEST=$st `
     -e SWAP_USB1=$usb1 `
     -v "${In}:/in:ro" -v "${Out}:/out" `

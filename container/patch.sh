@@ -28,9 +28,19 @@ die(){ printf '\033[1;31m[abort]\033[0m %s\n' "$*" >&2; exit 1; }
 LIBGPHOTO2_VERSION="${LIBGPHOTO2_VERSION:-2.5.34}"
 FIX_R5M2_TYPO="${FIX_R5M2_TYPO:-1}"
 SELFTEST="${SELFTEST:-0}"
+# Mode:
+#   full     = full-libgphoto2 swap (DEFAULT, hardware-validated): replace the
+#              WHOLE 2.5.34 stack (core + port + ptp2 + usb1) via the on-disk
+#              trampoline loader, over the reliability-patched pgphoto base.
+#   ptp2only = conservative legacy swap: keep pgphoto's compiled-in 2.5.27 core,
+#              swap only the ptp2 camlib + usb1 iolib and apply the 14-byte patch.
+MODE="${MODE:-full}"
+case "$MODE" in full|ptp2only) : ;; *) echo "invalid MODE=$MODE (full|ptp2only)"; exit 1;; esac
 # Also swap the usb1 port/iolib (USB transport) alongside the ptp2 camlib.
-# 1 = swap usb1.so too (default); 0 = ptp2-only (legacy behaviour).
+# 1 = swap usb1.so too (default); 0 = ptp2-only camlib swap (legacy).
 SWAP_USB1="${SWAP_USB1:-1}"
+# Full mode ALWAYS needs usb1 (the fresh 2.5.34 port dlopens usb1 from IOLIBS).
+[ "$MODE" = "full" ] && SWAP_USB1=1
 XT=arm-linux-gnueabi
 W=/work
 mkdir -p "$W"
@@ -137,14 +147,29 @@ cp -a "$(find "$APP/lib" -name 'libgphoto2_port.so.12*' ! -name '*.la'|sort|tail
 #    (COLD_START_TIMEOUT_MS is intentionally left at the stock 1.5s — a longer
 #    timeout makes camera_init exceed polestar_app's ~5s watchdog and crash-loops.)
 # ---------------------------------------------------------------------------
-export REMOVE_KEEP_DEVICE_ON=1
-export REMOVE_EXIT_REMOTEMODE=1
-/opt/patcher/build_ptp2.sh "$LIBGPHOTO2_VERSION" "$TRAMP_ADDR" "$FIX_R5M2_TYPO"
+if [ "$MODE" = "ptp2only" ]; then
+  # Legacy path: rebuilt ptp2 talks to pgphoto's compiled-in 2.5.27 core, so the
+  # 2.5.34 EOS-init additions are dropped for Polaris reliability.
+  export REMOVE_KEEP_DEVICE_ON=1
+  export REMOVE_EXIT_REMOTEMODE=1
+  /opt/patcher/build_ptp2.sh "$LIBGPHOTO2_VERSION" "$TRAMP_ADDR" "$FIX_R5M2_TYPO"
+else
+  # Full-stack path: build the whole 2.5.34 stack (core+port+ptp2+usb1). ptp2 runs
+  # against the FRESH 2.5.34 core here, so the upstream EOS-init behaviour is kept
+  # (the cold-start storm is handled by the pgphoto reliability base — resetUsb +
+  # list-files — not by the driver). No trampoline shim (new core has the symbol).
+  /opt/patcher/build_fullstack.sh "$LIBGPHOTO2_VERSION" "$TRAMP_ADDR" "$FIX_R5M2_TYPO"
+fi
 NEW_PTP2="$W/out/ptp2.so"
+NEW_CORE="$W/out/libgphoto2.so.6"; NEW_PORT="$W/out/libgphoto2_port.so.12"
 [ -f "$NEW_PTP2" ] || die "ptp2.so build failed"
 
 # ---------------------------------------------------------------------------
-# 5. Verify the rebuilt driver against the DEVICE'S OWN 2.5.27 core
+# 5. Verify the rebuilt driver resolves against the CORE IT WILL RUN AGAINST.
+#    ptp2only: pgphoto's own compiled-in 2.5.27 core (device core + pgphoto).
+#    full    : the FRESH 2.5.34 core/port this run built (which the on-disk loader
+#              dlopens) -- so newer symbols like gp_filesystem_set_info_dirty
+#              resolve there, NOT against the older device core.
 # ---------------------------------------------------------------------------
 log "verifying rebuilt ptp2.so…"
 FLAGS="$($XT-readelf -h "$NEW_PTP2" | awk -F: '/Flags/{print $2}')"
@@ -153,15 +178,23 @@ MAXGLIBC="$($XT-readelf --dyn-syms "$NEW_PTP2" | grep -oE 'GLIBC_[0-9.]+' | sort
 log "  ABI=$FLAGS  glibc_ceiling=$MAXGLIBC"
 case "$MAXGLIBC" in GLIBC_2.4|GLIBC_2.5|GLIBC_2.6|GLIBC_2.7|GLIBC_2.8|GLIBC_2.9|GLIBC_2.1[0-9]|GLIBC_2.2[0-4]) : ;;
   *) die "glibc ceiling $MAXGLIBC exceeds device glibc 2.24 — driver would not load";; esac
-# every core symbol the driver imports must be provided by the device core / pgphoto
-$XT-nm -D --defined-only "$DEV/dev_libgphoto2.so.6"        | awk '{print $3}'  >"$W/prov.txt"
-$XT-nm -D --defined-only "$DEV/dev_libgphoto2_port.so.12"  | awk '{print $3}' >>"$W/prov.txt"
+# Build the symbol-provider set for the core the driver will bind against.
+if [ "$MODE" = "full" ]; then
+  [ -f "$NEW_CORE" ] && [ -f "$NEW_PORT" ] || die "full mode: core/port not built"
+  $XT-nm -D --defined-only "$NEW_CORE" | awk '{print $3}'  >"$W/prov.txt"
+  $XT-nm -D --defined-only "$NEW_PORT" | awk '{print $3}' >>"$W/prov.txt"
+  PROV_DESC="the freshly-built 2.5.34 core/port"
+else
+  $XT-nm -D --defined-only "$DEV/dev_libgphoto2.so.6"       | awk '{print $3}'  >"$W/prov.txt"
+  $XT-nm -D --defined-only "$DEV/dev_libgphoto2_port.so.12" | awk '{print $3}' >>"$W/prov.txt"
+  PROV_DESC="the device's stock 2.5.27 core"
+fi
 $XT-nm -D --defined-only "$PG"                             | awk '{print $3}' >>"$W/prov.txt"
 sort -u "$W/prov.txt" -o "$W/prov.txt"
 $XT-nm -D --undefined-only "$NEW_PTP2" | awk '{print $2}' | grep -E '^(gp_|gpi_)' | sort -u >"$W/need.txt"
 MISSING="$(comm -23 "$W/need.txt" "$W/prov.txt" || true)"
-[ -z "$MISSING" ] || die "rebuilt driver needs core symbols the device lacks:\n$MISSING"
-log "  all core symbols resolve against the device's stock core ✓"
+[ -z "$MISSING" ] || die "rebuilt driver needs core symbols missing from the target core:\n$MISSING"
+log "  all core symbols resolve against $PROV_DESC ✓"
 
 # ---------------------------------------------------------------------------
 # 5b. Verify the rebuilt usb1 iolib (fail-safe, same rigour as ptp2).
@@ -201,32 +234,128 @@ if [ "$SWAP_USB1" = "1" ]; then
   log "  all core/port + libusb symbols resolve on-device ✓ ($(wc -l <"$W/usb1_needusb.txt"|tr -d ' ') libusb imports)"
 fi
 
-if [ "$SELFTEST" = "1" ] && command -v qemu-arm-static >/dev/null 2>&1; then
-  /opt/patcher/selftest.sh "$APP" "$NEW_PTP2" "$DEV" || warn "selftest reported an issue (non-fatal)"
+# ---------------------------------------------------------------------------
+# 5c. FULL mode: verify the freshly-built core + port (fail-safe, same rigour).
+# ---------------------------------------------------------------------------
+NEW_CORE="$W/out/libgphoto2.so.6"; NEW_PORT="$W/out/libgphoto2_port.so.12"
+if [ "$MODE" = "full" ]; then
+  [ -f "$NEW_CORE" ] || die "full mode: libgphoto2.so.6 was not built"
+  [ -f "$NEW_PORT" ] || die "full mode: libgphoto2_port.so.12 was not built"
+  log "verifying rebuilt core + port…"
+  for L in "$NEW_CORE" "$NEW_PORT"; do
+    CFLAGS_="$($XT-readelf -h "$L" | awk -F: '/Flags/{print $2}')"
+    grep -q 'soft-float' <<<"$CFLAGS_" || die "core/port ABI mismatch (not soft-float): $L$CFLAGS_"
+    CMAX="$($XT-readelf --dyn-syms "$L" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)"
+    case "$CMAX" in GLIBC_2.4|GLIBC_2.5|GLIBC_2.6|GLIBC_2.7|GLIBC_2.8|GLIBC_2.9|GLIBC_2.1[0-9]|GLIBC_2.2[0-4]) : ;;
+      *) die "$L glibc ceiling $CMAX exceeds device glibc 2.24";; esac
+  done
+  # Every one of the 64 boundary symbols the loader dlsym's must be exported by the
+  # new core or port, else the loader would leave that slot at the abort stub.
+  $XT-nm -D --defined-only "$NEW_CORE" | awk '{print $3}'  >"$W/newexp.txt"
+  $XT-nm -D --defined-only "$NEW_PORT" | awk '{print $3}' >>"$W/newexp.txt"
+  sort -u "$W/newexp.txt" -o "$W/newexp.txt"
+  MISSING_B="$(comm -23 <(python3 -c "import sys;sys.path.insert(0,'/opt/patcher');import stage2_patch as s;print('\n'.join(sorted(s.BOUNDARY)))") "$W/newexp.txt" || true)"
+  [ -z "$MISSING_B" ] || die "new core/port do not export boundary symbols:\n$MISSING_B"
+  log "  core/port soft-float, glibc≤2.24, all 64 boundary symbols exported ✓"
 fi
 
-# ---------------------------------------------------------------------------
-# 6. Patch pgphoto (three 1-byte edits: mov r3,r0 -> mov r3,#0)
-# ---------------------------------------------------------------------------
-log "patching pgphoto (3 gates + resetUsb return-0 + list-files skip)…"
-python3 /opt/patcher/analyze_pgphoto.py "$PG" --apply "$W/pgphoto.patched" >/dev/null
-DIFFB="$( { cmp -l "$PG" "$W/pgphoto.patched" || true; } | wc -l | tr -d ' ')"
-# 14 = 3 (gates, 1 byte each) + 7 (resetUsb: mov r0,#0 + bx lr) + 4 (list-files bl → nop)
-[ "$DIFFB" = "14" ] || die "pgphoto patch changed $DIFFB bytes (expected 14) — aborting"
-log "  pgphoto patched: 14 bytes (gates + resetUsb + list-files skip) ✓"
+if [ "$SELFTEST" = "1" ] && command -v qemu-arm-static >/dev/null 2>&1; then
+  if [ "$MODE" = "ptp2only" ]; then
+    /opt/patcher/selftest.sh "$APP" "$NEW_PTP2" "$DEV" || warn "selftest reported an issue (non-fatal)"
+  else
+    warn "selftest skipped in full mode (it emulates ptp2 against the device's 2.5.27"
+    warn "core; full mode runs ptp2 against the fresh 2.5.34 core it just built)."
+  fi
+fi
 
-# ---------------------------------------------------------------------------
-# 7. Swap the rebuilt files into the tree (preserve original owner/mode)
-#    ptp2.so (camlib) + pgphoto (14-byte patch) always; usb1.so (iolib) when enabled.
-# ---------------------------------------------------------------------------
-O_UID="$(stat -c %u "$STOCK_PTP2")"; O_GID="$(stat -c %g "$STOCK_PTP2")"; O_MODE="$(stat -c %a "$STOCK_PTP2")"
-install -m "$O_MODE" -o "$O_UID" -g "$O_GID" "$NEW_PTP2"            "$STOCK_PTP2"
 P_UID="$(stat -c %u "$PG")"; P_GID="$(stat -c %g "$PG")"; P_MODE="$(stat -c %a "$PG")"
-install -m "$P_MODE" -o "$P_UID" -g "$P_GID" "$W/pgphoto.patched"  "$PG"
-if [ "$SWAP_USB1" = "1" ]; then
-  U_UID="$(stat -c %u "$STOCK_USB1")"; U_GID="$(stat -c %g "$STOCK_USB1")"; U_MODE="$(stat -c %a "$STOCK_USB1")"
-  install -m "$U_MODE" -o "$U_UID" -g "$U_GID" "$NEW_USB1"          "$STOCK_USB1"
-  log "swapped usb1 iolib: /app/lib/libgphoto2_port/$(basename "$(dirname "$STOCK_USB1")")/usb1.so"
+if [ "$MODE" = "ptp2only" ]; then
+  # -------------------------------------------------------------------------
+  # 6 (ptp2only). Patch pgphoto (14 bytes) and swap ptp2/usb1 in place.
+  # -------------------------------------------------------------------------
+  log "patching pgphoto (3 gates + resetUsb return-0 + list-files skip)…"
+  python3 /opt/patcher/analyze_pgphoto.py "$PG" --apply "$W/pgphoto.patched" >/dev/null
+  DIFFB="$( { cmp -l "$PG" "$W/pgphoto.patched" || true; } | wc -l | tr -d ' ')"
+  # 14 = 3 (gates) + 7 (resetUsb: mov r0,#0 + bx lr) + 4 (list-files bl → nop)
+  [ "$DIFFB" = "14" ] || die "pgphoto patch changed $DIFFB bytes (expected 14) — aborting"
+  log "  pgphoto patched: 14 bytes (gates + resetUsb + list-files skip) ✓"
+
+  O_UID="$(stat -c %u "$STOCK_PTP2")"; O_GID="$(stat -c %g "$STOCK_PTP2")"; O_MODE="$(stat -c %a "$STOCK_PTP2")"
+  install -m "$O_MODE" -o "$O_UID" -g "$O_GID" "$NEW_PTP2"           "$STOCK_PTP2"
+  install -m "$P_MODE" -o "$P_UID" -g "$P_GID" "$W/pgphoto.patched" "$PG"
+  if [ "$SWAP_USB1" = "1" ]; then
+    U_UID="$(stat -c %u "$STOCK_USB1")"; U_GID="$(stat -c %g "$STOCK_USB1")"; U_MODE="$(stat -c %a "$STOCK_USB1")"
+    install -m "$U_MODE" -o "$U_UID" -g "$U_GID" "$NEW_USB1"         "$STOCK_USB1"
+    log "swapped usb1 iolib: /app/lib/libgphoto2_port/$(basename "$(dirname "$STOCK_USB1")")/usb1.so"
+  fi
+else
+  # -------------------------------------------------------------------------
+  # 6 (full). Full-libgphoto2 on-disk trampoline swap (DEFAULT).
+  #   a) reliability-patched base (the same 14-byte patch, symbol-discovered)
+  #   b) on-disk trampoline the 64 boundary entries over that base
+  #   c) compile the generic loader against the generated slot table
+  #   d) assemble /app/lib/stage2 + install the self-driving wrapper as
+  #      /app/bin/pgphoto  (the hardware-validated wrapper form)
+  # -------------------------------------------------------------------------
+  log "full-libgphoto2: building reliability-patched base…"
+  python3 /opt/patcher/analyze_pgphoto.py "$PG" --apply "$W/pgphoto.base" >/dev/null
+  DIFFB="$( { cmp -l "$PG" "$W/pgphoto.base" || true; } | wc -l | tr -d ' ')"
+  [ "$DIFFB" = "14" ] || die "reliability base changed $DIFFB bytes (expected 14) — aborting"
+  log "  base: 14-byte reliability patch (resetUsb + list-files + 3 gates) md5=$(md5sum "$W/pgphoto.base"|cut -d' ' -f1)"
+
+  log "full-libgphoto2: on-disk trampolining 64 boundary entries…"
+  rm -rf "$W/s2"; mkdir -p "$W/s2"
+  python3 /opt/patcher/stage2_patch.py \
+    --pgphoto "$W/pgphoto.base" --core "$NEW_CORE" --port "$NEW_PORT" \
+    --nm "$XT-nm" --readelf "$XT-readelf" \
+    --reliability-base "$PG" \
+    --outdir "$W/s2" --out "$W/s2/pgphoto.stage2ondisk" \
+    || die "stage2_patch.py failed (blocker / collision / unresolved boundary symbol)"
+  log "  trampolined: md5=$(md5sum "$W/s2/pgphoto.stage2ondisk"|cut -d' ' -f1) (size $(stat -c %s "$W/s2/pgphoto.stage2ondisk") == stock $(stat -c %s "$PG"))"
+  [ "$(stat -c %s "$W/s2/pgphoto.stage2ondisk")" = "$(stat -c %s "$PG")" ] \
+    || die "trampolined binary changed size — must be byte-count-identical to stock"
+
+  log "full-libgphoto2: compiling loader (libpolaris_stage2.so)…"
+  # Compile from a source NAMED stage2_ondisk_loader.c so the .symtab STT_FILE
+  # symbol matches the hardware-validated loader byte-for-byte.
+  cp /opt/patcher/stage2_loader.c "$W/s2/stage2_ondisk_loader.c"
+  ( cd "$W/s2" && $XT-gcc -shared -fPIC -O2 -std=gnu11 -mfloat-abi=soft -Wall -Wextra \
+      -Wl,-soname,libpolaris_stage2.so -I. stage2_ondisk_loader.c \
+      -o libpolaris_stage2.so -ldl ) || die "loader compile failed"
+  LFLAGS="$($XT-readelf -h "$W/s2/libpolaris_stage2.so" | awk -F: '/Flags/{print $2}')"
+  grep -q 'soft-float' <<<"$LFLAGS" || die "loader ABI mismatch (not soft-float):$LFLAGS"
+  log "  loader: md5=$(md5sum "$W/s2/libpolaris_stage2.so"|cut -d' ' -f1) ABI=$LFLAGS"
+
+  # d) assemble /app/lib/stage2 and install the wrapper as /app/bin/pgphoto.
+  STAGE2="$APP/lib/stage2"
+  rm -rf "$STAGE2"
+  install -d -m "$P_MODE" -o "$P_UID" -g "$P_GID" \
+    "$STAGE2" "$STAGE2/libgphoto2/2.5.34" "$STAGE2/libgphoto2_port/0.12.2"
+  install -m 755 -o "$P_UID" -g "$P_GID" "$W/s2/libpolaris_stage2.so"  "$STAGE2/libpolaris_stage2.so"
+  install -m 755 -o "$P_UID" -g "$P_GID" "$W/s2/pgphoto.stage2ondisk"  "$STAGE2/pgphoto.stage2ondisk"
+  install -m 755 -o "$P_UID" -g "$P_GID" "$NEW_CORE"                   "$STAGE2/libgphoto2.so.6"
+  install -m 755 -o "$P_UID" -g "$P_GID" "$NEW_PORT"                   "$STAGE2/libgphoto2_port.so.12"
+  install -m 755 -o "$P_UID" -g "$P_GID" "$NEW_PTP2"                   "$STAGE2/libgphoto2/2.5.34/ptp2.so"
+  install -m 755 -o "$P_UID" -g "$P_GID" "$NEW_USB1"                   "$STAGE2/libgphoto2_port/0.12.2/usb1.so"
+  install -m "$P_MODE" -o "$P_UID" -g "$P_GID" /opt/patcher/ondisk/pgphoto.wrapper "$PG"
+  log "  assembled /app/lib/stage2 (loader + core + port + ptp2 + usb1 + trampolined binary)"
+  log "  installed self-driving wrapper -> /app/bin/pgphoto (execs /app/lib/stage2/pgphoto.stage2ondisk)"
+
+  # ALSO place the fresh ptp2/usb1 at the STOCK camlib/iolib paths. This is the
+  # path the swapped 2.5.34 core actually dlopens its camlib from at runtime
+  # (device-confirmed: NOT the CAMLIBS the wrapper exports — the core resolves
+  # camlibs from its stock on-disk layout /app/lib/libgphoto2/<rev>/ptp2.so, and
+  # the port loader dlopens usb1 from /app/lib/libgphoto2_port/<rev>/usb1.so).
+  # Without this the core would load the STALE stock 2.5.27 ptp2 and the Canon
+  # driver would not bind. Stock perms/uid/gid preserved (stock camlib is 0750).
+  O_UID="$(stat -c %u "$STOCK_PTP2")"; O_GID="$(stat -c %g "$STOCK_PTP2")"; O_MODE="$(stat -c %a "$STOCK_PTP2")"
+  install -m "$O_MODE" -o "$O_UID" -g "$O_GID" "$NEW_PTP2" "$STOCK_PTP2"
+  log "  placed fresh ptp2 at stock camlib path: /app/lib/libgphoto2/$(basename "$CAMLIB_DIR")/ptp2.so"
+  if [ "$SWAP_USB1" = "1" ]; then
+    U_UID="$(stat -c %u "$STOCK_USB1")"; U_GID="$(stat -c %g "$STOCK_USB1")"; U_MODE="$(stat -c %a "$STOCK_USB1")"
+    install -m "$U_MODE" -o "$U_UID" -g "$U_GID" "$NEW_USB1" "$STOCK_USB1"
+    log "  placed fresh usb1 at stock iolib path: /app/lib/libgphoto2_port/$(basename "$(dirname "$STOCK_USB1")")/usb1.so"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -242,11 +371,61 @@ cp "$W/out/appfs.ubifs" /out/FwPkt/camera/appfs.ubifs
 python3 /opt/patcher/gen_firmwareinfo.py /in/firmwareInfo /out/FwPkt > /out/FwPkt/firmwareInfo
 ( cd /out && rm -f FwPkt.zip && (command -v zip >/dev/null && zip -rqX FwPkt.zip FwPkt || python3 -c "import shutil;shutil.make_archive('FwPkt','zip','.','FwPkt')") )
 
+# ---------------------------------------------------------------------------
+# 8b. FULL mode: emit the reversible on-device bundle + LGPL source offer.
+#     The bundle lets people TEST before flashing (install_stage2.sh /
+#     restore_stock.sh, LD_PRELOAD-reversible). The LGPL notice + COPYING satisfy
+#     the source-offer for the libgphoto2 binaries shipped in the appfs.
+# ---------------------------------------------------------------------------
+if [ "$MODE" = "full" ]; then
+  BUN=/out/stage2-ondisk
+  rm -rf "$BUN"; mkdir -p "$BUN/ondisk" "$BUN/libgphoto2/2.5.34" "$BUN/libgphoto2_port/0.12.2"
+  cp "$W/s2/libpolaris_stage2.so"  "$BUN/ondisk/"
+  cp "$W/s2/pgphoto.stage2ondisk"  "$BUN/ondisk/"
+  cp /opt/patcher/ondisk/pgphoto.wrapper "$BUN/ondisk/"
+  cp /opt/patcher/ondisk/install_stage2.sh "$BUN/ondisk/"
+  cp /opt/patcher/ondisk/restore_stock.sh  "$BUN/ondisk/"
+  cp "$NEW_CORE" "$BUN/libgphoto2.so.6"
+  cp "$NEW_PORT" "$BUN/libgphoto2_port.so.12"
+  cp "$NEW_PTP2" "$BUN/libgphoto2/2.5.34/ptp2.so"
+  cp "$NEW_USB1" "$BUN/libgphoto2_port/0.12.2/usb1.so"
+  chmod +x "$BUN/ondisk/"*.sh "$BUN/ondisk/pgphoto.wrapper" 2>/dev/null || true
+
+  # LGPL source offer for the shipped libgphoto2 binaries.
+  LIC=/out/licenses; rm -rf "$LIC"; mkdir -p "$LIC"
+  SRCDIR="$(find /work/src -maxdepth 1 -type d -name "libgphoto2-*" | head -1)"
+  [ -n "$SRCDIR" ] && [ -f "$SRCDIR/COPYING" ] && cp "$SRCDIR/COPYING" "$LIC/libgphoto2-COPYING.LGPL-2.1"
+  cat > "$LIC/README-LGPL.txt" <<EOF
+The custom appfs in this output ships freshly-built libgphoto2 $LIBGPHOTO2_VERSION
+binaries (LGPL-2.1): libgphoto2.so.6, libgphoto2_port.so.12, ptp2.so, usb1.so.
+Corresponding source is the official upstream release:
+
+  https://github.com/gphoto/libgphoto2/releases/tag/v$LIBGPHOTO2_VERSION
+
+This patcher rebuilds those binaries from that exact source (see
+container/build_ptp2.sh / build_fullstack.sh). The only source modification is a
+one-line ABI pad appended to struct _Camera (an interop SIZE constant, 4120 bytes;
+see docs/HOW-IT-WORKS.md) — no proprietary/firmware content is added. See NOTICE.
+EOF
+  log "  wrote reversible on-device bundle -> /out/stage2-ondisk (install_stage2.sh / restore_stock.sh)"
+  log "  wrote LGPL source offer -> /out/licenses"
+fi
+
 log "----------------------------------------------------------------------"
-log "DONE.  Custom firmware written to /out :"
+if [ "$MODE" = "full" ]; then
+  log "DONE (mode: FULL libgphoto2 — core+port+ptp2+usb1 swap, on-disk trampoline)."
+else
+  log "DONE (mode: ptp2-only — legacy camlib+iolib swap, stock 2.5.27 core kept)."
+fi
+log "Custom firmware written to /out :"
 ( cd /out && find FwPkt -type f | sort | sed 's/^/    /' )
 log "    FwPkt.zip  md5=$(md5sum /out/FwPkt.zip 2>/dev/null | cut -d' ' -f1)"
 log "custom appfs.ubifs md5=$(md5sum /out/FwPkt/camera/appfs.ubifs | cut -d' ' -f1)"
+if [ "$MODE" = "full" ]; then
+  log "Before flashing you can TEST reversibly on-device:"
+  log "    copy /out/stage2-ondisk to the camera and run ondisk/install_stage2.sh"
+  log "    (revert with ondisk/restore_stock.sh). See docs/HOW-IT-WORKS.md."
+fi
 log "----------------------------------------------------------------------"
 warn "FLASH AT YOUR OWN RISK. Verify on your own device. Keep your stock FwPkt"
 warn "as the factory-restore image. See README.md."

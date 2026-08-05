@@ -36,7 +36,7 @@ RUN set -eux; \
     pip3 install "ubi_reader==0.8.0" python-lzo pyelftools
 
 COPY container/ /opt/patcher/
-RUN chmod +x /opt/patcher/*.sh
+RUN chmod +x /opt/patcher/*.sh /opt/patcher/ondisk/*.sh /opt/patcher/ondisk/pgphoto.wrapper
 
 # /in  : read-only mount of the user's stock FwPkt (folder or unzipped)
 # /out : writable mount for the produced custom FwPkt + FwPkt.zip

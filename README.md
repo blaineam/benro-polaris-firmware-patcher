@@ -17,8 +17,20 @@ things were broken on stock firmware (libgphoto2 2.5.27, ~2021):
 3. Reboot-hang after flashing — avoided by preserving the UBIFS `space_fixup`
    flag on repack.
 
-Result on a real R5 Mark II: **immediate detection, live view, controls, and
-capture.** See [docs/TESTED.md](docs/TESTED.md).
+Result on a real R5 Mark II (flash-verified end-to-end): **immediate detection,
+settings that stick, live view, no "no card" warning, and capture that downloads
+both JPEG and RAW.** See [docs/TESTED.md](docs/TESTED.md).
+
+## Two modes (full is the default)
+
+| Mode | What it swaps | Flag |
+|---|---|---|
+| **Full libgphoto2** — **DEFAULT** | The **whole** 2.5.34 stack: **core + port + ptp2 camlib + usb1 iolib**. `pgphoto`'s compiled-in 2.5.27 core is bypassed by an on-disk *trampoline* into the fresh core. **This is the mode verified end-to-end on the R5 Mark II** (cold boot, capture, live view). | *(none)* |
+| **ptp2-only** — conservative fallback | Keeps `pgphoto`'s compiled-in 2.5.27 **core**, swaps only the **ptp2 camlib + usb1 iolib** and applies a 14-byte `pgphoto` patch. Smaller change; use it if the full swap misbehaves on your setup. | `--ptp2-only` / `-Ptp2Only` |
+
+Both modes are **reversible** by re-flashing your stock `FwPkt`. Full mode also
+writes a `stage2-ondisk/` bundle so you can **test on-device before flashing**
+(install/revert scripts; see [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)).
 
 ---
 
@@ -51,39 +63,76 @@ If any of the above is unacceptable to you, **do not use this tool.**
 
 ## What it actually changes
 
-Up to **three** files inside the firmware's `appfs`, nothing else:
+### Full mode (default) — hardware-verified end-to-end
 
-1. **`/app/lib/libgphoto2/2.5.27.1/ptp2.so`** (camera driver / camlib) → freshly
-   cross-compiled from the libgphoto2 version you choose (default 2.5.34), built
-   for the device's exact ABI (32-bit ARM, soft-float EABI, glibc 2.24).
-2. **`/app/lib/libgphoto2_port/0.12.0/usb1.so`** (USB transport / iolib) →
-   freshly cross-compiled from the **same** libgphoto2 release, ABI-matched and
-   linked against the device's **own** `libusb-1.0.so.0`, so its `DT_NEEDED` is
-   byte-for-byte the stock iolib's. This is the first step toward replacing the
-   whole libgphoto2 stack, not just the camlib. Skip it with `--no-usb1`
-   (`-NoUsb1`) to patch the camlib + `pgphoto` only.
-3. **`/app/bin/pgphoto`** → **14 bytes** of edits, all reversible:
-   - **3 gates** (`mov r3,r0` → `mov r3,#0`) that make it load the driver in (1)
-     instead of its compiled-in 2.5.27 copy;
-   - **`resetUsb` → return 0** (stops the cold-connect USB-reset re-enumeration
-     storm);
-   - **skip `ARG_LIST_FILES`** in `cameraInit` (stops the multi-minute full-card
-     PTP file scan that blocks live view/capture at connect).
+Inside the firmware's `appfs`, full mode:
 
-The `pgphoto` patch sites are discovered from its symbol table, and the usb1
-swap is gated behind full ABI/dependency/symbol verification (see below); the
-tool refuses to run if it can't find or verify exactly what it expects.
+1. Replaces **`/app/bin/pgphoto`** with a tiny 9-line `sh` **wrapper** (no logging)
+   that sets `CAMLIBS`/`IOLIBS`/`LD_LIBRARY_PATH`, `LD_PRELOAD`s the loader, turns
+   the two runtime shims on, and `exec`s the trampolined binary.
+2. Adds **`/app/lib/stage2/`** — a self-contained new stack the wrapper runs:
+   - `libgphoto2.so.6` + `libgphoto2_port.so.12` — the fresh **2.5.34 core + port**;
+   - `libgphoto2/2.5.34/ptp2.so` + `libgphoto2_port/0.12.2/usb1.so` — camlib + iolib;
+   - `libpolaris_stage2.so` — the **loader** that redirects the 64 libgphoto2 API
+     entry points `pgphoto` calls into the fresh core (an **on-disk trampoline**,
+     no runtime code patching). It also carries three small env-gated **shims**
+     (below);
+   - `pgphoto.stage2ondisk` — the user's own `pgphoto`, reliability-patched
+     (the same 14 bytes below) **and** on-disk-trampolined (byte-count-identical
+     to stock; only ~719 bytes inside `.text` differ).
+3. Replaces the **stock `ptp2.so` and `usb1.so`** (`/app/lib/libgphoto2/2.5.27.1/
+   ptp2.so` and `/app/lib/libgphoto2_port/0.12.0/usb1.so`) with the same fresh
+   2.5.34 builds. The swapped core dlopens its camlib/iolib from **these stock
+   on-disk paths** at runtime — not from the `CAMLIBS` the wrapper exports — so the
+   fresh driver must live there too, not only under `stage2/`.
 
-> **Why `pgphoto` needs 3 gates for the camlib but the usb1 iolib needs none:**
-> Benro compiled the `ptp2` camlib *statically* into `pgphoto` and short-circuits
-> its dispatch, so the on-disk `ptp2.so` is a dead filename marker until the gates
-> re-route to it. The **port layer is different** — `pgphoto` `dlopen`s the iolibs
-> from disk with no short-circuit, so the stock `usb1.so` is live code and simply
-> replacing it takes effect. See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+The **loader's three shims** (each reads/writes only public libgphoto2 fields or
+calls only public `gp_camera_set_config` APIs — no firmware code):
 
-Every other file (kernel `uImage`, `rootfs.ubifs`, gimbal MCU blobs, U-Boot
-environment `config`, all other `appfs` files) is copied **byte-for-byte
-unchanged**. `firmwareInfo` is regenerated so the device's own MD5 check passes.
+- **Storage shim** (`STAGE2_STORAGE_SHIM=1`, on): writes the Benro `_Camera`
+  storage-type field so the app shows a memory card and raises **no "no card"
+  warning**.
+- **Config shims** (`STAGE2_TETHER_CAPTURE=1`, on): a `gp_camera_set_config`
+  tree-walk plus a `gp_camera_set_single_config` hook that force Canon's
+  `capturetarget` to **"Internal RAM"** (tethered capture). The Polaris drives
+  configs via `set_single_config`, so that hook is the one that fires.
+
+**Why tethered capture:** through the fresh 2.5.34 core, Canon's card-mode
+post-capture `ObjectAddedEx` event is not delivered, so a card-target shot never
+signals "file ready" and the download hangs. Internal-RAM capture uses the
+`ObjectTransfer` path, which **does** fire — so the shot completes and both the
+**JPEG and the RAW** download to the Polaris. See
+[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
+
+Every other `appfs` file — all other iolibs (`disk`/`serial`/`ptpip`/…), the
+kernel, `rootfs.ubifs`, gimbal blobs, U-Boot env — is **byte-for-byte unchanged**.
+
+### ptp2-only mode (`--ptp2-only`)
+
+The conservative fallback changes up to **three** files in place:
+
+1. **`/app/lib/libgphoto2/2.5.27.1/ptp2.so`** → freshly cross-compiled ptp2 camlib.
+2. **`/app/lib/libgphoto2_port/0.12.0/usb1.so`** → freshly cross-compiled usb1
+   iolib (skip with `--no-usb1` / `-NoUsb1`).
+3. **`/app/bin/pgphoto`** → **14 bytes** of edits: 3 dispatch gates (load the new
+   camlib instead of the compiled-in 2.5.27 copy), `resetUsb → return 0`, and
+   skip the eager `ARG_LIST_FILES` full-card scan.
+
+### Common to both modes
+
+All patch sites are **discovered from `pgphoto`'s own symbol table** (the tool
+refuses to run if it can't find/verify exactly what it expects), the rebuilt
+libraries pass full ABI/glibc/symbol/`DT_NEEDED` verification, and `firmwareInfo`
+is regenerated so the device's own MD5 check passes. The pgphoto reliability edits
+(`resetUsb` + skip `ARG_LIST_FILES`) are present in **both** modes — in full mode
+they live in the trampolined base binary.
+
+> **Why the camlib historically needed 3 `pgphoto` gates:** Benro compiled the
+> `ptp2` camlib *statically* into `pgphoto` and short-circuits its dispatch, so the
+> on-disk `ptp2.so` is a dead filename marker in stock. ptp2-only mode re-routes
+> those gates; **full mode** sidesteps the whole static core by trampolining every
+> boundary call into the fresh 2.5.34 core. See
+> [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
 See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the full technical story
 and [docs/TESTED.md](docs/TESTED.md) for exactly what was verified.
@@ -132,13 +181,17 @@ Options (both launchers):
 | `--fwpkt` / `-FwPkt` | *(required)* | Stock `FwPkt` folder (with `firmwareInfo`) or `FwPkt.zip` |
 | `--libgphoto2` / `-Libgphoto2` | `2.5.34` | libgphoto2 release tag to build |
 | `--out` / `-Out` | `./out` | Output directory |
+| `--ptp2-only` / `-Ptp2Only` | off | Conservative fallback: keep the stock 2.5.27 core, swap only ptp2 + usb1 (+14-byte patch). Default is the **full** stack swap. |
 | `--selftest` / `-SelfTest` | off | Emulate the driver load under qemu and confirm the R5 II registers |
 | `--no-fix-typo` / `-NoFixTypo` | off | Keep libgphoto2's upstream `EOS 5Rm2` model-name typo |
-| `--no-usb1` / `-NoUsb1` | off | Do **not** swap the `usb1` iolib; patch only the `ptp2` camlib + `pgphoto` |
+| `--no-usb1` / `-NoUsb1` | off | (ptp2-only) Do **not** swap the `usb1` iolib; patch only the `ptp2` camlib + `pgphoto` |
 
 Output:
 - `out/FwPkt/` — the unpacked custom firmware
 - `out/FwPkt.zip` — copy this to your SD card
+- `out/stage2-ondisk/` — *(full mode)* reversible on-device test bundle
+  (`ondisk/install_stage2.sh` installs it, `ondisk/restore_stock.sh` reverts)
+- `out/licenses/` — *(full mode)* libgphoto2 `COPYING` (LGPL-2.1) + source offer
 
 The first run builds the Docker image (a few minutes). Later runs are fast.
 
@@ -169,5 +222,13 @@ verifies the package (MD5), reboots, and U-Boot writes it.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). libgphoto2 is built from source under its own
-license (LGPL-2.1).
+This project's own code (launchers, container scripts, `stage2_patch.py`, the
+`stage2_loader.c` loader, the wrapper/install scripts) is **MIT** — see
+[LICENSE](LICENSE). The libgphoto2 binaries the tool builds and ships in the
+custom firmware are **LGPL-2.1**, rebuilt from the official upstream release with
+two small documented source edits (a one-line ABI size pad and an EOS-init
+error-tolerance patch; see [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) and
+[NOTICE](NOTICE)). The tool ships **no firmware and no
+proprietary/decompiled content**; it patches your own extracted `pgphoto`. Full
+mode writes `out/licenses/` (LGPL `COPYING` + source offer) with the firmware. See
+[NOTICE](NOTICE) for the full MIT-vs-LGPL breakdown.

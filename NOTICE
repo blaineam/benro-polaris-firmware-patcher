@@ -1,0 +1,85 @@
+Benro Polaris Firmware Patcher — NOTICE
+=======================================
+
+This project combines two license domains. Nothing proprietary, decompiled, or
+firmware-derived is shipped in this repository; the tool patches the USER's OWN
+extracted `pgphoto` and rebuilds LGPL libgphoto2 from official upstream source.
+
+--------------------------------------------------------------------------------
+MIT (this project's own code) — see LICENSE
+--------------------------------------------------------------------------------
+Copyright (c) 2026 Blaine Miller. Everything authored here:
+
+  patch-polaris.sh, patch-polaris.ps1
+  container/patch.sh, build_ptp2.sh, build_fullstack.sh, repack_appfs.sh,
+    ubi_geometry.py, gen_firmwareinfo.py, selftest.sh
+  container/analyze_pgphoto.py          (pgphoto reliability-patch discovery)
+  container/stage2_patch.py             (on-disk trampoline patcher — generic)
+  container/stage2_loader.c             (the loader: libpolaris_stage2.so — generic;
+                                         carries 3 env-gated shims: #1 storage-type
+                                         so the app shows a card, #2 gp_camera_set_config
+                                         + #3 gp_camera_set_single_config capturetarget)
+  container/dbg_patch.py                (author-written script that applies the LGPL
+                                         EOS-init non-fatal source edit; the SCRIPT is MIT,
+                                         the edit it makes is a documented LGPL mod — below)
+  container/trace_patch.py              (dev-only TRACE=1 diagnostic instrumentation —
+                                         NOT used by any shippable recipe)
+  container/polaris_shim.c.in           (ptp2-only trampoline shim)
+  container/ondisk/pgphoto.wrapper, install_stage2.sh, restore_stock.sh
+  docs/*
+
+These contain NO Benro/Snoppa source and NO decompiled/reconstructed firmware
+code. `stage2_patch.py`'s only Benro-specific data is the list of PUBLIC LGPL
+libgphoto2 API names the stock binary calls (`gp_*` / `gp_port_*`) — names, not
+code. The reliability-patch sites are discovered from the user's own binary's
+symbol table at run time. The loader's three shims read/write only PUBLIC
+libgphoto2 struct fields and call PUBLIC `gp_camera_set_config` /
+`gp_camera_set_single_config` APIs — no firmware code.
+
+--------------------------------------------------------------------------------
+LGPL-2.1 (libgphoto2 — third party, rebuilt from source)
+--------------------------------------------------------------------------------
+The custom firmware image this tool WRITES (full mode) contains freshly-built
+libgphoto2 binaries:
+
+  libgphoto2.so.6          (core)
+  libgphoto2_port.so.12    (port)
+  ptp2.so                  (camlib)
+  usb1.so                  (iolib)
+
+These are Copyright their respective authors and are distributed under the GNU
+Lesser General Public License, version 2.1. Corresponding source is the official
+upstream release, rebuilt verbatim by this tool from:
+
+  https://github.com/gphoto/libgphoto2/releases/tag/v2.5.34   (default; --libgphoto2)
+
+There are exactly TWO documented source modifications, both applied to the
+official upstream tree by this tool's own scripts, both adding NO proprietary or
+firmware-derived content:
+
+  1. ABI pad — a one-line `char _reserved_tail[4120];` appended to `struct _Camera`
+     so the rebuilt core allocates the same Camera size the Benro binary expects.
+     4120 is an interop SIZE constant, not Benro code; ABI-inert for the library
+     (upstream never reads the tail). Applied by build_ptp2.sh (FULLSTACK=1).
+
+  2. EOS-init error tolerance — `container/dbg_patch.py` (POLARIS_DBG=1) makes a
+     handful of Canon EOS init-time event/keep-alive drains non-fatal
+     (`camlibs/ptp2/config.c` check_eos_events ×13; `library.c` keep_device_on ×3
+     + check_eos_events ×1): the transient non-OK each returns the first time is
+     captured and discarded instead of aborting camera_init. It is a mechanical
+     edit of upstream's own LGPL source (swap `C_PTP(x);` → `{ … = x; (void)…; }`),
+     adds no new symbols or dependencies, and is a no-op when the camera returns
+     OK. This is a modification OF the LGPL work and is offered as such.
+
+The corresponding (modified) source is fully reconstructible: take the upstream
+release above and run container/build_ptp2.sh / container/dbg_patch.py, both in
+this repository. See docs/HOW-IT-WORKS.md and container/build_ptp2.sh.
+
+When the tool runs in full mode it writes `out/licenses/` with the libgphoto2
+`COPYING` (LGPL-2.1) and a source-offer note alongside the produced firmware, so
+anyone redistributing the resulting image carries the required LGPL notice and
+source pointer.
+
+This project ships NO firmware and, in the repository itself, NO libgphoto2
+binaries — they are built from source at run time. It is not affiliated with or
+endorsed by Benro, Snoppa, Canon, or the gPhoto project.

@@ -16,6 +16,21 @@ DEV=/work/devlibs
 SRC=/work/src
 mkdir -p "$SRC" /work/out
 
+# FULLSTACK=1 : full-libgphoto2 mode (the DEFAULT of the patcher).  Builds the
+# whole 2.5.34 stack -- core (libgphoto2.so.6) + port (libgphoto2_port.so.12) +
+# ptp2 camlib + usb1 iolib -- so the on-disk trampoline loader can dlopen a fresh
+# core/port instead of pgphoto's compiled-in 2.5.27 core.  Two fullstack-only
+# build deltas vs the legacy ptp2-only path:
+#   * NO trampoline shim: the ptp2-only path shims gp_filesystem_set_info_dirty
+#     because the device's on-disk 2.5.27 core predates that symbol; the fullstack
+#     NEW core exports it natively, so the shim is neither needed nor wanted.
+#   * `_Camera` pad: pad struct _Camera to 4140 bytes so the new core's
+#     gp_camera_new() calloc's the SAME size Benro's binary expects (Benro appended
+#     a 4120-byte tail to _Camera; upstream is 20).  4120 is an interop SIZE, not
+#     Benro code -- nothing proprietary is introduced.  ABI-inert for the library
+#     (upstream never reads the tail).  See docs/HOW-IT-WORKS.md.
+FULLSTACK="${FULLSTACK:-0}"
+
 echo "[build] fetching libgphoto2 $VER"
 cd "$SRC"
 if [ ! -d "libgphoto2-$VER" ]; then
@@ -28,10 +43,66 @@ if [ ! -d "libgphoto2-$VER" ]; then
 fi
 cd "libgphoto2-$VER"
 
+# --- DIAGNOSTIC ONLY: POLARIS_TRACE instrumentation (TRACE=1) ----------------
+#  THROWAWAY tracing build — NOT for shipping. Injects unbuffered
+#  fprintf(stderr,"POLARIS_TRACE: ...") across the Canon EOS post-capture event
+#  path (camera_wait_for_event / ptp_check_eos_events / gp_filesystem_append) to
+#  pin exactly where GP_EVENT_FILE_ADDED is lost after CAPTURE_COMPLETE. Adds NO
+#  exported symbols (fprintf/fflush/stderr are libc) so the trampoline boundary
+#  set + CAMLIBS loading resolve identically to the normal build. This gate is
+#  OFF by default; never enable it for a shippable recipe.
+if [ "${TRACE:-0}" = "1" ]; then
+  echo "[build] TRACE=1: applying POLARIS_TRACE diagnostic instrumentation (throwaway)"
+  python3 /opt/patcher/trace_patch.py .
+fi
+
+# --- POLARIS_DBG: EOS-init NON-FATAL patch (SHIPPABLE, no tracing) -----------
+#  The full-libgphoto2 default runs ptp2 against a FRESH 2.5.34 core, so Canon's
+#  EOS event/keep-alive drains during camera_init are exercised as upstream wrote
+#  them. On the R5 Mark II a couple of those `C_PTP(ptp_check_eos_events(...))` /
+#  `CR(camera_keep_device_on(...))` drains return a transient non-OK the FIRST
+#  time and abort init — the camera then falls back to the generic "USB PTP Class
+#  Camera" driver (no settings, no live view). dbg_patch.py swallows exactly those
+#  drains (config.c x13 + library.c keep_device_on x3 + check_eos_events x1) so
+#  camera_init COMPLETES as the real Canon driver. It is the behaviour-only half
+#  of trace_patch.py — NO fprintf tracing, NO new exported symbols / DT_NEEDED, a
+#  no-op when the camera returns OK. This is a documented LGPL source modification
+#  (see NOTICE). Idempotent; asserts exact anchor counts and aborts on drift.
+#  build_fullstack.sh forces POLARIS_DBG=1; the ptp2-only fallback leaves it off.
+if [ "${POLARIS_DBG:-0}" = "1" ]; then
+  echo "[build] POLARIS_DBG=1: applying EOS-init non-fatal patch (dbg_patch.py, no tracing)"
+  python3 /opt/patcher/dbg_patch.py .
+fi
+
 # --- inject the trampoline shim so gp_filesystem_set_info_dirty resolves to
 #     pgphoto's own implementation (see docs/HOW-IT-WORKS.md) ---
-if ! grep -q "polaris-patcher trampoline shim" camlibs/ptp2/library.c; then
-  sed "s|@TRAMP@|$TRAMP|g" /opt/patcher/polaris_shim.c.in >> camlibs/ptp2/library.c
+#     FULLSTACK skips this: the NEW 2.5.34 core exports the symbol natively.
+if [ "$FULLSTACK" != "1" ]; then
+  if ! grep -q "polaris-patcher trampoline shim" camlibs/ptp2/library.c; then
+    sed "s|@TRAMP@|$TRAMP|g" /opt/patcher/polaris_shim.c.in >> camlibs/ptp2/library.c
+  fi
+else
+  echo "[build] FULLSTACK: trampoline shim NOT injected (new core exports gp_filesystem_set_info_dirty)"
+fi
+
+# --- FULLSTACK: pad struct _Camera to 4140 B so the new core allocates the size
+#     Benro's binary expects (interop constant; ABI-inert; nothing proprietary) ---
+if [ "$FULLSTACK" = "1" ]; then
+  CAMHDR=gphoto2/gphoto2-camera.h
+  [ -f "$CAMHDR" ] || { echo "[build] ERROR: $CAMHDR not found"; exit 1; }
+  if ! grep -q "_reserved_tail" "$CAMHDR"; then
+    # insert the pad as the last member of `struct _Camera { ... };`
+    awk '
+      /struct[ \t]+_Camera[ \t]*\{/ { instruct=1 }
+      instruct==1 && /^\};/ {
+        print "\tchar _reserved_tail[4120]; /* polaris fullstack: pad _Camera to 4140 (Benro-tail ABI parity) */";
+        instruct=0
+      }
+      { print }
+    ' "$CAMHDR" > "$CAMHDR.pad" && mv "$CAMHDR.pad" "$CAMHDR"
+  fi
+  grep -q "_reserved_tail" "$CAMHDR" || { echo "[build] ERROR: _Camera pad did not apply"; exit 1; }
+  echo "[build] FULLSTACK: struct _Camera padded with _reserved_tail[4120] (-> sizeof 4140)"
 fi
 
 # --- optional: fix the upstream "Canon:EOS 5Rm2" model-name typo (R5 Mark II) ---
@@ -137,4 +208,35 @@ if [ -n "$USB1_BUILT" ]; then
   echo "[build] usb1.so built: $(stat -c %s /work/out/usb1.so) bytes"
 else
   echo "[build] NOTE: usb1.so not produced (libusb not detected) — usb1 swap unavailable"
+fi
+
+# --- FULLSTACK: harvest the freshly-built core + port shared libraries. --------
+#  These are the ordinary LGPL libgphoto2 shared libs `make` produces; the on-disk
+#  trampoline loader dlopens them by absolute path.  Copy the REAL ELF (deref the
+#  soname symlink), not the `.so.6`/`.so.12` link.
+if [ "$FULLSTACK" = "1" ]; then
+  CORE_BUILT="$(find libgphoto2 -path '*/.libs/libgphoto2.so.6.*' ! -name '*.so.6' | sort | tail -1)"
+  PORT_BUILT="$(find libgphoto2_port -path '*/.libs/libgphoto2_port.so.12.*' ! -name '*.so.12' | sort | tail -1)"
+  [ -n "$CORE_BUILT" ] || { echo "[build] FULLSTACK ERROR: libgphoto2.so.6 not produced"; exit 1; }
+  [ -n "$PORT_BUILT" ] || { echo "[build] FULLSTACK ERROR: libgphoto2_port.so.12 not produced"; exit 1; }
+  cp -L "$CORE_BUILT" /work/out/libgphoto2.so.6
+  cp -L "$PORT_BUILT" /work/out/libgphoto2_port.so.12
+  # Strip the whole fullstack (core+port+ptp2+usb1): shrinks the appfs footprint
+  # (the on-disk `.symtab` is not needed at runtime — dlopen resolves via `.dynsym`
+  # which strip keeps). The result is within a handful of bytes of the
+  # hardware-validated libs (which were also stripped).
+  #
+  # Prove the _Camera pad took BEFORE stripping (needs .symtab): the new core's
+  # gp_camera_new must calloc 0x102c (=4140) bytes.  Fail closed if not — a wrong
+  # size would put Benro's _Camera-tail reads out of bounds.
+  if "$XT-objdump" -d /work/out/libgphoto2.so.6 2>/dev/null \
+       | sed -n '/<gp_camera_new>:/,/^$/p' | grep -qiE '\.word[[:space:]]+0x0*102c|#[[:space:]]*4140'; then
+    echo "[build] FULLSTACK: _Camera pad confirmed (gp_camera_new allocates 4140 B)"
+  else
+    echo "[build] FULLSTACK ERROR: gp_camera_new does not allocate 4140 B — _Camera pad failed"; exit 1
+  fi
+  "$XT-strip" /work/out/libgphoto2.so.6 /work/out/libgphoto2_port.so.12 \
+              /work/out/ptp2.so /work/out/usb1.so
+  echo "[build] FULLSTACK: core libgphoto2.so.6 built (stripped): $(stat -c %s /work/out/libgphoto2.so.6) bytes"
+  echo "[build] FULLSTACK: port libgphoto2_port.so.12 built (stripped): $(stat -c %s /work/out/libgphoto2_port.so.12) bytes"
 fi

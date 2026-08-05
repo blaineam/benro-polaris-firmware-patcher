@@ -1,0 +1,9 @@
+#!/bin/sh
+D=/app/lib/stage2
+export CAMLIBS=$D/libgphoto2/2.5.34
+export IOLIBS=$D/libgphoto2_port/0.12.2
+export LD_LIBRARY_PATH=$D:/app/lib
+export LD_PRELOAD=$D/libpolaris_stage2.so
+export STAGE2_STORAGE_SHIM=1
+export STAGE2_TETHER_CAPTURE=1
+exec $D/pgphoto.stage2ondisk "$@"

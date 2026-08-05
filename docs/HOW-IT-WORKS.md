@@ -10,6 +10,182 @@ NAND layout (`mtdparts`): `u-boot.bin`, `factoryParam`, `userParam`, `uImage`,
 `rootfs.ubifs` (40M), `appfs.ubifs` (81M). Camera control lives in the **appfs**
 (`/app`).
 
+---
+
+# Full mode (the default): replacing the WHOLE libgphoto2 stack
+
+`pgphoto` has libgphoto2's **core + port + ptp2 camlib** statically compiled in
+(a Benro fork of ~2.5.27). ptp2-only mode (below) swaps just the on-disk camlib
+and keeps that 2.5.27 core. **Full mode replaces the entire stack** — core, port,
+ptp2, and usb1 all become fresh **2.5.34** — without recompiling `pgphoto` and
+without any runtime code-page patching. It is the mode
+[verified on real hardware](TESTED.md).
+
+## The mechanism: on-disk trampolines into a dlopen'd fresh core
+
+`pgphoto` is a non-PIE `ET_EXEC`, so every internal libgphoto2 entry point it
+calls sits at a **fixed address**. Full mode intersects the API `pgphoto` calls
+with the public LGPL libgphoto2 symbols and finds **64 boundary functions**
+(`gp_*` ×55 + `gp_port_*` ×9). (`gp_params_*`, which are gphoto2-CLI code Benro
+compiled in and extended, are deliberately *not* touched.) Each of the 64 is
+redirected into a freshly-built 2.5.34 core:
+
+1. **On-disk patch (in the file, once).** `stage2_patch.py` overwrites the first
+   12 bytes of each boundary function with an absolute indirect jump through a
+   per-function pointer *slot*:
+
+   ```
+   entry+0:  ldr r12, [pc, #0]   ; r12 = *(entry+8) = &slot_i
+   entry+4:  ldr pc,  [r12]      ; pc = *slot_i   (the fresh-core target)
+   entry+8:  .word &slot_i       ; a CONSTANT slot address, known at patch time
+   ```
+
+   The smallest boundary function is 56 bytes, so 12 fits with wide margin. The
+   binary stays **byte-count-identical to stock** — no segment/size bumps, entry
+   point unchanged; only 719 bytes inside `.text` differ.
+
+2. **The slot page (a fresh mmap, not `.bss`).** The 64 slots live at a fixed base
+   `0x30000000`, in the wide free gap between `pgphoto`'s image+heap and the shared
+   libraries. The loader's **very first action** is to `mmap` a fresh anonymous
+   `PROT_READ|PROT_WRITE` page `MAP_FIXED` there — after checking `/proc/self/maps`
+   and *refusing* (never clobbering) if anything already occupies it. (An earlier
+   design carved the slots out of an extended `.bss`; the device's Hi3559V200
+   kernel did not reliably map that region writable, so the loader owns the page
+   now.)
+
+3. **The loader fills the slots (`libpolaris_stage2.so`).** LD_PRELOAD'd (test
+   bundle) or `DT_NEEDED`/wrapper (firmware). Its constructor: map the slot page →
+   write `&abort_stub` into all 64 slots (fail-closed baseline, published with a
+   barrier before any thread can call a redirected function) → `dlopen` the fresh
+   core + port → `dlsym` each of the 64 and store the real target into its slot →
+   `slots filled 64/64`. **No `mprotect`, no `.text` write, no `/proc/self/mem` at
+   runtime** — the reason three earlier runtime-`.text`-patching loaders were each
+   crashed or refused by this kernel. A `SIGSEGV`/`SIGBUS`/`SIGILL` pinpoint
+   handler + unbuffered checkpoints make any residual fault diagnosable.
+
+Benro code → `bl` stock `gp_*` addr → trampoline → slot → **fresh 2.5.34 core**.
+The fresh core resolves its own internals through its own PLT — a clean split.
+
+## Why the fresh core is ABI-safe with Benro's binary
+
+Every public libgphoto2 struct `pgphoto` touches is **byte-identical between
+2.5.27 and 2.5.34** (the `.6`/`.12` soname promise; verified field-by-field and by
+compiled `sizeof`). The one exception is `struct _Camera`, which **Benro** (not
+upstream) extended with a 4120-byte tail (→ 4140 bytes; upstream is 20). So the
+fresh core is built with a one-line pad — `char _reserved_tail[4120];` — making its
+`gp_camera_new()` allocate the same 4140 bytes Benro's code reads. **4120 is an
+interop SIZE, not Benro code; nothing proprietary is shipped, and upstream never
+reads the tail (ABI-inert).** The build fails closed unless the rebuilt core's
+`gp_camera_new` is confirmed to allocate 4140.
+
+## The reliability-patched base
+
+The 64 trampolines only redirect the *boundary* API. `pgphoto`'s own non-boundary
+cold-start code (`resetUsb`, the eager `ARG_LIST_FILES` full-card scan) is **not**
+trampolined, so full mode first applies the **same 14-byte reliability patch** that
+ptp2-only mode applies (symbol-discovered: `resetUsb → return 0`, skip
+`ARG_LIST_FILES`, + the 3 dispatch gates), then trampolines over that base. A
+fail-closed collision guard proves no trampoline overwrites a reliability byte
+(the reliability sites live in non-boundary functions or mid-function, so there
+are provably **0 collisions**).
+
+## Where the fresh camlib/iolib actually load from
+
+The wrapper exports `CAMLIBS=/app/lib/stage2/libgphoto2/2.5.34`, but the swapped
+2.5.34 core does **not** end up loading `ptp2.so` from there. Device tracing shows
+it resolves its camlib from the **stock on-disk layout** —
+`/app/lib/libgphoto2/2.5.27.1/ptp2.so` — and the port loader `dlopen`s `usb1.so`
+from `/app/lib/libgphoto2_port/0.12.0/usb1.so`. So full mode writes the fresh
+`ptp2.so`/`usb1.so` to **both** places: the `stage2/…/2.5.34` + `…/0.12.2` dirs
+**and** the stock `2.5.27.1` + `0.12.0` paths (stock perms preserved — the stock
+camlib is `0750`). If only the `stage2` copies existed, the core would silently
+bind the **stale stock 2.5.27 ptp2** and the Canon driver would never come up.
+
+## The two shims: showing a card, and tethered capture
+
+The loader `libpolaris_stage2.so` carries three small env-gated shims. They read
+and write only **public** libgphoto2 struct fields and call only **public**
+`gp_camera_set_config` / `gp_camera_set_single_config` APIs — no firmware code,
+no new exported symbols. The wrapper turns both on.
+
+- **Shim #1 — storage / "no card"** (`STAGE2_STORAGE_SHIM=1`). Benro's app decides
+  whether to show a memory card from the camera's reported storage info. Driving
+  the R5 II tethered, the shim writes the Benro `_Camera` storage-type field
+  (`storageType`, at offset `+0x1c` in Benro's extended `_Camera`) to `2` so the
+  app sees a card and raises **no "no card" warning**.
+- **Shims #2 + #3 — force Internal-RAM capture** (`STAGE2_TETHER_CAPTURE=1`).
+  Shim #2 wraps `gp_camera_set_config` and tree-walks the widget set;
+  shim #3 wraps `gp_camera_set_single_config`. Both force Canon's `capturetarget`
+  to **"Internal RAM"**. The Polaris sets configs one at a time via
+  `set_single_config`, so **shim #3 is the one that actually fires** in practice;
+  #2 is there for completeness (any caller that pushes the whole config tree).
+
+### Why tethered (Internal-RAM) capture
+
+With a card selected as the capture target, the R5 II's post-capture
+`ObjectAddedEx` PTP event is **not delivered** through the fresh 2.5.34 core in
+the Polaris' event loop, so the shot fires but the "file is ready" signal never
+arrives and the download hangs (the original stock-firmware symptom, in a new
+guise). Capturing to **Internal RAM** instead takes Canon's `ObjectTransfer`
+path, which **does** fire — so the capture completes and **both the JPEG and the
+RAW** transfer down to the Polaris.
+
+### EOS-init error tolerance (the LGPL `dbg_patch`)
+
+Running ptp2 against a *fresh* 2.5.34 core also re-exposes Canon's EOS init-time
+event/keep-alive drains exactly as upstream wrote them. On the R5 II a couple of
+those `C_PTP(ptp_check_eos_events(...))` / `CR(camera_keep_device_on(...))` calls
+return a transient non-OK the **first** time and abort `camera_init`, dropping the
+camera to the generic "USB PTP Class Camera" driver (no settings, no live view).
+`container/dbg_patch.py` (POLARIS_DBG) makes exactly those drains non-fatal —
+`config.c` `check_eos_events` ×13, `library.c` `keep_device_on` ×3 +
+`check_eos_events` ×1 — by capturing and discarding the transient result instead
+of returning it. It is a mechanical edit of upstream's own LGPL source (a
+documented modification, see [NOTICE](../NOTICE)), adds no symbols or
+dependencies, and is a no-op once the camera answers OK. It is **not** the
+throwaway `trace_patch.py` instrumentation (that is dev-only, `TRACE=1`, never
+shipped).
+
+## The self-driving wrapper (no env vars from the launcher)
+
+`polestar_app` launches `/app/bin/pgphoto` with no special environment, so full
+mode installs a tiny 9-line `sh` wrapper there (no logging) that exports
+`CAMLIBS`/`IOLIBS` (→ the stage2 dirs), `LD_LIBRARY_PATH=/app/lib/stage2:/app/lib`,
+`LD_PRELOAD=/app/lib/stage2/libpolaris_stage2.so`, and the two shim toggles
+`STAGE2_STORAGE_SHIM=1` + `STAGE2_TETHER_CAPTURE=1`, then `exec`s
+`/app/lib/stage2/pgphoto.stage2ondisk`. Everything the fresh stack needs lives
+under `/app/lib/stage2`; its runtime deps (`libltdl.so.7`, `libexif.so.12`,
+`libusb-1.0.so.0`, `libudev.so.1`) are already present on the device.
+
+## Reversible on-device testing (before you flash)
+
+Full mode also emits `out/stage2-ondisk/`, a bundle you can copy to the camera and
+`sh ondisk/install_stage2.sh` — it backs up the real `/app/bin/pgphoto` to
+`/app/sd/pgphoto.prestage2.bak` (only once), populates `/app/lib/stage2`, and
+installs the wrapper. `sh ondisk/restore_stock.sh` copies the stock binary back.
+This lets you confirm `slots filled 64/64` → `gp_camera_init 0` → a capture on your
+own unit **before** committing a flash.
+
+## Determinism
+
+The entire build is byte-for-byte reproducible from the same inputs. Running the
+public patcher in its container against a stock FwPkt (default full mode)
+reproduces **every** hardware-validated component exactly: the reliability base,
+the trampolined `pgphoto.stage2ondisk` (`a83ac7bb`), the loader
+`libpolaris_stage2.so` (`74f681de`), the wrapper (`868c3097`), and all four rebuilt
+LGPL libraries — core `b4c7ec31`, port `aa3ff350`, ptp2 `9bdbd13d`, usb1
+`5199e973`. The only value that shifts run-to-run is the **whole-image**
+`appfs.ubifs` md5, because UBIFS stamps a per-inode mtime at repack time; every
+file *inside* the image is byte-identical. See [TESTED.md](TESTED.md) for the
+full component table.
+
+---
+
+# ptp2-only mode (the conservative fallback)
+
+The rest of this document describes `--ptp2-only`, which keeps `pgphoto`'s
+compiled-in 2.5.27 core and swaps only the on-disk ptp2 camlib + usb1 iolib.
+
 ## Why swapping the camlib `.so` alone does nothing
 
 (This applies to the **camlib** — `ptp2.so`. The **port iolib** — `usb1.so` — is

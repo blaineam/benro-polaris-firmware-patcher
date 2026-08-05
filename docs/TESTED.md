@@ -9,6 +9,56 @@
 | Camera | **Canon EOS R5 Mark II** (USB `04a9:3314`) — the only camera tested |
 | libgphoto2 built | **2.5.34** |
 
+## Modes: what was verified on hardware
+
+- **Full libgphoto2 (default)** — **HARDWARE-VERIFIED, flashed end-to-end.** On a
+  physical Canon EOS R5 Mark II + Benro Polaris, the full-stack swap (fresh 2.5.34
+  core + port + ptp2 + usb1 via the on-disk trampoline loader, with the storage +
+  tethered-capture shims) was confirmed working from a **cold boot**:
+  `mmap slot page → dlopen core/port → slots filled 64/64 → gp_camera_init ret 0`.
+  Confirmed on the device:
+  - **Settings stick** (ISO/shutter/aperture/WB/focus).
+  - **Live view** streams.
+  - **No "no card" warning** (storage shim).
+  - **Capture downloads both JPEG and RAW** (Internal-RAM/tethered capture via the
+    `ObjectTransfer` path — card-mode `ObjectAddedEx` is not delivered through the
+    fresh core).
+- **ptp2-only (fallback)** — also hardware-verified (this was the project's first
+  working version): detection, live view, controls, capture, survives reboot.
+
+Full mode is the default because it is the one validated end-to-end today; ptp2-only
+remains as the conservative fallback (`--ptp2-only`).
+
+## Reproducibility (full mode) — the patcher reproduces the flashed build
+
+The public patcher, run in its own container against a stock FwPkt with **no
+flags** (default full mode), reproduces the **exact** hardware-validated
+components **byte-for-byte**. Every file placed in the appfs matches the flashed,
+device-confirmed build:
+
+| Component | appfs path | md5 |
+|---|---|---|
+| core `libgphoto2.so.6` | `lib/stage2/` | `b4c7ec318ffc2d4a2d4f72ca1055b44b` |
+| port `libgphoto2_port.so.12` | `lib/stage2/` | `aa3ff3507774bcd9f7af32993b2f869b` |
+| ptp2 `ptp2.so` (camlib) | `lib/stage2/libgphoto2/2.5.34/` **and** `lib/libgphoto2/2.5.27.1/` | `9bdbd13d064f7f94102926e013fdf977` |
+| usb1 `usb1.so` (iolib) | `lib/stage2/libgphoto2_port/0.12.2/` **and** `lib/libgphoto2_port/0.12.0/` | `5199e973f5a0f9012f261383470ef27f` |
+| loader `libpolaris_stage2.so` | `lib/stage2/` | `74f681de5a43e068df36ae61001a4e79` |
+| trampolined `pgphoto.stage2ondisk` | `lib/stage2/` | `a83ac7bbee13078ca53807a452961285` |
+| wrapper `pgphoto` | `bin/` | `868c3097d6337689a431da76fe45343b` |
+
+The rebuilt **LGPL libraries** are clean upstream builds (soft-float EABI5,
+glibc ≤ 2.24, all 64 boundary symbols exported, `_Camera` padded so
+`gp_camera_new` allocates 4140 bytes, ptp2 carries the documented EOS-init
+non-fatal edit) — and they now reproduce the validated binaries **exactly**.
+
+> The whole-image `appfs.ubifs` md5 is **not** a fixed constant across runs:
+> UBIFS stores a per-inode mtime, so files written at repack time carry the
+> current wall-clock and the container md5 of the packed image shifts between
+> runs. This is cosmetic — **every regular file inside the image is
+> byte-identical** to the table above (verify by re-extracting with
+> `ubireader_extract_files` and md5-summing the components). The mechanism is
+> fully reproduced; the image is safe to flash.
+
 Stock component MD5s this tool was validated against (from `firmwareInfo`):
 
 ```
