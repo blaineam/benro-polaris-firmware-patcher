@@ -36,7 +36,20 @@ RUN set -eux; \
     pip3 install "ubi_reader==0.8.0" python-lzo pyelftools
 
 COPY container/ /opt/patcher/
-RUN chmod +x /opt/patcher/*.sh /opt/patcher/ondisk/*.sh /opt/patcher/ondisk/pgphoto.wrapper
+
+# Normalise line endings, then set the exec bits.
+#
+# A Windows `git clone` without .gitattributes checks these files out with CRLF,
+# which makes every script here die with `/bin/bash^M: bad interpreter` (issue
+# #1) and would change the bytes of pgphoto.wrapper / stage2_loader.c that the
+# build reproduces byte-for-byte. .gitattributes now pins LF on checkout; this
+# is the belt-and-braces pass for clones made before it existed (or from a zip
+# export). Everything under /opt/patcher is text, and stripping a trailing CR is
+# a no-op on an already-LF file, so this is safe to run unconditionally.
+RUN set -eux; \
+    find /opt/patcher -type f -exec sed -i 's/\r$//' {} +; \
+    chmod +x /opt/patcher/*.sh /opt/patcher/ondisk/*.sh /opt/patcher/ondisk/pgphoto.wrapper; \
+    head -1 /opt/patcher/patch.sh | grep -q '^#!/bin/bash$'
 
 # /in  : read-only mount of the user's stock FwPkt (folder or unzipped)
 # /out : writable mount for the produced custom FwPkt + FwPkt.zip

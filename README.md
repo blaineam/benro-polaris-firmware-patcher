@@ -105,7 +105,8 @@ signals "file ready" and the download hangs. Internal-RAM capture uses the
 [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
 Every other `appfs` file — all other iolibs (`disk`/`serial`/`ptpip`/…), the
-kernel, `rootfs.ubifs`, gimbal blobs, U-Boot env — is **byte-for-byte unchanged**.
+kernel, `rootfs.ubifs`, gimbal blobs, U-Boot env — is **byte-for-byte unchanged**
+(unless you pass `--ssh-key`, which *adds* one new file and still modifies none).
 
 ### ptp2-only mode (`--ptp2-only`)
 
@@ -117,6 +118,41 @@ The conservative fallback changes up to **three** files in place:
 3. **`/app/bin/pgphoto`** → **14 bytes** of edits: 3 dispatch gates (load the new
    camlib instead of the compiled-in 2.5.27 copy), `resetUsb → return 0`, and
    skip the eager `ARG_LIST_FILES` full-card scan.
+
+### Optional: SSH debug access (`--ssh-key`, off by default)
+
+The stock firmware **already runs OpenSSH** — `/etc/init.d/rcS` ends with
+`/usr/local/bin/sshd`, and its `sshd_config` ships `PermitRootLogin yes` with
+`AuthorizedKeysFile .ssh/authorized_keys`. The only thing keeping you out is that
+`/root/.ssh` is empty, so the root password is the sole way in.
+
+`--ssh-key <your .pub>` authorises your key instead. It **modifies nothing**: the
+stock `/app/bootapp` already runs an optional hook if the file happens to exist —
+
+```sh
+if [ -f "/app/network_telnetd.sh" ];then cd /app; ./network_telnetd.sh; fi
+```
+
+— so the patcher just **adds that one file**. At each boot it appends your key(s)
+to `/root/.ssh/authorized_keys` (never removing keys already there), fixes the
+`StrictModes` permissions, and exits. Then:
+
+```bash
+ssh -i ~/.ssh/your_polaris_key root@<polaris ip>
+```
+
+The tool validates every key (type allow-list, base64, SSH wire format), prints
+its `SHA256:` fingerprint, and refuses a private key. It also writes
+`out/ssh-debug/` containing the exact script that went into the image plus
+instructions to install it **without flashing** (if you already have access) and
+to remove it. Fail-closed: if `/app/bootapp` in your firmware doesn't call a hook
+the patcher can safely claim, it aborts rather than edit `bootapp`.
+
+> ⚠️ **This gives anyone holding the matching private key root on your Polaris
+> over the network.** It is a debugging aid — leave it off unless you want it.
+> The device's `sshd` also still accepts the stock root password either way; this
+> tool doesn't change passwords or `sshd_config`. Reflashing stock firmware
+> removes both the hook and the `authorized_keys` it wrote.
 
 ### Common to both modes
 
@@ -185,6 +221,14 @@ Options (both launchers):
 | `--selftest` / `-SelfTest` | off | Emulate the driver load under qemu and confirm the R5 II registers |
 | `--no-fix-typo` / `-NoFixTypo` | off | Keep libgphoto2's upstream `EOS 5Rm2` model-name typo |
 | `--no-usb1` / `-NoUsb1` | off | (ptp2-only) Do **not** swap the `usb1` iolib; patch only the `ptp2` camlib + `pgphoto` |
+| `--ssh-key` / `-SshKey` | off | Authorise a **public** key for root SSH login (see [above](#optional-ssh-debug-access---ssh-key-off-by-default)). Takes a path to a `.pub`/`authorized_keys` file or a literal key line; repeat the flag (bash) or pass a comma-separated list (PowerShell) for several |
+
+```bash
+./patch-polaris.sh --fwpkt /path/to/FwPkt --ssh-key ~/.ssh/id_ed25519.pub
+```
+```powershell
+.\patch-polaris.ps1 -FwPkt C:\path\to\FwPkt -SshKey $HOME\.ssh\id_ed25519.pub
+```
 
 Output:
 - `out/FwPkt/` — the unpacked custom firmware
@@ -192,8 +236,31 @@ Output:
 - `out/stage2-ondisk/` — *(full mode)* reversible on-device test bundle
   (`ondisk/install_stage2.sh` installs it, `ondisk/restore_stock.sh` reverts)
 - `out/licenses/` — *(full mode)* libgphoto2 `COPYING` (LGPL-2.1) + source offer
+- `out/ssh-debug/` — *(`--ssh-key` only)* the boot hook that went into the image,
+  with install-without-flashing and removal instructions
 
 The first run builds the Docker image (a few minutes). Later runs are fast.
+
+### Windows notes
+
+Use **Docker Desktop with the Linux container engine** (WSL2 or Hyper-V backend).
+Everything in the container must be checked out with **LF** line endings — the
+repo pins that via [`.gitattributes`](.gitattributes), and the image also strips
+any stray `CR` after `COPY`, so a Windows clone works out of the box. If you
+cloned **before** that fix and see
+
+```
+bash: ./patch.sh: /bin/bash^M: bad interpreter: No such file or directory
+```
+
+renormalise your working copy (or just re-clone):
+
+```powershell
+git rm --cached -r . ; git reset --hard
+```
+
+The launcher now also **stops on a failed `docker build` or a failed patch run**
+instead of printing `[OK]` over a container that never produced anything.
 
 ## Installing on the Polaris
 

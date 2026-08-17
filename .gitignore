@@ -33,6 +33,7 @@ src/libgphoto2-*/
 *.tar.gz
 
 # OS / editor
+__pycache__/
 .DS_Store
 Thumbs.db
 *.swp

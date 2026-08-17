@@ -25,6 +25,9 @@ Copyright (c) 2026 Blaine Miller. Everything authored here:
   container/trace_patch.py              (dev-only TRACE=1 diagnostic instrumentation —
                                          NOT used by any shippable recipe)
   container/polaris_shim.c.in           (ptp2-only trampoline shim)
+  container/gen_ssh_hook.py             (--ssh-key: validates public keys and emits
+                                         the /app boot hook that authorises them;
+                                         the hook it generates is MIT too)
   container/ondisk/pgphoto.wrapper, install_stage2.sh, restore_stock.sh
   docs/*
 

@@ -391,3 +391,75 @@ recoverability, not a guarantee; flash at your own risk.**
 - Touches **at most three** appfs files (`ptp2.so`, `usb1.so`, `pgphoto`); every
   other appfs file — including all other iolibs (`disk`/`serial`/`ptpip`/… ) — is
   byte-identical to stock.
+- With `--ssh-key` it *adds* exactly one new appfs file (a boot hook the stock
+  `bootapp` already looks for) and still **modifies** none. See below.
+
+---
+
+# Optional: SSH debug access (`--ssh-key`)
+
+## The device already runs sshd
+
+The stock rootfs ships **OpenSSH 7.8p1** at `/usr/local/bin/sshd` (plus `scp` and
+`sftp`), and `/etc/init.d/rcS` starts it on every boot as its last action:
+
+```sh
+umount /dev/pts; rm -rf /dev/pts; mkdir /dev/pts; mount /dev/pts
+/usr/local/bin/sshd
+```
+
+Its `sshd_config` is permissive by Benro's choice — `PermitRootLogin yes`,
+`PasswordAuthentication yes`, `AuthorizedKeysFile .ssh/authorized_keys` — and
+`/etc/passwd` gives `root` a real (DES-crypt) password and `/bin/sh`. So SSH is
+**already listening on a stock device**; the only thing missing for key login is
+a key in `/root/.ssh`, which lives in the **rootfs** — the partition this tool
+ships byte-identical.
+
+## Why no firmware file has to be modified
+
+`/app/bootapp` (run at boot by `/etc/init.d/S10mpp`, which `ubiattach`es and
+mounts the appfs, then runs `./bootapp`) ends with two **optional** hooks:
+
+```sh
+# set network and start telnetd
+if [ -f "/app/network_telnetd.sh" ];then cd /app; ./network_telnetd.sh; fi
+# start ci agent
+if [ -f "/app/start_agent.sh" ];then cd /app; ./start_agent.sh; fi
+```
+
+Neither file exists in stock firmware — they are Benro's own debug/CI escape
+hatches. `--ssh-key` **creates the first free one** (0755, `bootapp`'s uid/gid).
+That is the entire firmware change: one added file, nothing edited, `bootapp`
+itself untouched. If a future firmware ships its own `network_telnetd.sh`, the
+patcher steps to `start_agent.sh`; if it calls neither, the patcher **aborts**
+rather than editing `bootapp`.
+
+## What the hook does at boot
+
+It appends each authorised key to `/root/.ssh/authorized_keys` — `grep -qxF`
+first, so re-running it is idempotent and any key already on the device is kept —
+then `chmod 700`/`600` + `chown 0:0` so sshd's `StrictModes` accepts the file.
+(`/` is mounted `rw` per the U-Boot `bootargs`, so that write persists.) It runs
+**before** `rcS` reaches its `sshd` line, and carries a belt-and-braces
+`( sleep 20; pidof sshd || /usr/local/bin/sshd ) &` for a firmware that ever
+stops starting sshd itself. It is deliberately **not** `set -e`: a boot hook must
+never be able to abort the rest of `bootapp`.
+
+## Key validation (`container/gen_ssh_hook.py`)
+
+Each line must be a real public key: a type from the allow-list sshd 7.8 accepts
+(`ssh-ed25519`, `ssh-rsa`, `rsa-sha2-*`, `ecdsa-sha2-nistp*`, the two `sk-*`
+FIDO types — **not** `ssh-dss`, which that sshd rejects by default), valid
+base64, and an SSH wire-format body whose embedded algorithm name matches the
+type field. Private key material is detected and refused. The `SHA256:`
+fingerprint of every accepted key is printed (it matches `ssh-keygen -lf`) and
+baked into the hook's header comment, so what is authorised is auditable both in
+the build log and on the device.
+
+## Removing it
+
+Delete `/app/<hook>` and drop the key from `/root/.ssh/authorized_keys`, or
+reflash stock firmware — that rewrites both partitions, so both the hook and the
+`authorized_keys` line go away. `out/ssh-debug/` carries the same script
+standalone, for installing it on a device you can already reach without flashing
+at all.

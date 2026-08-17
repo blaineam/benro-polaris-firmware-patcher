@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — optional SSH debug access + Windows build fixes
+
+### Added
+- **`--ssh-key` / `-SshKey` (opt-in): authorise a public key for root SSH login.**
+  The stock firmware already runs OpenSSH 7.8p1 (`/usr/local/bin/sshd`, started
+  by `/etc/init.d/rcS`, `PermitRootLogin yes`); only a key in `/root/.ssh` was
+  missing. The patcher **modifies no firmware file** — it adds the optional boot
+  hook `/app/bootapp` already calls if present (`network_telnetd.sh`, falling
+  back to `start_agent.sh`), which appends your key(s) to
+  `/root/.ssh/authorized_keys` at boot (idempotent; existing keys kept) and fixes
+  the `StrictModes` permissions. Aborts instead of editing `bootapp` if the
+  firmware calls no hook it can claim. Accepts a `.pub`/`authorized_keys` path or
+  a literal key line; repeatable.
+- **`container/gen_ssh_hook.py`** — strict key validation (type allow-list, base64,
+  SSH wire-format body matching the type; private keys refused) plus `SHA256:`
+  fingerprints (identical to `ssh-keygen -lf`) in the log and in the hook's header.
+- **`out/ssh-debug/`** — the exact hook that went into the image, standalone, with
+  instructions to install it **without flashing** and to remove it.
+
+### Fixed — Windows (issue #1)
+- **CRLF checkouts broke the container** (`/bin/bash^M: bad interpreter`, which
+  surfaced as `exec /opt/patcher/patch.sh: no such file or directory`).
+  Added **`.gitattributes`** pinning LF for everything the container consumes
+  (CRLF only for `*.ps1`), and the **Dockerfile now strips stray `CR`s after
+  `COPY`** and asserts `patch.sh`'s shebang, so clones made before the fix work
+  too. This also protects reproducibility: normalising a CRLF checkout restores
+  `pgphoto.wrapper` to its hardware-validated md5 `868c3097…`.
+- **`patch-polaris.ps1` no longer reports success after a failed build/run.**
+  `docker build` is no longer quiet-with-output-discarded, and both `docker build`
+  and `docker run` exit codes are checked (the old script printed `[OK]` and the
+  output paths even when the container never ran).
+- **`patch-polaris.ps1` bind-mount paths** are normalised for Docker Desktop
+  (provider path → drive letter + forward slashes, trailing separator trimmed,
+  clear error on UNC paths instead of a cryptic mount failure).
+
 ## Unreleased — full-libgphoto2 stack swap is now the DEFAULT (hardware-verified)
 
 The patcher now replaces the **entire** libgphoto2 stack by default — core + port
