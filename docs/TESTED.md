@@ -159,6 +159,22 @@ Confirmed by the maintainer on a physical R5 Mark II:
   and **survive a reboot**. The rebuilt 2.5.34 `usb1` (port 0.12.2) coexists fine
   with `pgphoto`'s compiled-in 0.12.0 port core in practice.
 
+## ⚠️ `--ssh-key` — verified in the build, NOT yet flash-verified
+
+The optional SSH hook (`--ssh-key`) has been verified **through the patcher**:
+against stock FwVer 4.0.0.32 it adds exactly one appfs file
+(`/app/network_telnetd.sh`, same uid/gid/mode as `bootapp`), modifies nothing
+else, and the repacked appfs diffs against stock as *only* the usual mode files
+plus that one addition. The facts it relies on were read out of this firmware's
+own images: `/etc/init.d/rcS` starts `/usr/local/bin/sshd` (OpenSSH 7.8p1),
+`sshd_config` has `PermitRootLogin yes` + `AuthorizedKeysFile .ssh/authorized_keys`,
+`/app/bootapp` runs `/app/network_telnetd.sh` if it exists, and `bootargs` mounts
+`/` `rw`.
+
+**It has not been flashed and logged into on hardware.** If you try it, the
+device-side script is `out/ssh-debug/` — you can install that on a device you can
+already reach and confirm the login before committing to a flash.
+
 ## ❌ NOT tested
 
 - **Any camera other than the Canon R5 Mark II.** May regress other models —

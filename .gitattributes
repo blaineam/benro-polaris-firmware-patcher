@@ -1,0 +1,29 @@
+# Everything in this repo that the Linux container consumes MUST be checked out
+# with LF endings, on every platform. A CRLF checkout on Windows makes the
+# container fail with `/bin/bash^M: bad interpreter: No such file or directory`
+# (github issue #1), and it would also change the md5 of the wrapper/loader
+# sources the build is supposed to reproduce byte-for-byte.
+* text=auto eol=lf
+
+*.sh            text eol=lf
+*.py            text eol=lf
+*.c             text eol=lf
+*.in            text eol=lf
+*.md            text eol=lf
+Dockerfile      text eol=lf
+pgphoto.wrapper text eol=lf
+
+# The Windows launcher never enters the container; CRLF is conventional there.
+*.ps1           text eol=crlf
+
+# Never line-ending-translate binaries.
+*.so     binary
+*.bin    binary
+*.ubifs  binary
+*.img    binary
+*.zip    binary
+*.gz     binary
+*.xz     binary
+*.bz2    binary
+*.png    binary
+*.jpg    binary

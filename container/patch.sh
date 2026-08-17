@@ -15,6 +15,8 @@
 #     LIBGPHOTO2_VERSION   libgphoto2 release tag to build (default 2.5.34)
 #     FIX_R5M2_TYPO        1 = correct the upstream "EOS 5Rm2" model-name typo
 #     SELFTEST             1 = qemu-emulate the driver load (needs qemu-arm-static)
+#     SSH_PUBKEY           optional: authorized_keys line(s) to authorise for
+#                          root SSH debugging (adds ONE new file to the appfs)
 #
 #  SEE README.md AND docs/TESTED.md.  Use at your own risk.  Tested ONLY against
 #  Benro Polaris FwVer 4.0.0.32 with a Canon EOS R5 Mark II.
@@ -359,6 +361,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7. OPTIONAL (SSH_PUBKEY): authorise a public key for root SSH debugging.
+#
+#    The stock firmware ALREADY runs OpenSSH — /etc/init.d/rcS ends with
+#    `/usr/local/bin/sshd`, and its sshd_config has `PermitRootLogin yes` +
+#    `AuthorizedKeysFile .ssh/authorized_keys`. The only thing missing is a key
+#    in /root/.ssh (rootfs), which this tool never touches.
+#
+#    So instead of modifying anything, we ADD the optional boot hook the stock
+#    /app/bootapp already calls if present:
+#        if [ -f "/app/network_telnetd.sh" ];then cd /app; ./network_telnetd.sh; fi
+#    The hook appends the key to /root/.ssh/authorized_keys at boot. One new
+#    appfs file; every existing file stays exactly as the mode above left it.
+#    Fail-closed: if bootapp doesn't call a hook we can safely claim, we abort
+#    rather than edit bootapp itself.
+# ---------------------------------------------------------------------------
+SSH_HOOK=""
+if [ -n "${SSH_PUBKEY:-}" ]; then
+  log "ssh debug: authorising public key(s) for root@polaris…"
+  BOOTAPP="$APP/bootapp"
+  [ -f "$BOOTAPP" ] || die "SSH_PUBKEY set but /app/bootapp is missing from this appfs — refusing to guess a boot hook"
+  for cand in network_telnetd.sh start_agent.sh; do
+    grep -q "$cand" "$BOOTAPP" || continue          # bootapp must actually call it
+    if [ -e "$APP/$cand" ]; then
+      warn "  /app/$cand already exists in this firmware — leaving it alone, trying the next hook"
+      continue
+    fi
+    SSH_HOOK="$cand"; break
+  done
+  [ -n "$SSH_HOOK" ] || die "SSH_PUBKEY: no free boot hook that /app/bootapp calls (looked for network_telnetd.sh, start_agent.sh) — refusing to modify bootapp"
+
+  printf '%s\n' "$SSH_PUBKEY" > "$W/ssh_keys.txt"
+  python3 /opt/patcher/gen_ssh_hook.py \
+      --keys "$W/ssh_keys.txt" --hook-name "$SSH_HOOK" --out "$W/ssh_hook.sh" \
+      || die "SSH_PUBKEY: invalid public key material (see the error above)"
+
+  # sshd lives in the rootfs, which this tool ships byte-identical. Warn (don't
+  # abort) if it isn't there — the hook is harmless either way.
+  grep -aq 'sshd' /in/camera/rootfs.ubifs 2>/dev/null \
+    || warn "  no 'sshd' found in this rootfs.ubifs — the key will be installed but nothing may serve SSH"
+
+  # same owner/mode as bootapp itself (which provably has +x — S10mpp runs it)
+  B_UID="$(stat -c %u "$BOOTAPP")"; B_GID="$(stat -c %g "$BOOTAPP")"; B_MODE="$(stat -c %a "$BOOTAPP")"
+  install -m "$B_MODE" -o "$B_UID" -g "$B_GID" "$W/ssh_hook.sh" "$APP/$SSH_HOOK"
+  log "  added /app/$SSH_HOOK (boot hook, $B_MODE $B_UID:$B_GID — same as bootapp) — appends to /root/.ssh/authorized_keys at boot"
+  log "  after flashing: ssh -i <your private key> root@<polaris ip>"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. Repack appfs (geometry read from the stock image) + regenerate firmwareInfo
 # ---------------------------------------------------------------------------
 /opt/patcher/repack_appfs.sh "$STOCK_APPFS" "$APP" "$W/out/appfs.ubifs"
@@ -411,6 +461,51 @@ EOF
   log "  wrote LGPL source offer -> /out/licenses"
 fi
 
+# ---------------------------------------------------------------------------
+# 8c. SSH hook: also emit it standalone, so anyone who already has device access
+#      (serial console, or the root password) can enable key login WITHOUT
+#      flashing — and so the exact script that went into the appfs is auditable.
+# ---------------------------------------------------------------------------
+if [ -n "$SSH_HOOK" ]; then
+  SSHOUT=/out/ssh-debug; rm -rf "$SSHOUT"; mkdir -p "$SSHOUT"
+  install -m 755 "$W/ssh_hook.sh" "$SSHOUT/$SSH_HOOK"
+  cat > "$SSHOUT/README.txt" <<EOF
+SSH debug access
+================
+
+The custom firmware in ../FwPkt now contains ONE extra appfs file:
+
+    /app/$SSH_HOOK
+
+It is the optional boot hook the stock /app/bootapp already calls if it exists,
+so no existing firmware file had to be modified to add it. At every boot it
+appends your public key(s) to /root/.ssh/authorized_keys. The stock firmware
+already runs OpenSSH (/usr/local/bin/sshd, started by /etc/init.d/rcS, with
+PermitRootLogin yes) — only the key was missing.
+
+After flashing:
+
+    ssh -i <your private key> root@<polaris ip>
+
+Install it WITHOUT flashing (if you already have device access):
+
+    scp $SSH_HOOK root@<polaris ip>:/app/$SSH_HOOK
+    ssh root@<polaris ip> 'chmod +x /app/$SSH_HOOK && /app/$SSH_HOOK'
+    # (it also runs itself on every subsequent boot)
+
+Remove it:
+
+    rm /app/$SSH_HOOK
+    # and drop your key from /root/.ssh/authorized_keys
+    # or reflash stock firmware, which restores both partitions
+
+SECURITY: anyone holding the matching PRIVATE key gets root on this Polaris
+over the network. The device's sshd also still accepts the stock root password,
+which this tool does not change.
+EOF
+  log "  wrote standalone ssh hook -> /out/ssh-debug/$SSH_HOOK (install without flashing; see README.txt)"
+fi
+
 log "----------------------------------------------------------------------"
 if [ "$MODE" = "full" ]; then
   log "DONE (mode: FULL libgphoto2 — core+port+ptp2+usb1 swap, on-disk trampoline)."
@@ -421,6 +516,11 @@ log "Custom firmware written to /out :"
 ( cd /out && find FwPkt -type f | sort | sed 's/^/    /' )
 log "    FwPkt.zip  md5=$(md5sum /out/FwPkt.zip 2>/dev/null | cut -d' ' -f1)"
 log "custom appfs.ubifs md5=$(md5sum /out/FwPkt/camera/appfs.ubifs | cut -d' ' -f1)"
+if [ -n "$SSH_HOOK" ]; then
+  log "SSH debug access is ENABLED in this image (/app/$SSH_HOOK):"
+  log "    after flashing:  ssh -i <your private key> root@<polaris ip>"
+  log "    anyone with that private key has root on the device over the network."
+fi
 if [ "$MODE" = "full" ]; then
   log "Before flashing you can TEST reversibly on-device:"
   log "    copy /out/stage2-ondisk to the camera and run ondisk/install_stage2.sh"
