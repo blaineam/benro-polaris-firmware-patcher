@@ -23,6 +23,29 @@
 
 typedef struct { double x, y, flux; int npix; } star_t;
 
+static float* bgmap = NULL;      /* per-tile background */
+static float* nsmap = NULL;      /* per-tile noise (MAD -> sigma) */
+static int tiles_w = 0, tiles_h = 0, tile = 64;
+
+/* bilinear interpolation between tile centres */
+static double map_at(const float* m, int x, int y) {
+    double fx = ((double)x - tile * 0.5) / tile;
+    double fy = ((double)y - tile * 0.5) / tile;
+    int x0, y0, x1, y1;
+    double ax, ay;
+    if (fx < 0) fx = 0;
+    if (fy < 0) fy = 0;
+    x0 = (int)fx; y0 = (int)fy;
+    x1 = x0 + 1;  y1 = y0 + 1;
+    if (x1 > tiles_w - 1) x1 = tiles_w - 1;
+    if (y1 > tiles_h - 1) y1 = tiles_h - 1;
+    if (x0 > tiles_w - 1) x0 = tiles_w - 1;
+    if (y0 > tiles_h - 1) y0 = tiles_h - 1;
+    ax = fx - (int)fx; ay = fy - (int)fy;
+    return (1 - ax) * (1 - ay) * m[y0 * tiles_w + x0] + ax * (1 - ay) * m[y0 * tiles_w + x1]
+         + (1 - ax) * ay * m[y1 * tiles_w + x0] + ax * ay * m[y1 * tiles_w + x1];
+}
+
 static int cmp_flux(const void* a, const void* b) {
     double d = ((const star_t*)b)->flux - ((const star_t*)a)->flux;
     return (d > 0) - (d < 0);
@@ -38,6 +61,10 @@ static void usage(const char* me) {
 "                    nebulosity and clipped glare)\n"
 "  --max-stars N     keep the brightest N       (default 300)\n"
 "  --margin PX       ignore blobs within PX of the edge, full-res (default 16)\n"
+"  --tile PX         background tile size at the DECODED scale (default 64).\n"
+"                    Background and noise are measured per tile and\n"
+"                    interpolated, so vignetting and light-pollution gradients\n"
+"                    do not swamp the detection threshold.\n"
 "  --y-origin O      'bottom' (FITS convention, the default, and what\n"
 "                    astrometry.net's own .xyls files use) or 'top' (raw image\n"
 "                    rows). Getting this wrong flips the parity and the\n"
@@ -61,7 +88,7 @@ int main(int argc, char** argv) {
     unsigned char* gray = NULL;
     int W, H, fullW, fullH;
     JSAMPARRAY buf;
-    double bg, noise;
+    double bg = 0, noise = 1;
     int* label = NULL;
     int* stack = NULL;
     star_t* stars = NULL;
@@ -78,6 +105,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--max-stars"))  maxstars = atoi(NEXT());
         else if (!strcmp(a, "--margin"))     margin = atoi(NEXT());
         else if (!strcmp(a, "--y-origin"))   { const char* v = NEXT(); y_bottom = strcmp(v, "top") != 0; }
+        else if (!strcmp(a, "--tile"))       tile = atoi(NEXT());
         else if (!strcmp(a, "--stats"))      stats = 1;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option: %s\n", a); usage(argv[0]); return 2; }
@@ -117,35 +145,60 @@ int main(int argc, char** argv) {
     jpeg_destroy_decompress(&cinfo);
     fclose(f);
 
-    /* Background and noise from a sparse sample: the sky dominates by area, so
-     * the median is a robust background and the MAD a robust noise estimate. */
+    /* Background and noise, ESTIMATED LOCALLY.
+     *
+     * A global estimate is fine on a clean test image and useless on a real
+     * one: a night frame has vignetting, a light-pollution gradient and amp
+     * glow, so a whole-frame MAD measures the GRADIENT rather than the pixel
+     * noise. On a real R5 II frame that produced bg=84, sigma=31, a threshold
+     * of 240/255, and four detected stars. So: split the image into tiles,
+     * take a median and MAD per tile, and interpolate between tile centres. */
     {
-        int nsamp = 0, cap = 200000;
-        unsigned char* samp = (unsigned char*)malloc(cap);
-        int step = (int)sqrt(((double)W * H) / (double)cap) + 1;
-        int x, y;
+        int tw = (W + tile - 1) / tile, th = (H + tile - 1) / tile;
+        int tx, ty, x, y;
         long hist[256];
-        long acc, half;
-        for (y = 0; y < H; y += step)
-            for (x = 0; x < W; x += step)
-                if (nsamp < cap) samp[nsamp++] = gray[(size_t)y * W + x];
-        memset(hist, 0, sizeof(hist));
-        for (i = 0; i < nsamp; i++) hist[samp[i]]++;
-        acc = 0; half = nsamp / 2; bg = 0;
-        for (i = 0; i < 256; i++) { acc += hist[i]; if (acc >= half) { bg = i; break; } }
-        /* MAD -> sigma */
-        memset(hist, 0, sizeof(hist));
-        for (i = 0; i < nsamp; i++) hist[(int)fabs(samp[i] - bg)]++;
-        acc = 0; noise = 1.0;
-        for (i = 0; i < 256; i++) { acc += hist[i]; if (acc >= half) { noise = i; break; } }
-        noise = noise * 1.4826;
-        if (noise < 1.0) noise = 1.0;
-        free(samp);
+        if (tw < 1) tw = 1;
+        if (th < 1) th = 1;
+        bgmap = (float*)malloc((size_t)tw * th * sizeof(float));
+        nsmap = (float*)malloc((size_t)tw * th * sizeof(float));
+        if (!bgmap || !nsmap) { fprintf(stderr, "out of memory\n"); return 1; }
+        for (ty = 0; ty < th; ty++) {
+            for (tx = 0; tx < tw; tx++) {
+                int x0 = tx * tile, y0 = ty * tile;
+                int x1 = x0 + tile, y1 = y0 + tile;
+                long n = 0, acc, half;
+                double med = 0, mad = 1;
+                if (x1 > W) x1 = W;
+                if (y1 > H) y1 = H;
+                memset(hist, 0, sizeof(hist));
+                for (y = y0; y < y1; y++)
+                    for (x = x0; x < x1; x++) { hist[gray[(size_t)y * W + x]]++; n++; }
+                if (!n) { bgmap[ty * tw + tx] = 0; nsmap[ty * tw + tx] = 1; continue; }
+                acc = 0; half = n / 2;
+                for (i = 0; i < 256; i++) { acc += hist[i]; if (acc >= half) { med = i; break; } }
+                {   /* MAD about this tile's own median */
+                    long h2[256];
+                    memset(h2, 0, sizeof(h2));
+                    for (y = y0; y < y1; y++)
+                        for (x = x0; x < x1; x++)
+                            h2[(int)fabs((double)gray[(size_t)y * W + x] - med)]++;
+                    acc = 0;
+                    for (i = 0; i < 256; i++) { acc += h2[i]; if (acc >= half) { mad = i; break; } }
+                }
+                mad *= 1.4826;
+                if (mad < 0.8) mad = 0.8;      /* a floor: never trust sigma=0 */
+                bgmap[ty * tw + tx] = (float)med;
+                nsmap[ty * tw + tx] = (float)mad;
+            }
+        }
+        tiles_w = tw; tiles_h = th;
+        /* report the frame-centre values so --stats stays meaningful */
+        bg = bgmap[(th / 2) * tw + (tw / 2)];
+        noise = nsmap[(th / 2) * tw + (tw / 2)];
     }
 
     /* Connected components above threshold, iterative flood fill. */
     {
-        double thresh = bg + ksigma * noise;
         int cap = 4096;
         int x, y;
         label = (int*)calloc((size_t)W * H, sizeof(int));
@@ -159,13 +212,14 @@ int main(int argc, char** argv) {
                 int sp = 0, npix = 0;
                 double sx = 0, sy = 0, sf = 0;
                 int minx, maxx, miny, maxy;
-                if (label[idx] || gray[idx] <= thresh) continue;
+                if (label[idx] || gray[idx] <= map_at(bgmap, x, y) + ksigma * map_at(nsmap, x, y))
+                    continue;
                 label[idx] = 1; stack[sp++] = (int)idx;
                 minx = maxx = x; miny = maxy = y;
                 while (sp > 0) {
                     int cur = stack[--sp];
                     int cx = cur % W, cy = cur / W;
-                    double v = gray[cur] - bg;
+                    double v = gray[cur] - map_at(bgmap, cx, cy);
                     int dx, dy;
                     if (v < 0) v = 0;
                     npix++; sx += cx * v; sy += cy * v; sf += v;
@@ -182,7 +236,9 @@ int main(int argc, char** argv) {
                             if (dx == 0 && dy == 0) continue;
                             if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
                             nidx = (size_t)ny * W + nx;
-                            if (label[nidx] || gray[nidx] <= thresh) continue;
+                            if (label[nidx] ||
+                                gray[nidx] <= map_at(bgmap, nx, ny) + ksigma * map_at(nsmap, nx, ny))
+                                continue;
                             label[nidx] = 1;
                             if (sp == cap) { cap *= 2; stack = (int*)realloc(stack, (size_t)cap * sizeof(int)); }
                             stack[sp++] = (int)nidx;
@@ -227,6 +283,6 @@ int main(int argc, char** argv) {
         printf("%.3f %.3f %.1f\n", stars[i].x, yy, stars[i].flux);
     }
 
-    free(gray); free(label); free(stack); free(stars);
+    free(gray); free(label); free(stack); free(stars); free(bgmap); free(nsmap);
     return nstars > 0 ? 0 : 3;
 }

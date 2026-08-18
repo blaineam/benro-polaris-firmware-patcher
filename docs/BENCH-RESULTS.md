@@ -271,3 +271,46 @@ sim-verify.py --mount ./polaris-mount --camera \
 
 This is the regression test to run before anything touches real motors, and it
 needs no camera, no sky and no hardware.
+
+---
+
+# Round 5 — a REAL Canon R5 Mark II frame, on the device
+
+`259A8092.JPG`: 8192×5464, M42 at ~380 mm on full frame. Ground truth from
+upstream `solve-field` run **blind** (no position or scale hint):
+
+```
+RA 83.801735  Dec -5.163281   2.39307 arcsec/px   5.4446 x 3.6323 deg
+solved with index-4112, simplexy found 2596 sources
+```
+
+## Our pipeline, same frame
+
+| | RA | Dec | scale | agreement |
+|---|---|---|---|---|
+| upstream (blind) | 83.801735 | −5.163281 | 2.39307 | — |
+| ours, x86 | 83.800813 | −5.161750 | 2.390209 | **6.4″** |
+| **ours, on the Polaris** | 83.800859 | −5.161810 | 2.390170 | **6.4″** |
+
+On device: **1.91 s to extract** (45 MP JPEG → 300 stars) + **7.42 s to solve** =
+**~9.3 s end to end**, with only a focal-length hint.
+
+## What real frames exposed that synthetic ones could not
+
+**The background estimator has to be local.** The first real frame produced:
+
+```
+bg=84.0  noise=31.13  thresh=239.7  ->  4 stars
+```
+
+A whole-frame median/MAD measures the *gradient* — vignetting, light pollution,
+amp glow — not the pixel noise, so the threshold landed at 239/255 and detected
+almost nothing. Clean synthetic images and the APOD test set never showed this.
+Replaced with per-tile median/MAD (64 px tiles at the decoded scale, bilinearly
+interpolated): the same frame went from **4 to 300+ stars**.
+
+**Some frames simply do not solve, and that is not a pipeline fault.** Four
+earlier captures off the Polaris SD failed — and upstream `solve-field` with its
+own `simplexy` extractor failed on them too (215 sources, no solve). Defocused
+or otherwise unusable frames are garbage-in; the check that mattered was running
+the gold standard alongside, which cleared our extractor of blame.
