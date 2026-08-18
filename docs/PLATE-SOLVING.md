@@ -431,3 +431,65 @@ reflashing stock, same contract as the rest of this tool.
   and the rig-test findings about 518 pose telemetry.
 - `alpaca-benro-polaris` (research copy): the `NNN@payload#` control protocol and
   opcode meanings.
+
+---
+
+# Guiding, not re-solving
+
+Continuously plate solving is the wrong tool once you already know where you
+are. Measured on device: extracting stars from a live-view frame costs
+**0.08 s**; solving costs **2–9 s**. After an initial alignment or a fresh goto
+the absolute position is already known, so the only thing that changes is
+*drift* — and drift is a relative measurement that needs no catalogue at all.
+
+The standard split (what PHD2 does):
+
+```
+  plate solve  ONCE   -> absolute: RA/Dec of the field, pixel scale, roll
+  then, per frame     -> relative: how far did the same stars move?
+                         -> correct with a short axis pulse
+  re-solve only when   -> the star match fails, drift exceeds a sanity bound,
+                          or the mount is commanded somewhere new
+```
+
+## What each piece already is
+
+| piece | status |
+|---|---|
+| frame source | `polaris-mount fetch` — live view, 0.07 s, no shutter |
+| star extraction | `polaris-extract` — 0.08 s on a 960×640 live-view frame |
+| absolute fix | `polaris-solve` — gives pixel scale and roll, which convert pixel drift to sky drift |
+| correction primitive | `513` / `514` carrying a signed `speed`, `speed:0` to stop — seen in the captured app traffic |
+
+So the missing piece is small: match this frame's star list against the previous
+one, estimate the translation, and turn it into a pulse.
+
+## The matcher
+
+Frame-to-frame the field barely moves, so this does **not** need the quad
+matching a solve does. Take the brightest N stars from each frame, try the
+translation implied by each candidate pairing, and keep the one where the most
+stars agree within a couple of pixels. That is a few hundred distance
+comparisons — microseconds — and it fails loudly (no consensus) rather than
+silently, which is what we want before touching motors.
+
+Then:
+
+```
+  drift_pixels -> drift_arcsec  (pixel scale, from the solve)
+               -> alt/az components (roll, from the solve)
+               -> pulse length on each axis
+```
+
+## Rules to build it under
+
+1. **Never guide on an unverified fix.** Guiding amplifies a bad absolute
+   position instead of correcting it. Require a solve that passed the quality
+   gate before guiding starts.
+2. **Bound every correction.** A pulse should never exceed a small multiple of
+   the observed drift, and a frame that fails to match must produce *no* motion.
+3. **Re-solve on doubt, not on schedule.** Match failure, drift beyond a sanity
+   bound, or a commanded slew — those are the triggers. A periodic re-solve just
+   reintroduces the cost we are avoiding.
+4. **The guide loop must be cheap enough to run at ~1 Hz** and still leave the
+   device responsive; at 0.15 s per frame that is comfortable.
