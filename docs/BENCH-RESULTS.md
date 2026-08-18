@@ -221,3 +221,53 @@ can ever block the alignment loop.
 
 A real frame from the R5 II. The 45 MP figures above use an upscaled star field
 of the right dimensions and pixel scale, not the camera's own output.
+
+---
+
+# Round 4 — motors and a simulated camera, closed loop
+
+`polaris-skysim` renders what the camera would see: it pulls stars from the
+**same astrometry.net index files the solver reads**, projects them through a TAN
+model at the requested focal length and roll, draws Gaussian PSFs, adds noise,
+and writes a JPEG. So a render→solve round trip shares no assumption with the
+solver except the catalogue itself.
+
+## Render → solve accuracy, 400 mm on full frame (8192×6144, 2.266″/px)
+
+| commanded | solved | error |
+|---|---|---|
+| RA 84.5, Dec −2.7 | 84.498798, −2.699175 | **4.3″** |
+| RA 213.9, Dec 19.2 | 213.899161, 19.200109 | **3.0″** |
+| RA 310.4, Dec 45.3 | 310.398651, 45.301105 | **4.9″** |
+
+(The solved `roll` comes back 180° from the commanded value and parity reads
+`flipped` — a systematic convention difference between the renderer's CD matrix
+and the solver's, not an error. Irrelevant for pointing.)
+
+## The full loop, with no ground truth in the measurement path
+
+`sim-verify.py --camera` puts the renderer inside the alignment loop: the mount
+moves, the sky is drawn at wherever it ACTUALLY ended up, and the solver gets
+only the frame plus a hint from the mount's own (wrong) idea of its pose.
+
+```
+cold start: mount heading wrong by 37.5 deg
+[1] align, from a real solve of a rendered frame  ->  residual 13.2 arcsec
+[2] 6 align+goto cycles                           ->  worst 1.20 arcmin
+[3] tracking 10 s                                 ->  target held to 45.6 arcsec
+[4] safety rails (zenith / horizon / alt limit / max-slew)  ->  all refused
+RESULT: all checks passed
+```
+
+The residual is *better* than the earlier synthetic run (13.2″ vs 21″) because
+the real solver is more accurate than the 30″ of noise that run assumed.
+
+Run it:
+
+```
+sim-verify.py --mount ./polaris-mount --camera \
+  --index index-4110.fits --index index-4111.fits --cycles 6
+```
+
+This is the regression test to run before anything touches real motors, and it
+needs no camera, no sky and no hardware.

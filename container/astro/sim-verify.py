@@ -13,13 +13,20 @@ simulator's ground truth:
   4. tracking      with tracking on, a target holds as the sky rotates
   5. safety        motion outside the allowed envelope is refused
 
-The simulated "plate solve" is the simulator's TRUE pointing (alt/az) converted
-to J2000 RA/Dec, plus noise -- which is exactly what a real solve reports. That
-conversion uses polaris-mount's own converter, deliberately: it is the single
-implementation in the system, and it was validated independently against
-astropy to 8 arcsec. What this harness tests is the LOOP, not the ephemeris.
+Two ways to get the "plate solve":
+
+  default    the simulator's TRUE pointing converted to J2000 RA/Dec plus noise
+             -- fast, and enough to test the loop's control logic.
+
+  --camera   RENDER what the camera would actually see with polaris-skysim,
+             then run the real polaris-extract and polaris-solve over it. No
+             ground truth is used anywhere in the measurement path: the mount
+             moves, the sky is drawn from the catalogue at wherever it ended up,
+             and the solver has to work it out. This is the honest end-to-end
+             test, and it is what a motors-in-the-loop night looks like without
+             a camera or a sky.
 """
-import argparse, json, math, os, random, socket, subprocess, sys, time
+import argparse, json, math, os, random, shutil, socket, subprocess, sys, tempfile, time
 
 
 def status(port):
@@ -64,10 +71,22 @@ def main():
     ap.add_argument("--tolerance-arcmin", type=float, default=12.0)
     ap.add_argument("--track-seconds", type=float, default=20.0)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--camera", action="store_true",
+                    help="render + extract + solve real frames instead of using truth")
+    ap.add_argument("--skysim", default="./polaris-skysim")
+    ap.add_argument("--extract", default="./polaris-extract")
+    ap.add_argument("--solve", default="./polaris-solve")
+    ap.add_argument("--index", action="append", default=[])
+    ap.add_argument("--focal-mm", type=float, default=400.0)
+    ap.add_argument("--cam-width", type=int, default=8192)
+    ap.add_argument("--cam-height", type=int, default=6144)
     a = ap.parse_args()
 
     random.seed(a.seed)
     noise = a.solve_noise_arcsec / 3600.0
+    tmpdir = tempfile.mkdtemp(prefix="polaris-simcam-")
+    if a.camera and not a.index:
+        print("--camera needs at least one --index"); return 2
     sim = subprocess.Popen(
         [sys.executable, a.sim, "--port", str(a.port), "--status-port", str(a.status_port),
          "--lat", str(a.lat), "--lon", str(a.lon), "--az-error", str(a.az_error),
@@ -80,8 +99,45 @@ def main():
         """what a plate solve of the current frame would report (J2000)"""
         st = status(a.status_port)
         rd = m("altaz2radec", "--alt", f"{st['true_alt_deg']:.6f}", "--az", f"{st['true_az_deg']:.6f}")
-        return (rd["ra_deg"] + random.gauss(0, noise) / max(0.05, math.cos(math.radians(rd["dec_deg"]))),
-                rd["dec_deg"] + random.gauss(0, noise), st)
+        if not a.camera:
+            return (rd["ra_deg"] + random.gauss(0, noise) / max(0.05, math.cos(math.radians(rd["dec_deg"]))),
+                    rd["dec_deg"] + random.gauss(0, noise), st)
+
+        # Render what the camera would see, then actually solve it. The true
+        # pointing is used ONLY to draw the sky -- the solver is told nothing
+        # but the frame and a hint from the mount's own (wrong) idea of pose.
+        idx = []
+        for f in a.index:
+            idx += ["--index", f]
+        frame = os.path.join(tmpdir, "frame.jpg")
+        stars = os.path.join(tmpdir, "stars.txt")
+        subprocess.run([a.skysim] + idx +
+                       ["--ra", f"{rd['ra_deg']:.6f}", "--dec", f"{rd['dec_deg']:.6f}",
+                        "--roll", f"{random.uniform(0, 360):.2f}",
+                        "--focal-mm", str(a.focal_mm),
+                        "--width", str(a.cam_width), "--height", str(a.cam_height),
+                        "--out", frame], capture_output=True, text=True, timeout=300)
+        with open(stars, "w") as fh:
+            subprocess.run([a.extract, "--jpeg", frame, "--downsample", "4",
+                            "--max-stars", "200"], stdout=fh, stderr=subprocess.DEVNULL,
+                           timeout=300)
+        # the hint is what the MOUNT believes, not the truth
+        hint = m("altaz2radec", "--alt", f"{st['reported_alt_deg']:.6f}",
+                 "--az", f"{st['reported_az_deg']:.6f}")
+        p = subprocess.run([a.solve] + idx +
+                           ["--stars", stars, "--width", str(a.cam_width),
+                            "--height", str(a.cam_height), "--focal-mm", str(a.focal_mm),
+                            "--sensor-mm", "36",
+                            "--ra", f"{hint['ra_deg']:.6f}", "--dec", f"{hint['dec_deg']:.6f}",
+                            "--radius", "45", "--cpulimit", "60"],
+                           capture_output=True, text=True, timeout=300)
+        try:
+            out = json.loads(p.stdout.strip().splitlines()[-1])
+        except Exception:
+            raise RuntimeError(f"solver produced nothing: {p.stdout[-200:]} {p.stderr[-200:]}")
+        if not out.get("solved"):
+            raise RuntimeError(f"real solve FAILED on a rendered frame: {out}")
+        return out["ra_deg"], out["dec_deg"], st
 
     try:
         for _ in range(50):
@@ -192,6 +248,7 @@ def main():
     except Exception as e:
         failures.append(f"exception: {e}")
     finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
         sim.terminate()
         try: sim.wait(timeout=5)
         except Exception: sim.kill()

@@ -180,6 +180,13 @@ if [ "$TARGET" = "arm" ]; then
   log "  polaris-extract DT_NEEDED: $ENEEDED  ✓"
 fi
 
+# ---- polaris-skysim: the simulated camera (MIT source; links the GPL solver
+# libs, so the binary is GPL v2+ like polaris-solve. It is a TEST tool.) ------
+$CC $CFLAGS -I"$JPEGBUILD" -I"$JPEGSRC" -o "$OUT/polaris-skysim" \
+   "$HERE/polaris-skysim.c" "$BUILD/libpolarisastro.a" "$JPEGBUILD/.libs/libjpeg.a" -lm \
+   || die "polaris-skysim link failed"
+log "  linked $OUT/polaris-skysim ($(stat -c %s "$OUT/polaris-skysim") bytes)"
+
 # ---- polaris-mount: the mount protocol client (MIT, no dependencies) ------
 $CC -O2 $ARCHFLAGS -o "$OUT/polaris-mount" "$HERE/polaris-mount.c" -lm \
   || die "polaris-mount link failed"
