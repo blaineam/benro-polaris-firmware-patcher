@@ -282,6 +282,15 @@ static int arg_get(const char* args, const char* key, char* out, size_t sz) {
     return -1;
 }
 
+/* The mount sends no pose telemetry until a client asks for it. This is the
+ * same thing the phone app (and the alpaca driver) does on connect: 520 turns
+ * position updates on, 284 asks for the current mode. Neither moves anything.
+ * Note the third field is 2 for queries and 3 for commands. */
+static void handshake(conn_t* c) {
+    conn_send(c, "1&520&2&state:1;#");
+    conn_send(c, "1&284&2&-1#");
+}
+
 /* Wait for a specific reply, ignoring the telemetry that streams in between. */
 static int wait_for(conn_t* c, const char* want, char* args_out, size_t sz, int tries) {
     char cmd[8];
@@ -330,6 +339,7 @@ static void usage(const char* me) {
 "                         this altitude (65). Azimuth is degenerate near the\n"
 "                         zenith: the heading error is amplified by 1/cos(alt).\n"
 "  --dry-run              print what would be sent; send nothing\n"
+"  --raw N                just dump the next N protocol frames and exit\n"
 "  --verbose              log the protocol\n"
 "\n"
 "commands:\n"
@@ -360,6 +370,7 @@ int main(int argc, char** argv) {
     const char* utc = NULL;
     const char* cmd = NULL;
     const char* cmd_arg = NULL;
+    int raw_n = 0;
     double jd;
     conn_t c;
     int i;
@@ -389,6 +400,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--max-align-alt")) g_max_align_alt = atof(NEXT());
         else if (!strcmp(a, "--dry-run"))  g_dry = 1;
         else if (!strcmp(a, "--verbose"))  g_verbose = 1;
+        else if (!strcmp(a, "--raw"))      { cmd = "raw"; raw_n = atoi(NEXT()); }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else if (a[0] != '-' && !cmd)      cmd = a;
         else if (a[0] != '-' && !cmd_arg)  cmd_arg = a;
@@ -424,10 +436,23 @@ int main(int argc, char** argv) {
 
     if (conn_open(&c, host, port, 15) != 0) return 1;
 
+    if (!strcmp(cmd, "raw")) {
+        char rc[8], ra_[4096];
+        int n;
+        handshake(&c);
+        for (n = 0; n < raw_n; n++) {
+            if (conn_recv(&c, rc, ra_, sizeof(ra_)) != 0) break;
+            printf("%s@%s#\n", rc, ra_);
+            fflush(stdout);
+        }
+        conn_close(&c); return 0;
+    }
+
     if (!strcmp(cmd, "pose")) {
         char args[2048], v[64];
         double p_az = NAN, p_alt = NAN;
-        if (wait_for(&c, "518", args, sizeof(args), 200) != 0) {
+        handshake(&c);
+        if (wait_for(&c, "518", args, sizeof(args), 400) != 0) {
             fprintf(stderr, "no 518 pose message arrived\n"); conn_close(&c); return 1;
         }
         if (!arg_get(args, "compass", v, sizeof(v))) p_az = atof(v);
@@ -488,7 +513,8 @@ int main(int argc, char** argv) {
         }
         if (alt != alt || az != az) { usage(argv[0]); conn_close(&c); return 2; }
         /* current pose first, so the safety check has something to compare to */
-        if (wait_for(&c, "518", args, sizeof(args), 200) == 0) {
+        handshake(&c);
+        if (wait_for(&c, "518", args, sizeof(args), 400) == 0) {
             if (!arg_get(args, "compass", v, sizeof(v))) cur_az = atof(v);
             if (!arg_get(args, "alt", v, sizeof(v)))     cur_alt = -atof(v);
         }
@@ -548,7 +574,8 @@ int main(int argc, char** argv) {
         if (sra != sra || sdec != sdec || lat != lat || lon != lon) { usage(argv[0]); conn_close(&c); return 2; }
         if (ialt == ialt && iaz == iaz) { p_alt = ialt; p_az = iaz; }
         else {
-            if (wait_for(&c, "518", args, sizeof(args), 200) != 0) {
+            handshake(&c);
+            if (wait_for(&c, "518", args, sizeof(args), 400) != 0) {
                 fprintf(stderr, "no 518 pose message arrived\n"); conn_close(&c); return 1;
             }
             if (!arg_get(args, "compass", v, sizeof(v))) p_az = atof(v);

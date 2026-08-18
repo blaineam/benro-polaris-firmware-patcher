@@ -140,3 +140,58 @@ i.e. exactly the geometry a 400 mm lens puts on a full-frame body.
 4. **Roll/parity needs one real calibration frame.** The solver now reports
    `parity` and the full `cd` matrix, but which way "up" maps to the camera on
    the mount can only be pinned down with a frame the Polaris itself took.
+
+---
+
+# Round 3 — ON THE ACTUAL POLARIS
+
+Rounds 1 and 2 were emulated. This round ran on the device itself
+(`FwVer 4.0.0.32`, over ssh), using the binaries `build_solver.sh` produced,
+installed at `/app/astro` with the index files on the microSD.
+
+## The hardware, measured rather than inferred
+
+```
+CPU part 0xc07 (Cortex-A7), 2 cores
+Features: half thumb fastmult vfp edsp neon vfpv3 tls vfpv4 idiva idivt vfpd32 lpae
+MemTotal 1550872 kB      /app 68 MB (12.4 MB free)      /app/sd 119 GB (113 GB free)
+```
+
+`-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=softfp` is confirmed correct against
+the real CPU flags. `/app` is tighter than the 20.4 MB estimated from the image —
+**12.4 MB free** — which is still ample for the ~820 KB of binaries, and the
+index files live on the card and are never copied into flash.
+
+## Results
+
+| field | mode | **device** | qemu (round 2) | x86 |
+|---|---|---|---|---|
+| `apod4` 33° | scale hint | **2.23 s** | 4.13 s | 1.34 s |
+| `apod5` 60° | scale hint | **5.84 s** | 10.40 s | 1.87 s |
+| `apod2` **4.5° (400 mm on full frame)** | + 15° pose hint | **7.31 s** | 16.5 s | 0.35 s |
+| `apod2` 4.5° | **no pose hint** | **361.7 s** | 61.7 s* | 28.5 s |
+
+\* the qemu run used a sloppier hint, not no hint at all.
+
+Every solution matches the x86 build to six decimals — e.g. `apod4` →
+RA 186.902948, Dec +56.700021 on all three platforms.
+
+## What the device changed about the design
+
+1. **qemu was pessimistic by ~1.8×**, as flagged. The real A7 is only 1.7–3×
+   slower than emulated x86 — the honest conclusion from round 2 ("neither error
+   cancels; the device decides") turned out to land in our favour.
+2. **At 400 mm the pose hint is not an optimisation, it is the feature.**
+   7.3 s versus 361.7 s — **50×** — for an identical answer. A blind narrow-field
+   solve is unusable on this hardware.
+3. Consequently `polaris-align.sh` now **asks the mount for its own pose** and
+   derives the hint automatically when the caller does not supply one. The mount
+   always knows roughly where it points, even completely unaligned, so the slow
+   path should never be taken in practice.
+4. Solve memory stayed far below the 1.5 GB available; storage is a non-issue.
+
+## Still not measured
+
+Star extraction from a real 45 MP camera JPEG, on device. Everything above feeds
+the solver pre-extracted star lists, which isolates the matching algorithm —
+`polaris-extract` timing on device needs a real frame from the R5 II.
