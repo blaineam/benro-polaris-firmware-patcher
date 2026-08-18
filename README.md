@@ -173,6 +173,12 @@ they live in the trampolined base binary.
 See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the full technical story
 and [docs/TESTED.md](docs/TESTED.md) for exactly what was verified.
 
+> **In progress (branch `astro-plate-solving`):** a feasibility + design study for
+> **on-device astrometric alignment** — the Polaris taking a few frames, plate
+> solving them, and syncing itself with no compass and no single-star alignment,
+> plus a small on-device web/Alpaca API. Read
+> [docs/PLATE-SOLVING.md](docs/PLATE-SOLVING.md). Nothing of it ships yet.
+
 ---
 
 ## Requirements

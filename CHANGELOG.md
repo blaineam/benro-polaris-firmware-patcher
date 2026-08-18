@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased (branch `astro-plate-solving`) — design only, nothing shipped
+
+### Added
+- **`docs/PLATE-SOLVING.md`** — feasibility study + architecture for on-device
+  astrometry.net plate solving and automatic alignment: verified device facts
+  (dual-core ARM, 1536 MB RAM, NEON/VFPv4, ~20.4 MB appfs headroom), the reusable
+  assets already in the firmware (`polestar_app` is unstripped with DWARF and
+  statically links OpenCV + a `starskystacker` star extractor + `SP_OneStarCal`;
+  lighttpd and busybox httpd are already on the device), the BSD-3 licensing model
+  copied from Aperion's GSL shim, a three-layer architecture, a multi-frame
+  pointing-model solve, and a phased plan that starts with measurement.
+- Recorded as a **prerequisite bug fix**: the R5 II capture shim currently forces
+  `capturetarget = Internal RAM`, so nothing is written to the camera's own card.
+  Capture must write to the camera card *and* download to the Polaris SD.
+
 ## Unreleased — optional SSH debug access + Windows build fixes
 
 ### Added
