@@ -241,8 +241,28 @@ inject() {
     rm -f "$STATE"
 }
 
+# polestar_app TRUNCATES this log continuously -- measured: 13439 bytes down to
+# 979 in twenty seconds. `tail -f` follows by DESCRIPTOR, so the first truncation
+# leaves it reading a stale offset and it silently never reports another line.
+# In the field that looks exactly like "the solve never fired". So follow by
+# size instead, and reset to the start whenever the file shrinks.
+follow_log() {
+    last=$(wc -c < "$APPLOG" 2>/dev/null || echo 0)
+    while :; do
+        cur=$(wc -c < "$APPLOG" 2>/dev/null || echo 0)
+        if [ "$cur" -lt "$last" ]; then          # truncated: start over
+            last=0
+        fi
+        if [ "$cur" -gt "$last" ]; then
+            tail -c +$((last + 1)) "$APPLOG" 2>/dev/null
+            last=$cur
+        fi
+        sleep 0.3 2>/dev/null || sleep 1
+    done
+}
+
 log "watching $APPLOG  (dry_run=$DRY_RUN frame=${FRAME:-none} focal=${FOCAL_MM}mm)"
-tail -f -n 0 "$APPLOG" | while read -r line; do
+follow_log | while read -r line; do
     case "$line" in
         *"code:519"*"track:0"*)
             log "app is aligning: slewing to its star"

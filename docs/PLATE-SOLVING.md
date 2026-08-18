@@ -190,6 +190,29 @@ The final `519` reply distinguishes the cases: `ret:0` = slew completed,
    information. The decisive test is capturing what the app sends when tracking
    genuinely starts, which needs a real star alignment and therefore darkness.
 
+### Detecting the app's alignment: watch STATE, not the log
+
+`polaris-autoalign` currently detects the app's alignment by tailing
+`/app/Mlog.txt`, which records every frame `polestar_app` receives. That works
+for the slew (`519 … track:0`) but is **not reliable for the confirm**:
+
+- `polestar_app` **truncates that log continuously** — measured going from
+  13439 bytes to 979 in twenty seconds.
+- `tail -f` follows by *descriptor*, so the first truncation leaves it reading a
+  stale offset and it silently never reports another line. Following by size and
+  resetting on shrink (implemented) fixes that much.
+- But a single critical line can still be **destroyed by truncation before it is
+  read**, whatever the poll interval. Rehearsals showed exactly this: the solve
+  fired reliably, the confirm was missed intermittently.
+
+So log-watching is fine for the *coarse* trigger (we can afford to miss a slew;
+another one is coming) and wrong for the *decisive* one.
+
+The robust detector is the mount's own state: `284` reports `track:3` while
+unaligned and `track:0` once the app's alignment completes, so polling it at
+~1 Hz catches the transition without depending on a log line surviving. That is
+the change to make before this runs unattended.
+
 ### Layer 2 — `polarissolved` (daemon + HTTP)
 
 - Speaks the mount's own ASCII protocol on **loopback** (`NNN@payload#`): read
