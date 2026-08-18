@@ -143,7 +143,32 @@ Two things the simulator got wrong until a real Polaris corrected them:
 The final `519` reply distinguishes the cases: `ret:0` = slew completed,
 `ret:-1` = refused or aborted.
 
-3. **Tracking is still refused, cause unknown.** `531` answers `ret:0`
+3. **Tracking needs the ASTRO MODULE physically attached.** ~~cause unknown~~
+   Resolved by watching the phone app: `531` is refused with `ret:0` until the
+   Benro astro module is connected, after which the *same* command we were
+   already sending returns `{"tracking":true}` and the mount holds sky. Every
+   protocol theory was wrong because the precondition was hardware. Verified:
+   over 90 s the mount held RA/Dec to **6.8 arcsec**, against ~22 arcmin of
+   drift for an untracked mount.
+
+   **The app's real alignment recipe**, captured from the wire — it differs
+   from the alpaca driver's in three ways worth knowing:
+
+   ```
+   285  mode:1                        drop out of Astro
+   531  state:0                       tracking off
+   285  mode:8                        back into Astro
+   527  compass:0; lat; lng           compass RESET to zero (not az-180)
+   519  yaw..pitch.. track:0          SLEW TO THE STAR FIRST
+   530  step:1  yaw..pitch.. num:1    real values in step 1 (driver sends zeros)
+   530  step:2  (identical values)    and there is NO step:3
+   519  ...track:1                    goto again with tracking armed
+   531  state:1                       start tracking
+   ```
+
+   Our `star-align` now matches the app (real values in both steps, no step 3).
+
+4. **Superseded note on tracking refusal.** `531` answers `ret:0`
    (declined) under every condition tried. Ruled out on hardware:
 
    | hypothesis | result |

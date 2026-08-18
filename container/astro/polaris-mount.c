@@ -370,7 +370,7 @@ static void usage(const char* me) {
 "  set-compass --az D     tell the mount its true azimuth (527). Accepted while\n"
 "                         unaligned, but does NOT clear the unaligned state.\n"
 "  star-align --alt D --az D\n"
-"                         the 3-step 530 sequence: declares the mount is looking\n"
+"                         the 530 sequence: declares the mount is looking\n"
 "                         at this alt/az. THIS is what clears track:3 and makes\n"
 "                         gotos work. Send it ONCE -- field traces from the\n"
 "                         Aperion work show repeated 530s wedging the motors,\n"
@@ -587,13 +587,16 @@ int main(int argc, char** argv) {
         if (alt != alt || az != az || lat != lat || lon != lon) { usage(argv[0]); conn_close(&c); return 2; }
         /* the mount wants a signed azimuth measured westward, per the app */
         ca_az = az_to_wire(az);
-        snprintf(msg, sizeof(msg), "1&530&3&step:1;yaw:0.0;pitch:0.0;lat:0.0;num:0;lng:0.0;#");
+        /* Captured from the phone app on real hardware: BOTH steps carry the
+         * real pointing, and there is no step:3. The alpaca driver zeroes
+         * step 1 and adds a step 3; the app does not. */
+        snprintf(msg, sizeof(msg),
+                 "1&530&3&step:1;yaw:%.5f;pitch:%.5f;lat:%.5f;num:1;lng:%.5f;#",
+                 ca_az, alt, lat, lon);
         conn_send(&c, msg);
         snprintf(msg, sizeof(msg),
                  "1&530&3&step:2;yaw:%.5f;pitch:%.5f;lat:%.5f;num:1;lng:%.5f;#",
                  ca_az, alt, lat, lon);
-        conn_send(&c, msg);
-        snprintf(msg, sizeof(msg), "1&530&3&step:3;yaw:0.0;pitch:0.0;lat:0.0;num:0;lng:0.0;#");
         conn_send(&c, msg);
         if (!g_dry) {
             char args[512], v[64];
