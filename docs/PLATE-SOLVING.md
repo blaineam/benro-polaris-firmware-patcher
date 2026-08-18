@@ -25,7 +25,7 @@ centring, and far better tracking than stock. Two front ends:
 |---|---|
 | Enough CPU/RAM on the chipset? | **Yes, with margin.** Dual-core ARM (Cortex-A7-class, v7-A + **NEON/VFPv4**), **1536 MB RAM** (`mem=1536M` in the U-Boot bootargs), Linux 4.9.37. A wide-field solve is a seconds-to-tens-of-seconds job here, not minutes — *estimate, must be measured (Phase 0)*. |
 | Enough storage? | **Yes, if the index files live on the microSD.** The appfs partition has **~20.4 MB** of headroom (81 MB partition, 64.5 MB stock image) — enough for the solver + a tiny index, nowhere near enough for a real index set (Aperion ships 182 MB). `/app/sd` is the user's microSD and is already used by the app (`/app/sd/starskyStack/`). |
-| License-friendly, like Aperion? | **Yes — the same trick works, and it is the *only* hard licensing problem.** astrometry.net's own code is BSD-3; its bundled `gsl-an` is **GPL-v3** and is what forces the whole work to GPL. Aperion already replaced it with a BSD-3 `gsl-shim`. Porting that shim off Accelerate is ~7 numeric routines. |
+| License-friendly, like Aperion? | **Safe, but not by the route we first assumed.** Replacing `gsl-an` is *not* enough: the FITS layer the solver needs (`qfits-an`, incl. `anqfits.c`) is **GPL v2+** as well. The answer is a **process boundary** — the solver is its own GPL binary and nothing GPL is linked into `pgphoto`, `polestar_app`, or our MIT loader. Full analysis and the rules we build to: **[LICENSE-AUDIT.md](LICENSE-AUDIT.md)**. |
 | Can it be wired into the app's own astro calibration? | **Yes, and more cheaply than expected.** `/app/bin/polestar_app` is **not stripped, ships full DWARF, and exports 17,440 functions** — including `SP_OneStarCal`, `SP_CreateStarskyStackTask`, `SP_StarskyStackMsgFromAppProc` and a whole `starskystacker` C++ class with OpenCV statically linked in. |
 | Multi-frame solve? | **Yes** — and it is the right design. Per-frame WCS → rigid-rotation fit (Davenport q-method) → RMS gate, the same shape as Aperion's `PointingModel`, but fed by solves instead of the mount's own pose telemetry (which is the thing that was unreliable). |
 | Can the patcher install all this? | **Yes.** Same mechanism as today: extra files in the appfs + one boot hook. The `--ssh-key` work already proved the hook path (`/app/bootapp` runs `/app/network_telnetd.sh` if present). |
@@ -71,55 +71,21 @@ That is unacceptable for real shooting and is also wrong for this feature. See
 
 ---
 
-## Licensing — the model to copy from Aperion
+## Licensing — see [LICENSE-AUDIT.md](LICENSE-AUDIT.md)
 
-**The problem.** astrometry.net's own `LICENSE` says it plainly: the team's code is
-3-clause BSD, *but* because the tree bundles GPL libraries — "including a vendored
-GSL" — "the whole work must be distributed under the GPL version 3 or later."
+Audited in full against the astrometry.net 0.98 tree. Short version:
 
-**Aperion's fix, which we reuse.** `Vendor/astrometry-net` is pinned at 0.98 and
-the build **deletes `gsl-an` entirely** and links
-`scripts/astrometry/gsl-shim/` instead — 713 lines, `SPDX-License-Identifier:
-BSD-3-Clause`, providing every `gsl_*` symbol astrometry.net references. With
-`gsl-an` gone the shipped work is BSD-3 (astrometry.net) + BSD-ish (cfitsio) +
-BSD-3 (our shim).
-
-**What porting it to the Polaris costs.** The shim's plumbing (block/vector/matrix/
-permutation alloc, get/set, views) is portable C already. Only the heavy routines
-delegate to Apple's Accelerate, and there are just **seven**:
-
-```
-gsl_linalg_LU_decomp      gsl_linalg_LU_invert
-gsl_linalg_QR_decomp      gsl_linalg_QR_lssolve
-gsl_linalg_SV_decomp      gsl_linalg_SV_decomp_jacobi
-gsl_blas_dgemm
-```
-
-astrometry.net calls these on **tiny** matrices (3×3 / 4×4 / N×3 least squares in
-the WCS fit), so the Polaris backend does **not** need BLAS/LAPACK at all — a
-self-contained Jacobi SVD + Householder QR + LU with partial pivoting is a few
-hundred lines of our own code, which also keeps the licence clean and the binary
-small. (Aperion already has the Jacobi eigen-solver logic in
-`MountKit/PointingModel.swift` to mirror.) A netlib LAPACK/CLAPACK backend
-(BSD-3) stays available as a fallback if numerical parity ever gets fussy.
-
-**Also check before shipping (open item):** `qfits-an` inside the astrometry tree
-has no `LICENSE` file of its own; qfits' ESO origin is GPL-flavoured. If the
-solver path we use pulls in `qfits-an`, that must either be replaced (we only
-need to *read* a handful of FITS keywords, or skip FITS entirely by feeding the
-solver an in-memory star list) or the licence posture changes. **Aperion should
-be audited for the same question.**
-
-**Index files.** The astrometry.net 4100/4200 index series are published for free
-download but are *data*, not our code; ship none of them in the repo. The patcher
-should fetch/verify them at the user's request, exactly like Aperion's
-"offer to download a better index" flow, and stage them on the **microSD**.
-
-**And the patcher's own posture stays the same as today:** this repo ships no
-firmware and no binaries; everything is built from source in the container at run
-time, with `out/licenses/` carrying the notices for what ends up in the image.
-
----
+- astrometry.net's own solver/util/libkd code is **BSD-3**, but the suite bundles
+  four copyleft pieces. `gsl-an` (GPLv3) is removable with Aperion's BSD-3
+  `gsl-shim`; **`qfits-an` (GPL v2+) is not removable** without writing a ~57
+  entry-point FITS shim over cfitsio, and the solver needs it to read indexes.
+- Therefore: **the solver runs as its own process**, distributed GPL v2-or-later.
+  Our patcher stays MIT, Benro's binaries are untouched, and the phase-4 in-app
+  hook *marshals* to the solver process rather than linking it.
+- Avoid `simplexy`/`ctmf.c` (GPLv3) by feeding a star list; don't link
+  `libcatalogs` (GPLv2+ Stellarium data); ship no index files and no test images.
+- **Aperion has a live exposure here**: it still links `libqfits.a` and
+  `libcatalogs.a` into an App Store binary. See the advisory in the audit.
 
 ## Architecture
 
@@ -264,40 +230,51 @@ a bug fix in its own right.
 
 ## Phased plan
 
-**Phase 0 — measure, before writing anything real.**
-Cross-build astrometry.net (GSL-free) for ARM in the existing container and run a
-real solve **under `qemu-arm-static`, which is already in the image**, against a
-sample wide-field frame + a small index. That yields an order-of-magnitude
-per-solve time and peak RSS, and it costs one afternoon. If the emulated number
-is catastrophic, we learn it before building any product.
-*Acceptance:* a solved WCS from a known frame, with wall-clock + RSS recorded.
+Ordered as Blaine specified: prove the licence, then prove the algorithm, then
+let it touch motors, then let it touch the camera, and only then wire it into the
+patcher.
 
-**Phase 0.5 — fix the capture path** (see above). *Acceptance:* on the user's R5
-II, a capture leaves the RAW+JPEG on the camera card **and** a copy on the Polaris
-SD, with no hang.
+**Phase 1 — licence safety. ✅ done.** [LICENSE-AUDIT.md](LICENSE-AUDIT.md)
+establishes the component inventory and the process-boundary rule everything else
+is built to.
 
-**Phase 1 — `libpolarissolve` + the BSD gsl-shim port.**
-*Acceptance:* the same frame solves natively on the device, timed; licence audit
-written (including the `qfits-an` question).
+**Phase 2 — bench the solver against ground truth, then on device.**
+Two tiers, because they prove different things:
 
-**Phase 2 — `polarissolved` + web UI.** Loopback mount control, one-shot
-"solve & sync" from a browser page. *Acceptance:* a solve moves the mount to the
-right place from a cold, compass-free start.
+- *Tier A — solver correctness + speed.* astrometry.net's own `demo/` set is
+  ready-made ground truth: `apod1–5.jpg` with matching `apod*.xyls` star lists,
+  `demo/CREDITS` recording each field's size (90×60′, 4.5×3.4°, 8.4×6.3°,
+  **34×24°**, 72×54°) and which index solves it, plus a bundled `index-4119.fits`
+  (144 KB). The 34×24° and 72×54° frames are the closest analogue to a wide lens
+  on a Polaris. Feeding the `.xyls` **skips star extraction entirely**, which is
+  both the licence-clean path (rule 3) and the way to time *only* the matching
+  algorithm. (Images are copyright APOD contributors — local use only, never
+  committed.)
+- *Tier B — the alignment maths.* Frames with **EXIF GPS + UTC** and a known
+  pointing, to validate solved RA/Dec → alt/az → mount heading. This needs real
+  captures from the rig; the demo images carry no GPS/time.
 
-**Phase 3 — multi-frame pointing model.** N-point sweep, q-method fit, RMS gate.
-*Acceptance:* pointing accuracy across the whole sky beats a compass align,
-measured against known targets.
+Harness: one `polaris-solve-bench` that takes a star list (or image) + a hint and
+prints solved RA/Dec/roll/scale, wall-clock, and peak RSS. Run it three ways —
+x86 host (sanity), **`qemu-arm-static` in the patcher container** (already in the
+image), and **on the device over SSH** (which `--ssh-key` now makes trivial).
+*Acceptance:* every demo field solves to its known answer, with a per-solve time
+and RSS recorded for each of the three environments.
 
-**Phase 4 — in-app hook at `SP_OneStarCal`.** *Acceptance:* the app's own astro
-calibration silently uses the solver, and the patcher can revert it.
+**Phase 3 — motors, safely.** Only after Phase 2 has real numbers. Drive the
+mount over the loopback control protocol with hard safety rails: slew limits, an
+abort path, no motion without a solve that passes the RMS gate, and a dry-run
+mode that prints the moves it *would* make. Then the multi-frame sweep +
+q-method pointing model. *Acceptance:* a cold, compass-free start lands known
+targets, and every failure mode stops the motors rather than guessing.
 
-**Phase 5 — Alpaca surface.** NINA/Stellarium talk to the mount with no PC bridge.
+**Phase 4 — the real camera.** Requires the capture-path fix below (RAW+JPEG on
+the camera's card **and** a copy on the Polaris SD). *Acceptance:* end-to-end on
+the R5 II — capture, solve, sync, track — with the files where they belong.
 
-Each phase must be installable by the patcher as **additive appfs files + one boot
-hook**, and revertible by reflashing stock — the same contract the rest of this
-tool keeps.
-
----
+**Phase 5 — patcher integration.** Only once Phases 2–4 say the resource and
+timing budget is real. Additive appfs files + one boot hook, revertible by
+reflashing stock, same contract as the rest of this tool.
 
 ## Risks / what would kill this
 

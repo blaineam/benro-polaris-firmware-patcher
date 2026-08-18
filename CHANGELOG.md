@@ -3,6 +3,15 @@
 ## Unreleased (branch `astro-plate-solving`) — design only, nothing shipped
 
 ### Added
+- **`docs/LICENSE-AUDIT.md`** — component-by-component licence audit of the
+  astrometry.net 0.98 tree. Key finding: replacing the GPLv3 `gsl-an` is **not**
+  sufficient — `qfits-an` (including `anqfits.c`), which the solver needs to read
+  index files, is **GPL v2-or-later**, and `util/ctmf.c` (GPLv3, via `simplexy`)
+  and `catalogs/brightstars` (GPLv2+, Stellarium-derived) are further traps.
+  Resolution: the solver ships as its **own process** under GPL v2+, nothing GPL
+  is ever linked into `pgphoto`, `polestar_app`, or our MIT loader, and the
+  in-app hook marshals to it rather than linking it. Includes an advisory that
+  Aperion currently links `libqfits.a` + `libcatalogs.a` into an App Store binary.
 - **`docs/PLATE-SOLVING.md`** — feasibility study + architecture for on-device
   astrometry.net plate solving and automatic alignment: verified device facts
   (dual-core ARM, 1536 MB RAM, NEON/VFPv4, ~20.4 MB appfs headroom), the reusable
