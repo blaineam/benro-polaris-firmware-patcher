@@ -223,7 +223,18 @@ partial:
 | `284 track` | a first-ever alignment | never returns to 3 once aligned |
 | `518` pose | motion, always available | tells us the mount moved, not *why* |
 
-So the trigger should be **pose-based**: a slew followed by a settle is the
+**But live view changes the shape of this problem.** Blaine reports that the
+Polaris' live view shows stars easily, and a live-view frame costs ~0.15 s to
+fetch and extract (measured on device) against ~9.3 s for a full capture. If a
+live-view solve lands in a couple of seconds, the daemon can simply **solve
+continuously** and always hold a fresh answer. Detection then only has to decide
+*when to inject*, not when to start solving — which makes a crude trigger
+perfectly adequate, because the answer is already waiting.
+
+That is worth confirming before building anything more elaborate. If it holds,
+the trigger below is unnecessary.
+
+Failing that, the trigger should be **pose-based**: a slew followed by a settle is the
 observable signature of "the app went to its star and is waiting", and it works
 regardless of alignment history. The ordering problem then remains — our `530`
 must land *after* the user's, or theirs overwrites ours — which argues for
