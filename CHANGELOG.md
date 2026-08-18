@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased (branch `astro-plate-solving`) — design only, nothing shipped
+## Unreleased (branch `astro-plate-solving`) — solver built, motors untouched
+
+### Added
+- **`./build-astro.sh`** — one command that cross-builds the plate solver for the
+  device, downloads the index files a given focal range needs, and assembles
+  `out/astro-bundle/` ready to copy to the Polaris. Purely additive on the
+  device (`/app/astro`); nothing is flashed and `rm -rf /app/astro` undoes it.
+- **`container/astro/`** — `build_solver.sh` (ARM cross build with ABI, glibc,
+  DT_NEEDED **and licence** guards), `polaris-solve.c` (MIT front end to
+  astrometry.net), `polaris-extract.c` (MIT JPEG→star-list extractor),
+  `gslshim/` (BSD-3 GSL replacement, differential-tested against real libgsl),
+  `fetch-indexes.sh`, `bench-solve.sh`, and the device-side `ondisk/` scripts.
+- Measured on an 8192×6144 frame at 1.9789″/px — exactly 400 mm on full frame —
+  the pipeline solves to within ~22″ of the reference in 0.37 s of extraction
+  plus 2.67 s of solving, under double emulation. See
+  [docs/BENCH-RESULTS.md](docs/BENCH-RESULTS.md).
+
+## Superseded notes — design phase
 
 ### Added
 - **`docs/LICENSE-AUDIT.md`** — component-by-component licence audit of the
