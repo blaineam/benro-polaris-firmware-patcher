@@ -360,7 +360,12 @@ static void usage(const char* me) {
 "                         after the slew, recomputes the target for the time it\n"
 "                         actually arrived and nudges once if the sky has moved\n"
 "                         more than --refine-arcmin (default 2)\n"
-"  track on|off                            MOVES MOTORS\n"
+"  track on|off [--hold S]                 MOVES MOTORS\n"
+"                         --hold keeps the connection OPEN for S seconds and\n"
+"                         prints the pose as it goes. The mount appears to tie\n"
+"                         tracking to a live client session -- it logs\n"
+"                         SOCKET_CLOSE/ClientCtxDel the moment we disconnect --\n"
+"                         so a fire-and-forget 531 may not survive the hangup.\n"
 "  abort                                   stops a slew\n"
 "  set-compass --az D     tell the mount its true azimuth (527). Accepted while\n"
 "                         unaligned, but does NOT clear the unaligned state.\n"
@@ -373,6 +378,10 @@ static void usage(const char* me) {
 "  align --solved-ra D --solved-dec D [--image-alt D --image-az D]\n"
 "                         compute the heading error from a plate solve and\n"
 "                         push it with 527; prints the correction as JSON\n"
+"  send --msg FRAME [--msg FRAME ...] [--listen S]\n"
+"                         send raw protocol frames, then optionally listen.\n"
+"                         For protocol archaeology -- e.g. replaying the phone\n"
+"                         app's init sequence to find what gates tracking.\n"
 "  radec2altaz --ra D --dec D      pure maths, no connection\n"
 "  altaz2radec --alt D --az D      pure maths, no connection\n", me);
 }
@@ -384,11 +393,15 @@ int main(int argc, char** argv) {
     double ra = NAN, dec = NAN, alt = NAN, az = NAN;
     double sra = NAN, sdec = NAN, ialt = NAN, iaz = NAN;
     int track = 1, refine = 1;
+    double hold_s = 0;
     double refine_arcmin = 2.0;
     const char* utc = NULL;
     const char* cmd = NULL;
     const char* cmd_arg = NULL;
     int raw_n = 0;
+    const char* sendmsgs[24];
+    int nsend = 0;
+    double listen_s = 0;
     double jd;
     conn_t c;
     int i;
@@ -411,6 +424,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--image-az"))   iaz = atof(NEXT());
         else if (!strcmp(a, "--no-track")) track = 0;
         else if (!strcmp(a, "--no-refine")) refine = 0;
+        else if (!strcmp(a, "--hold"))     hold_s = atof(NEXT());
         else if (!strcmp(a, "--refine-arcmin")) refine_arcmin = atof(NEXT());
         else if (!strcmp(a, "--min-alt"))  g_min_alt = atof(NEXT());
         else if (!strcmp(a, "--max-alt"))  g_max_alt = atof(NEXT());
@@ -419,6 +433,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--dry-run"))  g_dry = 1;
         else if (!strcmp(a, "--verbose"))  g_verbose = 1;
         else if (!strcmp(a, "--raw"))      { cmd = "raw"; raw_n = atoi(NEXT()); }
+        else if (!strcmp(a, "--msg"))      { if (nsend < 24) sendmsgs[nsend++] = NEXT(); }
+        else if (!strcmp(a, "--listen"))   listen_s = atof(NEXT());
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else if (a[0] != '-' && !cmd)      cmd = a;
         else if (a[0] != '-' && !cmd_arg)  cmd_arg = a;
@@ -453,6 +469,26 @@ int main(int argc, char** argv) {
     }
 
     if (conn_open(&c, host, port, 15) != 0) return 1;
+
+    if (!strcmp(cmd, "send")) {
+        char rc[8], ra_[4096];
+        struct timeval t0, tn;
+        int n;
+        for (n = 0; n < nsend; n++) conn_send(&c, sendmsgs[n]);
+        gettimeofday(&t0, NULL);
+        while (listen_s > 0) {
+            double el;
+            if (conn_recv(&c, rc, ra_, sizeof(ra_)) != 0) break;
+            gettimeofday(&tn, NULL);
+            el = (tn.tv_sec - t0.tv_sec) + (tn.tv_usec - t0.tv_usec) * 1e-6;
+            if (el > listen_s) break;
+            if (strcmp(rc, "518") && strcmp(rc, "517")) {   /* skip telemetry spam */
+                printf("%s@%s#\n", rc, ra_);
+                fflush(stdout);
+            }
+        }
+        conn_close(&c); return 0;
+    }
 
     if (!strcmp(cmd, "raw")) {
         char rc[8], ra_[4096];
@@ -503,10 +539,33 @@ int main(int argc, char** argv) {
         snprintf(msg, sizeof(msg), "1&531&3&state:%d;speed:0;#", on);
         conn_send(&c, msg);
         if (!g_dry) {
-            char args[512], v[64];
+            char args[2048], v[64];
             if (wait_for(&c, "531", args, sizeof(args), 200) == 0 && !arg_get(args, "ret", v, sizeof(v)))
                 printf("{\"tracking\":%s}\n", (atoi(v) == 1) ? "true" : "false");
             else printf("{\"tracking\":null,\"error\":\"no 531 reply\"}\n");
+            fflush(stdout);
+            if (hold_s > 0) {
+                struct timeval t0, tn;
+                double last = -1e9;
+                char rc[8];
+                gettimeofday(&t0, NULL);
+                for (;;) {
+                    double el;
+                    if (conn_recv(&c, rc, args, sizeof(args)) != 0) break;
+                    gettimeofday(&tn, NULL);
+                    el = (tn.tv_sec - t0.tv_sec) + (tn.tv_usec - t0.tv_usec) * 1e-6;
+                    if (el > hold_s) break;
+                    if (!strcmp(rc, "518") && el - last >= 5.0) {
+                        char va[64], vz[64];
+                        last = el;
+                        if (!arg_get(args, "compass", vz, sizeof(vz)) &&
+                            !arg_get(args, "alt", va, sizeof(va)))
+                            printf("{\"t\":%.1f,\"alt_deg\":%.6f,\"az_deg\":%.6f}\n",
+                                   el, -atof(va), atof(vz));
+                        fflush(stdout);
+                    }
+                }
+            }
         } else printf("{\"tracking\":null,\"dry_run\":true}\n");
         conn_close(&c); return 0;
     }

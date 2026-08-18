@@ -143,6 +143,28 @@ Two things the simulator got wrong until a real Polaris corrected them:
 The final `519` reply distinguishes the cases: `ret:0` = slew completed,
 `ret:-1` = refused or aborted.
 
+3. **Tracking is still refused, cause unknown.** `531` answers `ret:0`
+   (declined) under every condition tried. Ruled out on hardware:
+
+   | hypothesis | result |
+   |---|---|
+   | needs a preceding goto with `track:1` | `519@ret:0;track:1`, still no motion |
+   | needs a persistent client connection | held open 40 s, pose constant to 6 dp |
+   | needs the app's full init handshake | all 18 frames replayed, still `ret:0` |
+   | wrong mode | `mode:8` throughout |
+
+   `polestar_app` is unstripped, so the task that would do the tracking —
+   `SP_CreateTrackAuTask` — can be read directly: its only early gate is a
+   re-entrancy flag (`cmp r3,#1` → log and return −1), which is *not* an
+   alignment check. And our `531` produces **no error log at all**, so the
+   request is declined in the message handler before it ever reaches that task.
+
+   Leading theory: the mount will not track on a **self-referential
+   alignment**. The `530` we sent told it "you are pointing where you already
+   believe you are" — enough to clear `track:3`, but carrying no real sky
+   information. The decisive test is capturing what the app sends when tracking
+   genuinely starts, which needs a real star alignment and therefore darkness.
+
 ### Layer 2 — `polarissolved` (daemon + HTTP)
 
 - Speaks the mount's own ASCII protocol on **loopback** (`NNN@payload#`): read
