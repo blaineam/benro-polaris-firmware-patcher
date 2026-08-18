@@ -59,22 +59,72 @@ but does not yet decide between them:
    Polaris' own init leaves the event mode set for tethered capture only, card
    events would never be armed.
 
+## Benro's actual capture loop (read from the DWARF reconstruction)
+
+```c
+t        = (shutterSpeed + 1.0f) * 100.0f;
+delayMax = (int)(t + t + 500.0f);          /* units of 10 ms polls */
+do {
+    wait_and_handle_event(10, &evtype, 0); /* 10 ms poll */
+    if (evtype == GP_EVENT_CAPTURE_COMPLETE && fileCount > 0) goto download;
+    if (evtype == GP_EVENT_FILE_ADDED) { fileCount++; delayCount = 0; }
+    delayCount++;
+} while (delayCount <= delayMax && !cancelled);
+if (fileCount < 1) { "capture image timeout"; ret = -1; }
+```
+
+Two consequences, both measured:
+
+**Benro uses a different libgphoto2 API than a desktop user does.** They call
+`ARG_TRIGGER_CAPTURE` — `gphoto2 --trigger-capture` — which fires the shutter
+and returns, leaving the caller to poll for `GP_EVENT_FILE_ADDED`. A desktop
+`--capture-image-and-download` instead lets libgphoto2 do the waiting
+*internally* and hands back the file. Same library, same version (2.5.34 on both
+the Mac and here), **different code path** — which is why card capture is
+instant on a Mac and times out on the Polaris.
+
+**The timeout scales with shutter speed:**
+
+| exposure | Benro's wait |
+|---|---|
+| 1/60 s | **7.0 s** |
+| 5 s | 17 s |
+| 30 s | 67 s |
+
+The 7 s budget measured above is the worst case, from testing at 1/60 s in
+daylight. It is NOT a fix to rely on long exposures having a longer budget: the
+solver wants short frames, and a capture path that only works above some
+exposure threshold is not a capture path.
+
 ## The design: stop depending on the event
 
 Diagnosing which of the three it is needs the camera. But we do not have to
 know, because a fix that works for all three is available: **treat the event as
 an optimisation, not a requirement.**
 
+The refined mechanism, now that Benro's loop is known: **synthesize the event
+they are waiting for.** Our loader already trampolines the public libgphoto2
+API, so it can wrap `gp_camera_wait_for_event`:
+
 ```
-  set capturetarget = Memory card        (the user's RAW lands on the card)
-  remember the newest file on the card   (one folder listing, cheap)
-  fire the shutter
-  ├─ the normal path returns a file  ->  pass it straight through   (fast path,
-  │                                      byte-identical to today's behaviour)
-  └─ it times out                    ->  poll the card for a file that was not
-                                         there before, fetch THAT, and hand it
-                                         back as if the event had arrived
+  gp_camera_trigger_capture(...)      <- wrapper notes: a capture is pending,
+                                         and snapshots the newest file on the card
+
+  gp_camera_wait_for_event(...)       <- wrapper calls the real one first
+    real event returned  ->  pass straight through          (fast path, unchanged)
+    GP_EVENT_TIMEOUT     ->  every Nth call, list ONE folder on the card;
+                             if a file is there that was not before, return
+                             GP_EVENT_FILE_ADDED with its CameraFilePath
 ```
+
+Benro's loop then sees `GP_EVENT_FILE_ADDED`, increments `fileCount`, resets
+`delayCount`, and falls into its **own** download path unchanged. We are not
+replacing their capture logic — we are supplying the one fact it is missing.
+
+Why this works at **any** camera setting: the file lands on the card within a
+second or two of the shutter regardless of exposure, and the loop always polls
+for at least 7 s. The failure was never that the file was slow; it was that
+nobody announced it. A filesystem poll does not care whether the event exists.
 
 The camera writes to its own card either way — that part never depended on the
 event. Only *our copy* did.
