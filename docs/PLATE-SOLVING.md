@@ -239,6 +239,9 @@ establishes the component inventory and the process-boundary rule everything els
 is built to.
 
 **Phase 2 — bench the solver against ground truth, then on device.**
+*Status: the host/qemu legs are **done** — see [BENCH-RESULTS.md](BENCH-RESULTS.md).
+`polaris-solve` and `polaris-extract` are built for the device and validated;
+what remains is running them on the Polaris itself.*
 Two tiers, because they prove different things:
 
 - *Tier A — solver correctness + speed.* astrometry.net's own `demo/` set is

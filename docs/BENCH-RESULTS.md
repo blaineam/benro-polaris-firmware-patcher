@@ -67,3 +67,76 @@ Solved centres: `apod4` → RA 187.230445°, Dec +56.704209°, roll 69.906°;
    (GSL-free per the audit) and re-run this table under `qemu-arm-static`.
 2. Run the same table **on the Polaris over SSH** (`--ssh-key` makes this a
    two-minute job) for the number that actually decides the design.
+
+---
+
+# Round 2 — our own binaries, built for the device
+
+Round 1 above measured Debian's packaged `solve-field`. This round measures
+**what we would actually ship**: built by
+[`container/astro/build_solver.sh`](../container/astro/build_solver.sh) from
+upstream astrometry.net 0.98 with our BSD-3 GSL shim, cross-compiled for the
+Polaris.
+
+## The binaries
+
+| | size | ABI | glibc ceiling | DT_NEEDED |
+|---|---|---|---|---|
+| `polaris-solve` | 651,988 B | soft-float EABI (`0x5000200`) | **2.7** | `libc libm libpthread` |
+| `polaris-extract` | 139,212 B | soft-float EABI | **2.7** | `libc libm` (libjpeg is static) |
+
+Every one of those is inside what the device provides (glibc 2.24, soft-float).
+The build asserts all of it and aborts otherwise, the same way the libgphoto2
+build does — plus licence guards proving no `gsl-an`, `md5`, `ctmf`, `simplexy`
+or `catalogs` object made it in.
+
+**The GSL shim was differential-tested against real GSL**: same test program
+built twice, once against Debian's `libgsl-dev` and once against our shim.
+Output is identical to every printed digit except two least-squares *residual*
+entries that differ in the 13th significant figure.
+
+## Correctness
+
+`polaris-solve` on ARM returns results **identical to the x86 build to six
+decimal places** on every demo field. And the whole pipeline — our extractor on
+the JPEG, our solver on its star list — reproduces the reference solution:
+
+| frame | reference (`.xyls` path) | ours (JPEG → extract → solve) | agreement |
+|---|---|---|---|
+| `apod2` 800×600, 4.5×3.4° | RA 84.573797, Dec −2.750929 | RA 84.579746, Dec −2.758409 | **~34″** |
+| `apod2` upscaled to **8192×6144** | " | RA 84.576444, Dec −2.756517 | **~22″** |
+
+Solved pixel scale on the 45 MP frame: **1.9789″/px**, field 4.5030 × 3.3772° —
+i.e. exactly the geometry a 400 mm lens puts on a full-frame body.
+
+## Speed (qemu, **pessimistic** — see caveat)
+
+| case | field | extract | solve |
+|---|---|---|---|
+| 45 MP JPEG @ 400 mm, 20° pose hint | 4.5° | **0.37 s** | **2.67 s** |
+| 45 MP JPEG @ 400 mm, **no** hint | 4.5° | 0.37 s | 27.9 s |
+| `apod4` star list, no hint | 33° | — | 4.13 s |
+| `apod3` star list | 8.4° | — | 5.27 s |
+| `apod2` star list, sloppy 30° hint | 4.5° | — | 61.7 s |
+
+> **Caveat, stated plainly:** these ran under `qemu-arm-static` *inside an
+> emulated x86-64 container* on an Apple-silicon host — two layers of emulation.
+> Comparing the same work on x86 (0.35 s) against this (16.5 s) implies roughly
+> a **30–50× penalty**, far worse than qemu-user's usual 2–10×. The device's
+> ~1 GHz Cortex-A7 is slower than the host core, but nothing like 30× slower.
+> Real device numbers are still the ones that decide the design.
+
+## What this changes about the design
+
+1. **A pose hint is worth ~10× on a long lens** (2.7 s vs 27.9 s at 400 mm) and
+   ~80× on x86. The mount always has a rough pointing, so the solver must always
+   be given one. This is now the single most important input to the design.
+2. **400 mm on full frame is comfortably in reach.** Decoding at 1/4 scale keeps
+   a 45 MP frame's extraction under half a second even doubly emulated, and the
+   solve is a couple of seconds with a hint.
+3. **Index storage for 14–400 mm is ~46 MB** (`index-4110` … `4119`), chosen by
+   [`fetch-indexes.sh`](../container/astro/fetch-indexes.sh). Fits the microSD
+   many times over.
+4. **Roll/parity needs one real calibration frame.** The solver now reports
+   `parity` and the full `cd` matrix, but which way "up" maps to the camera on
+   the mount can only be pinned down with a frame the Polaris itself took.
