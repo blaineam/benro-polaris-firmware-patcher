@@ -162,6 +162,24 @@ Those are complementary, not competing: the solver wants a small disposable
 frame, the photographer wants the RAW on the card. The end state is that the
 alignment loop asks for RAM capture and everything else asks for card capture.
 
+## Implemented (shims #4 and #5 in `stage2_loader.c`)
+
+Both entry points were already in the 64-symbol trampoline set, so no new
+machinery was needed:
+
+| shim | what it does |
+|---|---|
+| `gp_camera_trigger_capture` | records the card folder and its file count at the moment the shutter fires — one folder listing, never a recursive walk |
+| `gp_camera_wait_for_event` | passes real events straight through; on `GP_EVENT_TIMEOUT` polls that one folder at most ~2×/s and, if a file appeared, returns `GP_EVENT_FILE_ADDED` with its `CameraFilePath` |
+
+`STAGE2_CAPTURE_DEBUG=1` additionally logs every event with `t+` timings
+relative to the shutter, which answers the outstanding question — whether the
+real event is **late** or **absent** — at zero behavioural cost.
+
+Fail-open at every step: no folder found, no listing, allocation failure or any
+error hands back exactly what the real call returned, which is today's
+behaviour.
+
 ## Rollout, and why the new path ships OFF
 
 `stage2_loader.c` is a hardware-validated artifact — `docs/TESTED.md` records its
