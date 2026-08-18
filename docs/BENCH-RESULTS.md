@@ -366,3 +366,41 @@ operation.
 The simulator also now implements `530` the way the hardware does (real values
 in both steps, no step 3), so alignment corrections can be verified without a
 mount.
+
+---
+
+# Round 7 — alignment injection, proved on the real mount
+
+The claim everything rests on — that pushing a plate-solved position through
+`530` actually changes where the mount points — had only ever been shown against
+`polaris-sim`. Now measured on hardware, using **raw motor angles (`517`)**:
+
+```
+baseline    yaw -2.939988 rad
+after 530   yaw -2.939987 rad     unchanged: no motion, only relabelled
+after goto  yaw -2.974712 rad     moved 0.034725 rad = 1.989 deg
+```
+
+A 2.000° error was injected; the encoder moved **1.989°**. Agreement to 0.011°.
+
+So: `530` shifts the frame without moving the mount, and the next `goto`
+physically absorbs the injected error. Chain proven end to end on hardware.
+
+## The measurement trap that nearly buried this
+
+The first attempt at this test concluded, in capitals, that
+`530` did NOT affect pointing. That conclusion was **wrong**, and the bug was in
+the test, not the mount:
+
+> `518` pose is reported in the mount's OWN frame — the exact thing `530`
+> shifts. Comparing an azimuth from before the injection with one from after
+> compares two different physical directions that happen to carry similar
+> numbers.
+
+After the injection the mount reported 271.112 **without moving**, then the goto
+took it to 269.114 — a 2° change in reported terms, i.e. real physical motion,
+which the naive comparison read as "no change".
+
+**Rule: `518` is frame-relative and cannot verify anything that changes the
+frame. `517` motor angles are the ground truth.** Every alignment claim in this
+project must be checked against `517`.
