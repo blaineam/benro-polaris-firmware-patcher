@@ -26,6 +26,8 @@ INDEXES=${INDEXES:-/app/sd/astrometry}
 SENSOR_MM=${SENSOR_MM:-36}
 DOWNSAMPLE=${DOWNSAMPLE:-4}
 MAXSTARS=${MAXSTARS:-200}
+# never let one frame block the loop; a mismatched hint can grind for minutes
+SOLVE_TIMEOUT=${SOLVE_TIMEOUT:-45}
 
 IMG="$1"
 FOCAL="${2:-}"
@@ -75,7 +77,7 @@ W=$(sed -n 's/^# full resolution \([0-9]*\) x .*/\1/p' "$STARS")
 H=$(sed -n 's/^# full resolution [0-9]* x \([0-9]*\)/\1/p' "$STARS")
 [ -n "$W" ] && [ -n "$H" ] || { echo '{"solved":false,"error":"no image size"}'; exit 3; }
 
-set -- $IDXARGS --stars "$STARS" --width "$W" --height "$H"
+set -- $IDXARGS --stars "$STARS" --width "$W" --height "$H" --cpulimit "$SOLVE_TIMEOUT"
 [ -n "$FOCAL" ] && set -- "$@" --focal-mm "$FOCAL" --sensor-mm "$SENSOR_MM"
 [ -n "$RA" ] && [ -n "$DEC" ] && [ -n "$RADIUS" ] && \
     set -- "$@" --ra "$RA" --dec "$DEC" --radius "$RADIUS"

@@ -16,6 +16,8 @@
 #include <math.h>
 #include <time.h>
 #include <sys/time.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include "os-features.h"
 #include "solver.h"
@@ -33,6 +35,21 @@
 #include "fitsioutils.h"
 
 #define MAXIDX 64
+
+/* A WRONG hint is far worse than no hint: the solver searches the hinted region
+ * first, finds nothing, and then grinds. Measured on device: a mismatched hint
+ * ran 11 minutes before being killed. The align loop must never be able to hang
+ * the mount like that, so enforce a hard wall-clock bound with SIGALRM -- it
+ * cannot be defeated by anything inside the solver. */
+static volatile int g_nfield_for_timeout = 0;
+static void on_timeout(int sig) {
+    const char* msg;
+    (void)sig;
+    msg = "{\"solved\":false,\"error\":\"timeout\"}\n";
+    /* write(), not printf(): async-signal-safe */
+    if (write(1, msg, strlen(msg)) < 0) { /* nothing useful to do */ }
+    _exit(3);
+}
 
 static void usage(const char* me) {
     fprintf(stderr,
@@ -54,7 +71,10 @@ static void usage(const char* me) {
 "  hints (optional, big speedups)\n"
 "    --ra R --dec D --radius DEG    search near this sky position only\n"
 "    --depth N         stop after the brightest N stars (default 0 = all)\n"
-"    --cpulimit SEC    give up after this much CPU (default 0 = no limit)\n"
+"    --cpulimit SEC    hard wall-clock limit; prints {\"solved\":false,\n"
+"                      \"error\":\"timeout\"} and exits 3 (default 0 = no limit).\n"
+"                      ALWAYS set this in an automated loop: a wrong hint can\n"
+"                      grind for many minutes.\n"
 "    --parity 0|1|2    0=normal 1=flipped 2=both (default 2)\n"
 "    --no-tweak        skip the 2nd-order SIP refinement (TAN fit only)\n"
 "    --verbose\n", me);
@@ -189,7 +209,13 @@ int main(int argc, char** argv) {
     solver->distance_from_quad_bonus = TRUE;
     solver->parity = (parity == 0) ? PARITY_NORMAL : (parity == 1) ? PARITY_FLIP : PARITY_BOTH;
     if (depth > 0) solver->endobj = depth;
-    if (cpulimit > 0) { solver->timer_callback = NULL; }
+    if (cpulimit > 0) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = on_timeout;
+        sigaction(SIGALRM, &sa, NULL);
+        alarm((unsigned)(cpulimit + 0.5));
+    }
     solver_set_keep_logodds(solver, log(1e12));
     /* Refine with a 2nd-order SIP fit. Camera lenses -- especially the wide
      * ones used for an alignment frame -- have enough distortion that a plain

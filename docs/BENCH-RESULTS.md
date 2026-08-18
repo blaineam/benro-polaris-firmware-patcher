@@ -190,8 +190,34 @@ RA 186.902948, Dec +56.700021 on all three platforms.
    path should never be taken in practice.
 4. Solve memory stayed far below the 1.5 GB available; storage is a non-issue.
 
+## Extraction, on device
+
+`polaris-extract` against an 8192×6144 JPEG, on the Polaris:
+
+| decode scale | resolution | time |
+|---|---|---|
+| 1/8 | 1024×768 | **0.62 s** |
+| 1/4 | 2048×1536 | **0.87 s** |
+| 1/2 | 4096×3072 | **1.57 s** |
+
+So **end to end at 400 mm is ~8.2 s** on device: 0.87 s to extract at 1/4 plus
+7.31 s to solve, with a correct pose hint.
+
+## A wrong hint is worse than no hint
+
+Found the hard way: pointing the solver at a frame that does not match its hint
+(a picture of Orion while the mount looked at RA 313°) ran for **11 minutes of
+CPU** before being killed. The solver searches the hinted region, fails, and then
+grinds — worse than the 361 s blind case.
+
+`--cpulimit` had been declared but never implemented (it set a field to NULL and
+did nothing). It is now a hard `SIGALRM` wall-clock bound that cannot be defeated
+by anything inside the solver: it prints `{"solved":false,"error":"timeout"}` and
+exits 3. Verified on device — the same 11-minute case now returns in exactly the
+limit. `polaris-align.sh` passes `--cpulimit 45` by default, so no single frame
+can ever block the alignment loop.
+
 ## Still not measured
 
-Star extraction from a real 45 MP camera JPEG, on device. Everything above feeds
-the solver pre-extracted star lists, which isolates the matching algorithm —
-`polaris-extract` timing on device needs a real frame from the R5 II.
+A real frame from the R5 II. The 45 MP figures above use an upscaled star field
+of the right dimensions and pixel scale, not the camera's own output.
