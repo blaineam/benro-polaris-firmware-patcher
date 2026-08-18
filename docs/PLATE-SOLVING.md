@@ -208,10 +208,30 @@ for the slew (`519 … track:0`) but is **not reliable for the confirm**:
 So log-watching is fine for the *coarse* trigger (we can afford to miss a slew;
 another one is coming) and wrong for the *decisive* one.
 
-The robust detector is the mount's own state: `284` reports `track:3` while
-unaligned and `track:0` once the app's alignment completes, so polling it at
-~1 Hz catches the transition without depending on a log line surviving. That is
-the change to make before this runs unattended.
+A state-driven detector was built and then **disproved on hardware**: `284`
+reports `track:3` only on a mount that has *never* been aligned. Driving the
+app's own `285 mode:1 -> mode:8` sequence left it at `track:0` throughout, so
+re-aligning an already-aligned mount produces no state transition at all. That
+is the common case, so `track` cannot be the trigger.
+
+**What is left, and what to build next.** Three signals exist and each is
+partial:
+
+| signal | good for | fails because |
+|---|---|---|
+| `Mlog.txt` lines | the coarse slew trigger | truncated continuously; a decisive line can vanish before any poll |
+| `284 track` | a first-ever alignment | never returns to 3 once aligned |
+| `518` pose | motion, always available | tells us the mount moved, not *why* |
+
+So the trigger should be **pose-based**: a slew followed by a settle is the
+observable signature of "the app went to its star and is waiting", and it works
+regardless of alignment history. The ordering problem then remains — our `530`
+must land *after* the user's, or theirs overwrites ours — which argues for
+injecting once when the solve is ready and **re-injecting** a few seconds later
+while the pose is unchanged, so we win the race whichever way it falls.
+
+Note this is a *detection* problem only. Everything downstream — solve, gate,
+conversion, `530` injection — is verified end to end on the device.
 
 ### Layer 2 — `polarissolved` (daemon + HTTP)
 

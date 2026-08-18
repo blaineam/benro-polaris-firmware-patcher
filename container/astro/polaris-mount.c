@@ -361,6 +361,12 @@ static void usage(const char* me) {
 "\n"
 "commands:\n"
 "  pose                   read one 518 and print alt/az/ra/dec as JSON\n"
+"  state                  query 284 and print mode/track/aligned as JSON.\n"
+"                         track:3 means the mount is NOT aligned; it becomes 0\n"
+"                         the moment an alignment completes. Polling this is\n"
+"                         how to detect the app finishing its star alignment --\n"
+"                         far more reliable than scraping polestar_app's log,\n"
+"                         which the app truncates every few seconds.\n"
 "  goto --alt D --az D [--no-track]        MOVES MOTORS\n"
 "  goto-radec --ra D --dec D [--no-track] [--no-refine]  MOVES MOTORS\n"
 "                         after the slew, recomputes the target for the time it\n"
@@ -551,6 +557,22 @@ int main(int argc, char** argv) {
             printf("%s@%s#\n", rc, ra_);
             fflush(stdout);
         }
+        conn_close(&c); return 0;
+    }
+
+    if (!strcmp(cmd, "state")) {
+        char args[2048], v[64];
+        int mode = -1, track = -1;
+        conn_send(&c, "1&284&2&-1#");
+        if (wait_for(&c, "284", args, sizeof(args), 400) != 0) {
+            printf("{\"state\":false,\"error\":\"no 284 reply\"}\n");
+            conn_close(&c); return 1;
+        }
+        if (!arg_get(args, "mode", v, sizeof(v)))  mode = atoi(v);
+        if (!arg_get(args, "track", v, sizeof(v))) track = atoi(v);
+        printf("{\"mode\":%d,\"track\":%d,\"aligned\":%s,\"astro\":%s}\n",
+               mode, track, (track >= 0 && track != 3) ? "true" : "false",
+               (mode == 8) ? "true" : "false");
         conn_close(&c); return 0;
     }
 

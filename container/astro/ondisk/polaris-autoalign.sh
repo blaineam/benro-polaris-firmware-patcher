@@ -241,41 +241,55 @@ inject() {
     rm -f "$STATE"
 }
 
-# polestar_app TRUNCATES this log continuously -- measured: 13439 bytes down to
-# 979 in twenty seconds. `tail -f` follows by DESCRIPTOR, so the first truncation
-# leaves it reading a stale offset and it silently never reports another line.
-# In the field that looks exactly like "the solve never fired". So follow by
-# size instead, and reset to the start whenever the file shrinks.
-follow_log() {
-    last=$(wc -c < "$APPLOG" 2>/dev/null || echo 0)
-    while :; do
-        cur=$(wc -c < "$APPLOG" 2>/dev/null || echo 0)
-        if [ "$cur" -lt "$last" ]; then          # truncated: start over
-            last=0
-        fi
-        if [ "$cur" -gt "$last" ]; then
-            tail -c +$((last + 1)) "$APPLOG" 2>/dev/null
-            last=$cur
-        fi
-        sleep 0.3 2>/dev/null || sleep 1
-    done
+# ---------------------------------------------------------------------------
+# Detection is STATE-DRIVEN, not log-driven.
+#
+# polestar_app truncates /app/Mlog.txt continuously (13439 bytes -> 979 in 20 s
+# was measured), so a single decisive line can be destroyed before any poll
+# reads it. Rehearsals showed exactly that: the slew detected reliably, the
+# confirm missed intermittently.
+#
+# The mount tells us the same thing far more robustly. 284 reports track:3 while
+# it is NOT aligned, and track:0 the instant an alignment completes. So:
+#
+#     track becomes 3   -> the app is running its alignment; the mount is
+#                          pointed at its star, so capture and solve NOW
+#     track 3 -> 0      -> the user tapped confirm; inject our solved position
+#
+# No log involved, nothing to race.
+# ---------------------------------------------------------------------------
+mount_state() {
+    "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" state 2>/dev/null \
+        | sed -n 's/.*"track":\([-0-9]*\).*/\1/p'
 }
 
-log "watching $APPLOG  (dry_run=$DRY_RUN frame=${FRAME:-none} focal=${FOCAL_MM}mm)"
-follow_log | while read -r line; do
-    case "$line" in
-        *"code:519"*"track:0"*)
-            log "app is aligning: slewing to its star"
-            ( sleep 6; solve_now ) &          # settle, then capture+solve in background
-            ;;
-        *"code:530"*"step:2"*)
+log "watching the mount's alignment state (dry_run=$DRY_RUN mode=${CAPTURE_MODE:-auto} focal=${FOCAL_MM}mm)"
+prev=""
+solving=0
+while :; do
+    tr=$(mount_state)
+    if [ -n "$tr" ] && [ "$tr" != "$prev" ]; then
+        log "alignment state: track=${prev:-?} -> $tr"
+        if [ "$tr" = "3" ]; then
+            # the app is aligning: it has slewed to its star and is waiting for
+            # the user. Solve now so the answer is ready when they confirm.
+            if [ "$solving" = "0" ]; then
+                solving=1
+                ( sleep "${SETTLE_S:-4}"; solve_now; echo done > /tmp/polaris-autoalign.done ) &
+            fi
+        elif [ "$prev" = "3" ]; then
+            # 3 -> anything else: the alignment just completed.
+            log "the app completed its alignment -> replacing it with the solved one"
             if [ -f "$STATE" ]; then
-                log "app confirmed its alignment -> replacing it with the solved one"
                 inject
             else
-                log "app confirmed before our solve finished; will inject as soon as it lands"
+                log "our solve is not ready yet; will inject the moment it lands"
                 touch "$PENDING"
             fi
-            ;;
-    esac
+            solving=0
+        fi
+        prev=$tr
+    fi
+    [ -f /tmp/polaris-autoalign.done ] && { rm -f /tmp/polaris-autoalign.done; solving=0; }
+    sleep "${POLL_S:-1}"
 done
