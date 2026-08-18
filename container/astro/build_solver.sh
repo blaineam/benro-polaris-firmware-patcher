@@ -180,4 +180,18 @@ if [ "$TARGET" = "arm" ]; then
   log "  polaris-extract DT_NEEDED: $ENEEDED  ✓"
 fi
 
-log "DONE -> $OUT/polaris-solve  $OUT/polaris-extract"
+# ---- polaris-mount: the mount protocol client (MIT, no dependencies) ------
+$CC -O2 $ARCHFLAGS -o "$OUT/polaris-mount" "$HERE/polaris-mount.c" -lm \
+  || die "polaris-mount link failed"
+log "  linked $OUT/polaris-mount ($(stat -c %s "$OUT/polaris-mount") bytes)"
+if [ "$TARGET" = "arm" ]; then
+  MFLAGS="$($READELF -h "$OUT/polaris-mount" | awk -F: '/Flags/{print $2}')"
+  grep -q 'soft-float' <<<"$MFLAGS" || die "polaris-mount ABI mismatch:$MFLAGS"
+  MNEEDED="$($READELF -d "$OUT/polaris-mount" | awk -F'[][]' '/\(NEEDED\)/{print $2}' | sort -u | tr '\n' ' ')"
+  for n in $MNEEDED; do
+    case "$n" in libm.so.6|libc.so.6) : ;; *) die "polaris-mount needs '$n'";; esac
+  done
+  log "  polaris-mount DT_NEEDED: $MNEEDED  ✓"
+fi
+
+log "DONE -> $OUT/polaris-solve  $OUT/polaris-extract  $OUT/polaris-mount"

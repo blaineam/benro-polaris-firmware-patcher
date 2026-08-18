@@ -6,16 +6,14 @@
 #                      [--out DIR] [--no-indexes] [--image NAME]
 #
 #  Produces out/astro-bundle/ :
-#     polaris-solve       ARM binary, the plate solver     (GPL v2+, see NOTICE)
-#     polaris-extract     ARM binary, JPEG -> star list    (MIT)
-#     polaris-align.sh    device-side chain of the two     (MIT)
-#     install_astro.sh    installs into /app/astro         (MIT)
-#     indexes/            astrometry.net index files for your focal range
-#     README.txt          how to put it on the Polaris and test it
+#     COPY-TO-SD-CARD-ROOT/     <- drag the CONTENTS of this onto the microSD
+#         astrometry/           index files      -> /app/sd/astrometry
+#         polaris-astro/        binaries+scripts -> /app/sd/polaris-astro
+#     README.txt                how to install and test it
 #
-#  Copy that directory to the Polaris microSD (or scp it), run install_astro.sh
-#  on the device, and point polaris-align.sh at a frame in
-#  /app/sd/DCIM/100SPCAM/.
+#  Put the card back in the Polaris, run
+#  /app/sd/polaris-astro/install_astro.sh once, and point polaris-align.sh at a
+#  frame in /app/sd/DCIM/100SPCAM/.
 #
 #  NOTHING here is flashed. It is purely additive files under /app/astro, and
 #  `rm -rf /app/astro` removes it. See docs/PLATE-SOLVING.md.
@@ -50,12 +48,12 @@ docker run --rm \
   -v "$HERE/container":/opt/patcher:ro \
   -v "$OUT":/out \
   --entrypoint /bin/bash "$IMG" -c \
-  'bash /opt/patcher/astro/build_solver.sh arm /work/out/astro && cp /work/out/astro/polaris-solve /work/out/astro/polaris-extract /out/ && cp /opt/patcher/astro/ondisk/*.sh /out/'
+  'bash /opt/patcher/astro/build_solver.sh arm /work/out/astro && mkdir -p /out/COPY-TO-SD-CARD-ROOT/polaris-astro && cp /work/out/astro/polaris-solve /work/out/astro/polaris-extract /work/out/astro/polaris-mount /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ && cp /opt/patcher/astro/ondisk/*.sh /out/COPY-TO-SD-CARD-ROOT/polaris-astro/'
 
 if [ "$WANT_IDX" = "1" ]; then
   echo "[*] selecting + downloading index files for ${FMIN}-${FMAX}mm…"
   sh "$HERE/container/astro/fetch-indexes.sh" --focal-min "$FMIN" --focal-max "$FMAX" \
-     --sensor-mm "$SENSOR" --out "$OUT/indexes"
+     --sensor-mm "$SENSOR" --out "$OUT/COPY-TO-SD-CARD-ROOT/astrometry"
 fi
 
 cat > "$OUT/README.txt" <<EOF
@@ -65,13 +63,22 @@ Built for ${FMIN}-${FMAX}mm on a ${SENSOR}mm-wide sensor.
 
 Put it on the device
 --------------------
-  # over the network (needs ssh; see the patcher's --ssh-key option)
-  scp -r . root@<polaris ip>:/app/sd/astro-bundle
-  ssh root@<polaris ip> 'sh /app/sd/astro-bundle/install_astro.sh'
-  ssh root@<polaris ip> 'mkdir -p /app/sd/astrometry && cp /app/sd/astro-bundle/indexes/*.fits /app/sd/astrometry/'
+Drag the CONTENTS of COPY-TO-SD-CARD-ROOT/ onto the root of the Polaris'
+microSD card, so the card ends up with:
 
-  # or copy this directory onto the microSD, put the card back, and run the
-  # same two commands from a console on the device.
+    <SD root>/astrometry/index-41xx.fits
+    <SD root>/polaris-astro/polaris-solve, polaris-extract, polaris-mount, *.sh
+
+Put the card back in the Polaris and run once:
+
+    /app/sd/polaris-astro/install_astro.sh
+
+(That copies the three binaries to /app/astro. The index files are read
+straight off the card at /app/sd/astrometry — they are never copied into
+flash.) Over ssh instead of sneakernet, the same layout works:
+
+    scp -r COPY-TO-SD-CARD-ROOT/. root@<polaris ip>:/app/sd/
+    ssh root@<polaris ip> /app/sd/polaris-astro/install_astro.sh
 
 Test it on a real frame
 -----------------------
@@ -93,9 +100,21 @@ Tuning
   MAXSTARS=300 ...   feed the solver more stars
   SENSOR_MM=23.5 ... APS-C body
 
+Moving the mount (simulated first — see docs/PLATE-SOLVING.md)
+------------------------------------------------------------
+  /app/astro/polaris-mount --lat <deg> --lon <deg> pose
+  /app/astro/polaris-mount --lat <deg> --lon <deg> align --solved-ra R --solved-dec D
+  /app/astro/polaris-mount --lat <deg> --lon <deg> goto-radec --ra R --dec D
+  /app/astro/polaris-mount --lat <deg> --lon <deg> track on
+
+Every motion refuses to run outside a safe envelope (--min-alt/--max-alt,
+--max-slew) and alignment refuses within --max-align-alt of the zenith, where
+azimuth is degenerate. Add --dry-run to see the exact commands without sending
+them.
+
 Removing it
 -----------
-  rm -rf /app/astro /app/sd/astrometry /app/sd/astro-bundle
+  rm -rf /app/astro /app/sd/astrometry /app/sd/polaris-astro
 
 Licensing: polaris-solve is built from astrometry.net and is GPL v2-or-later;
 polaris-extract, polaris-align.sh and install_astro.sh are MIT. They are

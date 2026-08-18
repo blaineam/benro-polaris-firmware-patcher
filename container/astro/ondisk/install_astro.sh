@@ -15,7 +15,7 @@ DEST=${DEST:-/app/astro}
 INDEXES=${INDEXES:-/app/sd/astrometry}
 
 mkdir -p "$DEST" "$INDEXES"
-for b in polaris-solve polaris-extract polaris-align.sh; do
+for b in polaris-solve polaris-extract polaris-mount polaris-align.sh; do
     [ -f "$SRC/$b" ] || { echo "[astro] MISSING $SRC/$b" >&2; exit 1; }
     cp "$SRC/$b" "$DEST/$b"
     chmod +x "$DEST/$b"
@@ -27,8 +27,14 @@ ls "$INDEXES"/index-*.fits >/dev/null 2>&1 \
     || echo "[astro] NO index files yet -- copy them to $INDEXES (see fetch-indexes.sh on the host)"
 cat <<EOF
 
-[astro] try it:
-    $DEST/polaris-align.sh /app/sd/DCIM/<some>.JPG 400 
-    # with a rough pointing hint (much faster on long lenses):
-    $DEST/polaris-align.sh /app/sd/DCIM/<some>.JPG 400 <ra_deg> <dec_deg> 20
+[astro] solve a frame:
+    $DEST/polaris-align.sh /app/sd/DCIM/100SPCAM/IMG_0001.JPG 400
+    # a rough pointing hint is worth ~10x on a long lens:
+    $DEST/polaris-align.sh /app/sd/DCIM/100SPCAM/IMG_0001.JPG 400 <ra> <dec> 20
+
+[astro] talk to the mount (add --dry-run to send nothing):
+    $DEST/polaris-mount --lat <deg> --lon <deg> pose
+    $DEST/polaris-mount --lat <deg> --lon <deg> align --solved-ra R --solved-dec D
+    $DEST/polaris-mount --lat <deg> --lon <deg> goto-radec --ra R --dec D
+    $DEST/polaris-mount --lat <deg> --lon <deg> track on
 EOF
