@@ -55,8 +55,12 @@ static double az_to_wire(double az) {
 
 static int   g_dry = 0;
 static int   g_verbose = 0;
-static double g_min_alt = 5.0;      /* refuse to drive below this */
-static double g_max_alt = 85.0;     /* ... or above it */
+/* The usable altitude band, taken from alpaca-benro-polaris, whose author
+ * gates its own gotos with "if p_alt>12 and p_alt<80: # only GOTO if within
+ * range of Benro Polaris capabilities". Tighter than the 5..85 I had guessed
+ * blind. Override with --min-alt/--max-alt if your rig differs. */
+static double g_min_alt = 12.0;
+static double g_max_alt = 80.0;
 static double g_max_slew = 180.0;   /* refuse a single move bigger than this */
 /* Azimuth is degenerate near the zenith: a heading correction derived there is
  * amplified by 1/cos(alt), so a 30" solve becomes ~5' of heading error at 84
@@ -344,7 +348,9 @@ static void usage(const char* me) {
 "  --host H --port P      mount control endpoint (default 127.0.0.1:9090)\n"
 "  --lat D --lon D        observer position, degrees (required for coordinates)\n"
 "  --utc \"YYYY-MM-DDTHH:MM:SS\"  pretend it is this time (default: now)\n"
-"  --min-alt D --max-alt D      altitude band motion is allowed in (5..85)\n"
+"  --min-alt D --max-alt D      altitude band motion is allowed in (12..80,\n"
+"                         the range alpaca-benro-polaris states the mount can\n"
+"                         actually reach)\n"
 "  --max-slew D           refuse a single move larger than this (180)\n"
 "  --max-align-alt D      refuse to derive a heading from a frame taken above\n"
 "                         this altitude (65). Azimuth is degenerate near the\n"
