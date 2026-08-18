@@ -76,6 +76,7 @@ class Mount:
         self.track_target = None               # (ra, dec) held while tracking
         self.slewing = False
         self.mode = 8                          # Astro
+        self.aligned = False
         self.t0 = time.time()
         self.moves = 0
 
@@ -225,7 +226,22 @@ class Handler(socketserver.BaseRequestHandler):
             mount.set_compass(float(args.get("compass", 0)))
             self.send("527@ret:0;")
         elif cmd == "530":
-            # accepted but ignored: repeated 530s are what wedge a real Polaris
+            # Star alignment. The caller declares "I am currently pointing at
+            # this sky position"; the mount makes its frame agree. Hardware
+            # sends the real values in BOTH step:1 and step:2 (captured from
+            # the phone app), so act on step:2 and accept step:1 quietly.
+            if args.get("step") == "2":
+                wire = float(args.get("yaw", 0))
+                claimed_az = (360.0 - wire) % 360.0 if wire > 0 else (-wire) % 360.0
+                claimed_alt = float(args.get("pitch", 0))
+                with mount.lock:
+                    mount.az_error = ((mount.true_az - claimed_az + 540.0) % 360.0) - 180.0
+                    mount.alt_error = mount.true_alt - claimed_alt
+                    mount.aligned = True
+                if self.server.log:
+                    print(f"[sim] 530 aligned: claimed {claimed_az:.4f}/{claimed_alt:.4f} "
+                          f"true {mount.true_az:.4f}/{mount.true_alt:.4f} "
+                          f"-> az_error {mount.az_error:.4f}", flush=True)
             self.send("530@ret:0;")
         elif cmd == "284":
             self.send(f"284@mode:{mount.mode};track:{1 if mount.tracking else 0};")

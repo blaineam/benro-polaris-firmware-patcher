@@ -402,6 +402,7 @@ int main(int argc, char** argv) {
     double hold_s = 0;
     double refine_arcmin = 2.0;
     const char* utc = NULL;
+    int utc_fixed = 0;
     const char* cmd = NULL;
     const char* cmd_arg = NULL;
     int raw_n = 0;
@@ -454,6 +455,7 @@ int main(int argc, char** argv) {
         memset(&tm, 0, sizeof(tm));
         if (!strptime(utc, "%Y-%m-%dT%H:%M:%S", &tm)) { fprintf(stderr, "bad --utc\n"); return 2; }
         jd = jd_from_unix((double)timegm(&tm));
+        utc_fixed = 1;      /* replaying a past capture: freeze the clock */
     } else {
         struct timeval tv; gettimeofday(&tv, NULL);
         jd = jd_from_unix(tv.tv_sec + tv.tv_usec * 1e-6);
@@ -671,8 +673,16 @@ int main(int argc, char** argv) {
             double ralt = alt, raz = az;
             if (refine && !g_dry && !strcmp(cmd, "goto-radec")) {
                 struct timeval tv2; double jd2, sep;
-                gettimeofday(&tv2, NULL);
-                jd2 = jd_from_unix(tv2.tv_sec + tv2.tv_usec * 1e-6);
+                if (utc_fixed) {
+                    /* An explicit --utc means we are replaying a specific
+                     * moment (an offline test against a past capture). Using
+                     * the wall clock here would refine towards where the
+                     * target is TODAY, which is meaningless for that replay. */
+                    jd2 = jd;
+                } else {
+                    gettimeofday(&tv2, NULL);
+                    jd2 = jd_from_unix(tv2.tv_sec + tv2.tv_usec * 1e-6);
+                }
                 radec2altaz(ra, dec, lat, lon, jd2, &ralt, &raz);
                 sep = fabs(ralt - alt) + fabs(fmod(fabs(raz - az) + 180.0, 360.0) - 180.0)
                       * cos(ralt * DEG);

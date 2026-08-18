@@ -314,3 +314,55 @@ earlier captures off the Polaris SD failed — and upstream `solve-field` with i
 own `simplexy` extractor failed on them too (215 sources, no solve). Defocused
 or otherwise unusable frames are garbage-in; the check that mattered was running
 the gold standard alongside, which cleared our extractor of blame.
+
+---
+
+# Round 6 — the alignment correction, proved offline against a real capture
+
+Everything here except the mount itself is real: the sky position was measured
+**on the Polaris** from `259A8092.JPG`, the site is the user's GPS, and the time
+is the frame's own EXIF (`2025:01:17 22:50:44` local → `2025-01-18T06:50:44Z`).
+Reproduce with [`container/astro/m42_proof.sh`](../container/astro/m42_proof.sh).
+
+```
+solved (on device):  RA 83.800859  Dec -5.161810
++ GPS 35.35199,-119.17208 + EXIF time
+-> the optics physically pointed at  alt 46.3474  az 205.4594
+```
+
+Independent sanity check on that conversion — Orion from 35°N in mid-January:
+
+| time | computed |
+|---|---|
+| 6:50pm | alt 32.9°, az 126° (rising, SE) |
+| **10:50pm — the capture** | **alt 46.3°, az 205°** (just past the meridian) |
+| 2:50am | alt 7.1°, az 258° (setting, W) |
+
+Maximum possible altitude for Dec −5.16° at latitude 35.35° is 49.5°, and the
+capture lands at 46.3° just past transit. The whole chain — solve → J2000 →
+precession/nutation/aberration → alt/az — agrees with where the sky was.
+
+## The correction
+
+Mount physically on M42, compass deliberately wrong, plate-solved truth injected
+with `530`:
+
+| compass error | frame error after | pointing error on the next goto | uncorrected |
+|---|---|---|---|
+| 3° | 0.0000° | **0.00′** | 180′ |
+| 8° | 0.0000° | **0.00′** | 480′ |
+| 25° | 0.0000° | **0.00′** | 1500′ |
+| 47° | 0.0000° | **0.00′** | 2820′ |
+
+## A bug this test caught
+
+`goto-radec`'s arrival refinement called `gettimeofday()` directly, ignoring an
+explicit `--utc`. Harmless in production (real runs always mean "now"), but it
+made this replay refine towards where Betelgeuse is *today* rather than in
+January 2025 — a 3634′ error that looked like a catastrophic alignment failure
+and was actually a clock bug. `--utc` now freezes the clock for the whole
+operation.
+
+The simulator also now implements `530` the way the hardware does (real values
+in both steps, no step 3), so alignment corrections can be verified without a
+mount.
