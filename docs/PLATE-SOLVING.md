@@ -124,6 +124,25 @@ Three layers, deliberately separable so each can ship (and be reverted) alone.
   it is too slow is the device's *proven* path — `starskystacker::getStars()`
   inside `polestar_app` — which is only reachable from Layer 3.
 
+### Protocol facts learned from the hardware
+
+Two things the simulator got wrong until a real Polaris corrected them:
+
+1. **The wire azimuth is signed.** `519`/`530` carry `yaw` as a value in
+   **(−180, 180) measured westward**, not 0–360:
+   `wire = (az > 180) ? 360 − az : −az`. A `519` carrying `yaw:256` is answered
+   `ret:-1` and **the motors never move**. This is the same encoding the phone
+   app uses.
+2. **An unaligned mount refuses to point.** In Astro mode the mount reports
+   `284@…track:3`, and while it does, every `519` comes back `ret:-1`. `527`
+   (set compass) is *accepted* (`ret:0`) but does **not** clear it. What clears
+   it is the **3-step `530` sequence**, after which `track` becomes `0` and
+   gotos work. So alignment is a gate on pointing, not a refinement of it —
+   which reorders the whole flow: **solve → 530 → goto**, never goto first.
+
+The final `519` reply distinguishes the cases: `ret:0` = slew completed,
+`ret:-1` = refused or aborted.
+
 ### Layer 2 — `polarissolved` (daemon + HTTP)
 
 - Speaks the mount's own ASCII protocol on **loopback** (`NNN@payload#`): read

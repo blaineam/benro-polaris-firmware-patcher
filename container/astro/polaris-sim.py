@@ -198,7 +198,15 @@ class Handler(socketserver.BaseRequestHandler):
                     mount.slewing = False
                 self.send("519@ret:-1;track:0;")
                 return
-            az = float(args.get("yaw", 0)); alt = float(args.get("pitch", 0))
+            # the mount's wire azimuth is signed, measured westward, in
+            # (-180, 180) -- hardware rejects anything outside that with ret:-1
+            wire = float(args.get("yaw", 0))
+            if wire > 180.0 or wire < -180.0:
+                print(f"[sim] REFUSING goto: yaw {wire} is outside (-180,180)", flush=True)
+                self.send("519@ret:-1;track:0;")
+                return
+            az = (360.0 - wire) % 360.0 if wire > 0 else (-wire) % 360.0
+            alt = float(args.get("pitch", 0))
             track = args.get("track", "0") == "1"
             self.send("519@ret:0;track:0;")                 # slew started
             threading.Thread(

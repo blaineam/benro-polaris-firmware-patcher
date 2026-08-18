@@ -42,6 +42,17 @@
 #define DEG (M_PI / 180.0)
 #define RAD (180.0 / M_PI)
 
+/* The mount's wire format for an azimuth is NOT 0..360: it is a SIGNED value in
+ * (-180, 180), measured westward. Hardware confirmed it -- a 519 carrying
+ * yaw:256 is answered ret:-1 and the motors never move, while the same target
+ * as yaw:104 works. The 530 alignment sequence uses the same encoding.
+ * We keep 0..360 everywhere in our own API and convert only at the wire. */
+static double az_to_wire(double az) {
+    az = fmod(az, 360.0);
+    if (az < 0) az += 360.0;
+    return (az > 180.0) ? (360.0 - az) : -az;
+}
+
 static int   g_dry = 0;
 static int   g_verbose = 0;
 static double g_min_alt = 5.0;      /* refuse to drive below this */
@@ -351,7 +362,14 @@ static void usage(const char* me) {
 "                         more than --refine-arcmin (default 2)\n"
 "  track on|off                            MOVES MOTORS\n"
 "  abort                                   stops a slew\n"
-"  set-compass --az D     tell the mount its true azimuth (alignment)\n"
+"  set-compass --az D     tell the mount its true azimuth (527). Accepted while\n"
+"                         unaligned, but does NOT clear the unaligned state.\n"
+"  star-align --alt D --az D\n"
+"                         the 3-step 530 sequence: declares the mount is looking\n"
+"                         at this alt/az. THIS is what clears track:3 and makes\n"
+"                         gotos work. Send it ONCE -- field traces from the\n"
+"                         Aperion work show repeated 530s wedging the motors,\n"
+"                         which is why it is a separate deliberate command.\n"
 "  align --solved-ra D --solved-dec D [--image-alt D --image-az D]\n"
 "                         compute the heading error from a plate solve and\n"
 "                         push it with 527; prints the correction as JSON\n"
@@ -504,6 +522,36 @@ int main(int argc, char** argv) {
         conn_close(&c); return 0;
     }
 
+    if (!strcmp(cmd, "star-align")) {
+        char msg[256];
+        double ca_az;
+        if (alt != alt || az != az || lat != lat || lon != lon) { usage(argv[0]); conn_close(&c); return 2; }
+        /* the mount wants a signed azimuth measured westward, per the app */
+        ca_az = az_to_wire(az);
+        snprintf(msg, sizeof(msg), "1&530&3&step:1;yaw:0.0;pitch:0.0;lat:0.0;num:0;lng:0.0;#");
+        conn_send(&c, msg);
+        snprintf(msg, sizeof(msg),
+                 "1&530&3&step:2;yaw:%.5f;pitch:%.5f;lat:%.5f;num:1;lng:%.5f;#",
+                 ca_az, alt, lat, lon);
+        conn_send(&c, msg);
+        snprintf(msg, sizeof(msg), "1&530&3&step:3;yaw:0.0;pitch:0.0;lat:0.0;num:0;lng:0.0;#");
+        conn_send(&c, msg);
+        if (!g_dry) {
+            char args[512], v[64];
+            /* report whether the mount now considers itself aligned */
+            conn_send(&c, "1&284&2&-1#");
+            if (wait_for(&c, "284", args, sizeof(args), 400) == 0 &&
+                !arg_get(args, "track", v, sizeof(v)))
+                printf("{\"star_align\":true,\"alt_deg\":%.5f,\"az_deg\":%.5f,"
+                       "\"track\":%s,\"aligned\":%s}\n",
+                       alt, az, v, strcmp(v, "3") ? "true" : "false");
+            else
+                printf("{\"star_align\":true,\"alt_deg\":%.5f,\"az_deg\":%.5f,"
+                       "\"track\":null}\n", alt, az);
+        } else printf("{\"star_align\":null,\"dry_run\":true}\n");
+        conn_close(&c); return 0;
+    }
+
     if (!strcmp(cmd, "goto") || !strcmp(cmd, "goto-radec")) {
         char msg[512], args[1024], v[64];
         double cur_alt = NAN, cur_az = NAN;
@@ -521,7 +569,8 @@ int main(int argc, char** argv) {
         if (check_move(alt, az, cur_alt, cur_az) != 0) { conn_close(&c); return 4; }
         snprintf(msg, sizeof(msg),
                  "1&519&3&state:1;yaw:%.5f;pitch:%.5f;lat:%.5f;track:%d;speed:0;lng:%.5f;#",
-                 az, alt, (lat == lat) ? lat : 0.0, track, (lon == lon) ? lon : 0.0);
+                 az_to_wire(az), alt, (lat == lat) ? lat : 0.0, track,
+                 (lon == lon) ? lon : 0.0);
         conn_send(&c, msg);
         if (!g_dry) {
             /* the mount answers 519 twice: slew started, then slew finished */
@@ -531,6 +580,18 @@ int main(int argc, char** argv) {
             if (wait_for(&c, "519", args, sizeof(args), 20000) != 0) {
                 printf("{\"goto\":false,\"error\":\"slew did not report finished\"}\n");
                 conn_close(&c); return 5;
+            }
+            /* Hardware: the final 519 carries ret:0 on a completed slew and
+             * ret:-1 when the mount refused or aborted it -- e.g. an azimuth
+             * outside the signed wire range, or a goto while unaligned. Do not
+             * report success for a slew that never happened. */
+            {
+                char rv[32];
+                if (!arg_get(args, "ret", rv, sizeof(rv)) && atoi(rv) < 0) {
+                    printf("{\"goto\":false,\"error\":\"mount refused or aborted the slew\","
+                           "\"ret\":%s,\"hint\":\"is it aligned? track:3 means no\"}\n", rv);
+                    conn_close(&c); return 5;
+                }
             }
         }
         /* The sky moved while we slewed. Recompute for the time we actually
@@ -550,7 +611,7 @@ int main(int argc, char** argv) {
                 if (sep * 60.0 > refine_arcmin && check_move(ralt, raz, alt, az) == 0) {
                     snprintf(msg, sizeof(msg),
                              "1&519&3&state:1;yaw:%.5f;pitch:%.5f;lat:%.5f;track:%d;speed:0;lng:%.5f;#",
-                             raz, ralt, lat, track, lon);
+                             az_to_wire(raz), ralt, lat, track, lon);
                     conn_send(&c, msg);
                     wait_for(&c, "519", args, sizeof(args), 4000);
                     wait_for(&c, "519", args, sizeof(args), 20000);
