@@ -183,7 +183,7 @@ fi
 # ---- polaris-skysim: the simulated camera (MIT source; links the GPL solver
 # libs, so the binary is GPL v2+ like polaris-solve. It is a TEST tool.) ------
 $CC $CFLAGS -I"$JPEGBUILD" -I"$JPEGSRC" -o "$OUT/polaris-skysim" \
-   "$HERE/polaris-skysim.c" "$BUILD/libpolarisastro.a" "$JPEGBUILD/.libs/libjpeg.a" -lm \
+   "$HERE/polaris-skysim.c" "$BUILD/libpolarisastro.a" "$JPEGBUILD/.libs/libjpeg.a" -lm -lpthread \
    || die "polaris-skysim link failed"
 log "  linked $OUT/polaris-skysim ($(stat -c %s "$OUT/polaris-skysim") bytes)"
 

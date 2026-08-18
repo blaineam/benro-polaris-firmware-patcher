@@ -19,6 +19,22 @@
 #     LAT, LON        observer position (REQUIRED)
 #     FOCAL_MM        lens focal length, for the scale hint (default 400)
 #     SENSOR_MM       sensor width (default 36)
+#     CAPTURE_MODE    how to get a frame:
+#                       auto     (default) TRY LIVE VIEW FIRST -- no shutter
+#                                actuation, no card write, no download, a frame
+#                                in well under a second. Only if that fails to
+#                                solve do we fall back to a full shutter
+#                                capture, which is slower and wears the shutter
+#                                but gathers far more light.
+#                       shutter  fire 272 and wait for the file
+#                       liveview grab pgphoto's mjpg-streamer snapshot -- NO
+#                                shutter actuation, no card write, no download.
+#                                ~19 arcsec/px at 400mm, which is plenty for
+#                                pointing; the open question is whether enough
+#                                stars register in a ~1/30 s live-view frame.
+#                       render   synthesise the field with polaris-skysim, for
+#                                testing the whole chain with no camera at all
+#     LIVEVIEW_URL    default http://127.0.0.1:8080/?action=snapshot
 #     FRAME           TEST MODE: use this JPEG and do NOT fire the shutter.
 #     SOLVE_FRAME     TEST MODE: DO fire the shutter and wait for the frame to
 #                     land (so the capture path is genuinely exercised), but
@@ -69,6 +85,36 @@ idx_args() { for f in "$INDEXES"/index-*.fits; do [ -f "$f" ] && printf ' --inde
 # ---- fire the shutter, wait for the frame to land -------------------------
 capture() {
     if [ -n "${FRAME:-}" ]; then echo "$FRAME"; return 0; fi
+
+    if [ "${CAPTURE_MODE:-shutter}" = "liveview" ]; then
+        out=/tmp/polaris-liveview.jpg
+        rm -f "$out"
+        # the device has neither curl nor wget; polaris-mount does the GET
+        "$ASTRO/polaris-mount" --host "${LIVEVIEW_HOST:-127.0.0.1}" \
+            --port "${LIVEVIEW_PORT:-8080}" fetch \
+            --url-path "${LIVEVIEW_PATH:-/?action=snapshot}" --out "$out" >/dev/null 2>&1
+        if [ -s "$out" ]; then log "grabbed a live-view frame (no shutter)"; echo "$out"; return 0; fi
+        log "live view returned nothing"; return 1
+    fi
+
+    if [ "${CAPTURE_MODE:-shutter}" = "render" ]; then
+        out=/tmp/polaris-rendered.jpg
+        pose=$("$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" \
+               --lat "$LAT" --lon "$LON" pose 2>/dev/null)
+        rra=$(echo "$pose"  | sed -n "s/.*\"ra_deg\":\([-0-9.]*\).*/\1/p")
+        rdec=$(echo "$pose" | sed -n "s/.*\"dec_deg\":\([-0-9.]*\).*/\1/p")
+        # deliberately offset the render to simulate a mount that is WRONG by a
+        # known amount, so the correction can be checked against a known answer
+        rra=$(awk -v r="$rra" -v o="${RENDER_OFFSET_RA:-0}" 'BEGIN{printf "%.6f", (r+o)%360}')
+        rdec=$(awk -v d="$rdec" -v o="${RENDER_OFFSET_DEC:-0}" 'BEGIN{printf "%.6f", d+o}')
+        [ -n "$rra" ] && [ -n "$rdec" ] || { log "no pose to render from"; return 1; }
+        log "rendering the sky at ra=$rra dec=$rdec (no camera involved)"
+        "$ASTRO/polaris-skysim" $(idx_args) --ra "$rra" --dec "$rdec" \
+            --focal-mm "$FOCAL_MM" --sensor-mm "$SENSOR_MM" \
+            --width "${RENDER_W:-4096}" --height "${RENDER_H:-2732}" \
+            --out "$out" >/dev/null 2>&1 || { log "render failed"; return 1; }
+        echo "$out"; return 0
+    fi
     before=$(ls -t "$CAPTURE_DIR"/*.jpg 2>/dev/null | head -1)
     "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" send \
         --msg '1&272&2&step:1#' \
@@ -92,10 +138,9 @@ capture() {
     return 1
 }
 
-# ---- capture + solve; writes "alt az" to $STATE on success ----------------
-solve_now() {
-    rm -f "$STATE"
-    frame=$(capture) || { log "capture produced no frame"; return 1; }
+# ---- solve one frame; echoes "ra dec logodds nmatch" on success -----------
+solve_frame() {
+    frame="$1"
     log "solving $frame"
 
     # A pose hint is ONLY valid if the frame came from the current pointing.
@@ -150,6 +195,30 @@ solve_now() {
 
     echo "$alt $az" > "$STATE"
     log "SOLVED ra=$ra dec=$dec (logodds=$lo nmatch=$nm) -> alt=$alt az=$az"
+    return 0
+}
+
+# ---- try the cheap frame first, fall back to the expensive one ------------
+solve_now() {
+    rm -f "$STATE"
+    mode=${CAPTURE_MODE:-auto}
+
+    if [ "$mode" = "auto" ]; then
+        log "trying live view first (no shutter)"
+        if f=$(CAPTURE_MODE=liveview capture); then
+            if solve_frame "$f"; then
+                [ -f "$PENDING" ] && { rm -f "$PENDING"; inject; }
+                return 0
+            fi
+            log "live view did not solve -- falling back to a full capture"
+        else
+            log "no live-view frame -- falling back to a full capture"
+        fi
+        mode=shutter
+    fi
+
+    f=$(CAPTURE_MODE=$mode capture) || { log "capture produced no frame"; return 1; }
+    solve_frame "$f" || return 1
     [ -f "$PENDING" ] && { rm -f "$PENDING"; inject; }
     return 0
 }

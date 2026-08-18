@@ -388,6 +388,11 @@ static void usage(const char* me) {
 "                         send raw protocol frames, then optionally listen.\n"
 "                         For protocol archaeology -- e.g. replaying the phone\n"
 "                         app's init sequence to find what gates tracking.\n"
+"  fetch --url-path PATH --out FILE\n"
+"                         plain HTTP GET from --host/--port to a file. The\n"
+"                         device has neither curl nor wget, and pgphoto serves\n"
+"                         live-view frames over http, so this is how we grab a\n"
+"                         frame without firing the shutter.\n"
 "  radec2altaz --ra D --dec D      pure maths, no connection\n"
 "  altaz2radec --alt D --az D      pure maths, no connection\n", me);
 }
@@ -406,6 +411,8 @@ int main(int argc, char** argv) {
     const char* cmd = NULL;
     const char* cmd_arg = NULL;
     int raw_n = 0;
+    const char* urlpath = NULL;
+    const char* outfn = NULL;
     const char* sendmsgs[24];
     int nsend = 0;
     double listen_s = 0;
@@ -442,6 +449,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--raw"))      { cmd = "raw"; raw_n = atoi(NEXT()); }
         else if (!strcmp(a, "--msg"))      { if (nsend < 24) sendmsgs[nsend++] = NEXT(); }
         else if (!strcmp(a, "--listen"))   listen_s = atof(NEXT());
+        else if (!strcmp(a, "--url-path")) urlpath = NEXT();
+        else if (!strcmp(a, "--out"))      outfn = NEXT();
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else if (a[0] != '-' && !cmd)      cmd = a;
         else if (a[0] != '-' && !cmd_arg)  cmd_arg = a;
@@ -477,6 +486,41 @@ int main(int argc, char** argv) {
     }
 
     if (conn_open(&c, host, port, 15) != 0) return 1;
+
+    if (!strcmp(cmd, "fetch")) {
+        char req[512];
+        char buf[16384];
+        FILE* f;
+        ssize_t n;
+        int header_done = 0;
+        long total = 0;
+        if (!urlpath || !outfn) { usage(argv[0]); conn_close(&c); return 2; }
+        snprintf(req, sizeof(req),
+                 "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: polaris-mount\r\n"
+                 "Connection: close\r\n\r\n", urlpath, host);
+        if (write(c.fd, req, strlen(req)) < 0) { conn_close(&c); return 1; }
+        f = fopen(outfn, "wb");
+        if (!f) { fprintf(stderr, "cannot write %s\n", outfn); conn_close(&c); return 1; }
+        while ((n = read(c.fd, buf, sizeof(buf))) > 0) {
+            char* body = buf;
+            ssize_t len = n;
+            if (!header_done) {
+                /* skip to the end of the HTTP headers, once */
+                char* p2 = memmem(buf, n, "\r\n\r\n", 4);
+                if (!p2) continue;
+                body = p2 + 4;
+                len = n - (body - buf);
+                header_done = 1;
+            }
+            if (len > 0 && fwrite(body, 1, len, f) != (size_t)len) break;
+            total += len;
+        }
+        fclose(f);
+        conn_close(&c);
+        printf("{\"fetched\":%s,\"bytes\":%ld,\"out\":\"%s\"}\n",
+               total > 0 ? "true" : "false", total, outfn);
+        return total > 0 ? 0 : 1;
+    }
 
     if (!strcmp(cmd, "send")) {
         char rc[8], ra_[4096];

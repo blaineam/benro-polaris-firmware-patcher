@@ -12,10 +12,35 @@ The shim exists because, with `capturetarget = Memory card`, the post-capture
 event never arrived and the download hung — the original stock-firmware symptom
 in a new guise.
 
+## MEASURED ON HARDWARE (2026-08-18)
+
+Ran it: set `STAGE2_TETHER_CAPTURE=0` so the shim stopped forcing Internal RAM,
+restarted `pgphoto`, fired a capture, and watched `/app/Clog.txt`:
+
+```
+capture_image[3084]: ----ARG_TRIGGER_CAPTURE1  0
+capture_image[3109]: ------capture shutterSpeed 0.016667 s  delaymax 7030 ms
+capture_image[3127]: ----GP_EVENT_CAPTURE_COMPLETE          <- shutter fired, +0.5 s
+capture_image[3153]: ----capture image timeout              <- +7.4 s
+captureImage[1579]: ----captureImage ret -1
+```
+
+So the shutter **does** fire and the camera **does** report
+`GP_EVENT_CAPTURE_COMPLETE`; what never arrives is the file. No new file
+appeared in `/app/sd/normal/` in 60 s, and the app was told
+`state:-1` — the historical hang, reproduced on demand.
+
+**The important number is `delaymax 7030 ms`.** Benro's own capture wait is
+about seven seconds, scaled from the shutter speed (here 1/60 s). A 45 MP
+RAW+JPEG written to the card and then enumerated over PTP can easily take
+longer than that. So this may be less "the event is lost" than **"we stop
+listening too early"** — which makes the polled-fetch design below more likely
+to work, and gives it a measured budget instead of a guess.
+
 ## Why the event goes missing — three candidates
 
-We have never instrumented this on hardware, so the honest position is that
-there are three plausible causes and we cannot yet tell them apart:
+The three below remain the plausible mechanisms; the measurement above narrows
+but does not yet decide between them:
 
 1. **A newer event opcode.** The R5 Mark II is a 2024 body. Canon's newer bodies
    emit `PTP_EC_CANON_EOS_ObjectAddedEx64` for card writes (the 64-bit variant

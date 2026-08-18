@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <math.h>
 #include <jpeglib.h>
 
@@ -53,8 +54,10 @@ static void usage(const char* me) {
 "    --stats            report what was rendered\n", me);
 }
 
-/* deterministic, portable PRNG so a seed always reproduces a frame */
-static unsigned long g_rng = 1;
+/* Deterministic, portable PRNG so a seed always reproduces a frame.
+ * MUST be a fixed-width 64-bit type: `unsigned long` is 64-bit on x86-64 but
+ * 32-bit on the device's ARM, where a >>33 is undefined behaviour. */
+static uint64_t g_rng = 1;
 static double frand(void) {
     g_rng = g_rng * 6364136223846793005ULL + 1442695040888963407ULL;
     return (double)((g_rng >> 33) & 0x7fffffff) / 2147483648.0;
@@ -93,7 +96,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--background")) bg = atof(NEXT());
         else if (!strcmp(a, "--noise"))      noise = atof(NEXT());
         else if (!strcmp(a, "--flux"))       flux = atof(NEXT());
-        else if (!strcmp(a, "--seed"))       g_rng = (unsigned long)atol(NEXT());
+        else if (!strcmp(a, "--seed"))       g_rng = (uint64_t)strtoull(NEXT(), NULL, 10);
         else if (!strcmp(a, "--quality"))    quality = atoi(NEXT());
         else if (!strcmp(a, "--out"))        outfn = NEXT();
         else if (!strcmp(a, "--stats"))      stats = 1;
