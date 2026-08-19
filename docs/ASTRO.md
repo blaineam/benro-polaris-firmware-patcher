@@ -136,11 +136,35 @@ Point Stellarium, NINA or SkySafari at `<polaris ip>:8090`, device 0.
 /api/v1/telescope/0/synctocoordinates     -> plate-solve align
 ```
 
-35/35 conformance checks pass; run them yourself with:
+### Conformance
+
+Validated with **ASCOM ConformU 4.5.0**, the official checker, not just our own
+suite:
+
+| suite | result |
+|---|---|
+| Alpaca protocol | **0 issues**, 1 error, 21 advisory |
+| Telescope device | 23 issues, **0 errors** |
+
+The protocol suite's single error is a contradiction between ConformU's own two
+suites: the DEVICE check requires `IsPulseGuiding` to raise NotImplemented when
+`CanPulseGuide` is False, while the PROTOCOL check calls it during polling and
+treats that as fatal. Satisfying one breaks the other; we follow the device
+check, which reflects the spec.
+
+The device suite's remaining 23 are the mount, not the driver: ~10 slew results
+in the 10-55 arcsec range against a 10 arcsec tolerance (the mount points to
+6-9"), and ~6 from repeated syncs, which this mount ignores by design
+("send it ONCE").
+
+Our own quick suite is still there for a fast check:
 
 ```sh
 python3 tests/alpaca_conformance.py http://<polaris ip>:8090
 ```
+
+Note it is *our reading* of the spec -- it reported 35/35 while ConformU found
+60 real issues, including a 7-hour SiderealTime error. Trust ConformU.
 
 ---
 
