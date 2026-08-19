@@ -516,12 +516,16 @@ static int stage2_shim_gp_camera_trigger_capture(void *camera, void *context) {
             dlsym(g_stage2_core, "gp_camera_trigger_capture");
     if (!g_real_trigger_capture) return -1;
 
-    if (stage2_card_capture_on()) {
+    {   /* Snapshotting the card here is ALSO PTP traffic around the shutter, so
+         * it only happens when the (off-by-default) poll path is enabled. */
+        const char *fp = getenv("STAGE2_CARD_POLL");
+        if (stage2_card_capture_on() && fp && fp[0] == '1') {
         stage2_bind_capture_fns();
         g_cap_folder[0] = 0;
         g_cap_basecount = -1;
         if (stage2_find_capture_folder(camera, context, g_cap_folder, sizeof(g_cap_folder)) == 0)
             g_cap_basecount = stage2_count_files(camera, context, g_cap_folder, NULL, 0);
+        }
         if (stage2_capture_debug_on())
             fprintf(stderr, "[stage2] capture: trigger; folder='%s' files=%d\n",
                     g_cap_folder, g_cap_basecount);
@@ -534,6 +538,45 @@ static int stage2_shim_gp_camera_trigger_capture(void *camera, void *context) {
 }
 
 /* SHIM #5 -- pass real events through; on timeout, look at the card. */
+/* ---- libgphoto2's OWN debug log -------------------------------------------
+ *
+ * pgphoto never installs a gp_log handler, so every GP_LOG_D in the camlib is
+ * discarded. That blinded us: from outside we could see only *that* an event
+ * was empty, never *which* branch ran. ptp2 logs "object added: handle 0x%x,
+ * name %s" exactly at the branch that is supposed to raise GP_EVENT_FILE_ADDED,
+ * and logs each EOS event it decodes -- which tells us whether the camera is
+ * sending ObjectAdded at all in card mode.
+ *
+ * Registered only when STAGE2_GPLOG=1. GP_LOG_ALL is 4. */
+typedef void (*stage2_log_func)(int, const char *, const char *, void *);
+typedef int  (*stage2_log_add_fn)(int, stage2_log_func, void *);
+
+static void stage2_gplog_cb(int level, const char *domain, const char *str,
+                            void *data) {
+    (void)level; (void)data;
+    /* Keep it to the PTP traffic we care about; the full firehose is enormous
+     * and Mlog.txt is truncated by the app every few seconds. */
+    if (!domain || !str) return;
+    if (strstr(str, "object added") || strstr(str, "eos event") ||
+        strstr(str, "unhandled eos") || strstr(str, "ObjectAdded") ||
+        strstr(str, "capture") || strstr(str, "Capture"))
+        fprintf(stderr, "[gplog] %s: %.180s\n", domain, str);
+}
+
+static void stage2_gplog_install(void) {
+    static int done = 0;
+    const char *e;
+    stage2_log_add_fn add;
+    if (done || !g_stage2_core) return;
+    done = 1;
+    e = getenv("STAGE2_GPLOG");
+    if (!e || e[0] != '1') return;
+    add = (stage2_log_add_fn)dlsym(g_stage2_core, "gp_log_add_func");
+    if (!add) { fprintf(stderr, "[gplog] gp_log_add_func not found\n"); return; }
+    add(4 /* GP_LOG_ALL */, stage2_gplog_cb, NULL);
+    fprintf(stderr, "[gplog] installed\n");
+}
+
 static int stage2_shim_gp_camera_wait_for_event(void *camera, int timeout,
                                                 int *eventtype, void **eventdata,
                                                 void *context) {
@@ -542,16 +585,90 @@ static int stage2_shim_gp_camera_wait_for_event(void *camera, int timeout,
         g_real_wait_for_event = (stage2_wait_for_event_fn)
             dlsym(g_stage2_core, "gp_camera_wait_for_event");
     if (!g_real_wait_for_event) return -1;
+    stage2_gplog_install();
 
     ret = g_real_wait_for_event(camera, timeout, eventtype, eventdata, context);
 
-    if (stage2_capture_debug_on() && eventtype && *eventtype != STAGE2_EV_TIMEOUT)
-        fprintf(stderr, "[stage2] capture: t+%.3fs event=%d ret=%d\n",
-                g_cap_pending ? stage2_now() - g_cap_started : 0.0, *eventtype, ret);
+    /* STRETCH THE WAIT, do not add traffic.
+     *
+     * First attempt polled the camera's filesystem while a capture was in
+     * flight. PTP is a single-session protocol and Canon's capture state
+     * machine does not tolerate an interleaved folder listing: on hardware that
+     * produced a stuck card-read light, a shot that reported success but was
+     * not on the camera, and a SECOND frame firing. Never again.
+     *
+     * Benro's loop is `wait_and_handle_event(10ms)` then delayCount++, giving up
+     * at delayMax (7 s for a short exposure). So instead of talking to the
+     * camera, we simply keep calling the SAME real wait until either a genuine
+     * event arrives or STAGE2_WAIT_STRETCH_MS has passed. Benro's counter then
+     * advances ~20x slower and its effective budget becomes minutes, with zero
+     * extra PTP commands and a real event still returned the instant it lands.
+     *
+     * This directly tests "the event is late" versus "the event is absent". */
+    if (stage2_card_capture_on() && g_cap_pending && ret >= 0 && eventtype &&
+        *eventtype == STAGE2_EV_TIMEOUT) {
+        const char *ms = getenv("STAGE2_WAIT_STRETCH_MS");
+        double budget = (ms && *ms) ? atof(ms) / 1000.0 : 0.20;
+        double t0 = stage2_now();
+        while (stage2_now() - t0 < budget) {
+            ret = g_real_wait_for_event(camera, timeout, eventtype, eventdata, context);
+            if (ret < 0) break;
+            if (*eventtype != STAGE2_EV_TIMEOUT) {
+                if (stage2_capture_debug_on())
+                    fprintf(stderr, "[stage2] capture: t+%.3fs event=%d (during stretch)\n",
+                            stage2_now() - g_cap_started, *eventtype);
+                break;
+            }
+        }
+    }
+
+    /* Is the 6s gap the CAMERA being silent, or pgphoto not asking? A gap in the
+     * event log looks identical either way. Count the empty polls and report
+     * once a second while a capture is pending: steady counts mean we ARE
+     * polling and the body is genuinely quiet; a stalled counter means nobody
+     * is calling wait_for_event and the latency is on Benro's side. */
+    if (stage2_capture_debug_on() && g_cap_pending && eventtype &&
+        *eventtype == STAGE2_EV_TIMEOUT) {
+        static double last_report = 0.0;
+        static long   polls = 0;
+        double now = stage2_now();
+        polls++;
+        if (now - last_report >= 1.0) {
+            fprintf(stderr, "[stage2] capture: t+%.3fs polling, %ld empty waits\n",
+                    now - g_cap_started, polls);
+            last_report = now;
+            polls = 0;
+        }
+    }
+
+    if (stage2_capture_debug_on() && eventtype && *eventtype != STAGE2_EV_TIMEOUT) {
+        /* GP_EVENT_UNKNOWN carries an asprintf()'d description in *eventdata
+         * (ptp2 emits e.g. "PTP Property 0xd1xx changed" and, for card-target
+         * shots, an ObjectAddedEx line carrying the new object handle).
+         *
+         * This is the whole question: the bytes DO reach the SD card, so ptp2
+         * is processing ObjectAddedEx and merely downgrading the event type.
+         * If the handle/name is present in this payload we can relabel
+         * UNKNOWN -> FILE_ADDED with ZERO extra PTP traffic. If it is not, the
+         * fix has to move into the ptp2 EOS event handler instead. */
+        const char *payload = "";
+        if (*eventtype == STAGE2_EV_UNKNOWN && eventdata && *eventdata)
+            payload = (const char *)*eventdata;
+        fprintf(stderr, "[stage2] capture: t+%.3fs event=%d ret=%d%s%.200s\n",
+                g_cap_pending ? stage2_now() - g_cap_started : 0.0, *eventtype, ret,
+                payload[0] ? " data=" : "", payload);
+    }
 
     if (ret < 0 || !eventtype || !eventdata) return ret;
     if (*eventtype == STAGE2_EV_FILE_ADDED) { g_cap_pending = 0; return ret; }
     if (!g_cap_pending || *eventtype != STAGE2_EV_TIMEOUT) return ret;
+    /* The filesystem poll is OFF by default: it talks to the camera mid-capture,
+     * which broke real captures. Only enable it deliberately, and never while a
+     * shutter is in flight. */
+    {
+        const char *fp = getenv("STAGE2_CARD_POLL");
+        if (!fp || fp[0] != '1') return ret;
+    }
     if (!stage2_card_capture_on() || g_cap_basecount < 0 || !g_cap_folder[0]) return ret;
 
     {   /* poll the card at most a few times a second */

@@ -20,9 +20,15 @@
   - **Settings stick** (ISO/shutter/aperture/WB/focus).
   - **Live view** streams.
   - **No "no card" warning** (storage shim).
-  - **Capture downloads both JPEG and RAW** (Internal-RAM/tethered capture via the
-    `ObjectTransfer` path — card-mode `ObjectAddedEx` is not delivered through the
-    fresh core).
+  - **Capture writes to the CAMERA's card AND downloads to the Polaris**
+    (`STAGE2_TETHER_CAPTURE=0` + `POLARIS_EOS_CAPTUREDEST=0x5`, the default since
+    the capture-destination fix). The RAW stays on the camera card; only the
+    ~9.4 MB JPEG crosses to the Polaris. Announcement ~0.94 s, well inside
+    pgphoto's 7030 ms `delayMax`. Requires the patched ptp2 — see
+    `docs/UPSTREAM-LIBGPHOTO2-BUGS.md` and `docs/CAPTURE-PATH.md`.
+  - Earlier builds shipped Internal-RAM tethered capture (`STAGE2_TETHER_CAPTURE=1`),
+    which downloads JPEG+RAW to the Polaris but does **not** write the camera's
+    card. Still available as a per-device fallback by editing the wrapper.
 - **ptp2-only (fallback)** — also hardware-verified (this was the project's first
   working version): detection, live view, controls, capture, survives reboot.
 

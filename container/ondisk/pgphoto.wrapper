@@ -5,5 +5,31 @@ export IOLIBS=$D/libgphoto2_port/0.12.2
 export LD_LIBRARY_PATH=$D:/app/lib
 export LD_PRELOAD=$D/libpolaris_stage2.so
 export STAGE2_STORAGE_SHIM=1
-export STAGE2_TETHER_CAPTURE=1
+
+# Capture destination.
+#
+# STAGE2_TETHER_CAPTURE=0 + POLARIS_EOS_CAPTUREDEST=0x5 makes the camera write
+# to its OWN memory card and hand the JPEG to the Polaris -- images end up in
+# both places, which is what the stock app expects. Hardware-verified on a
+# Canon EOS R5 Mark II: announcement ~0.94s, well inside pgphoto's 7.03s
+# delayMax. Requires the patched ptp2 (see docs/UPSTREAM-LIBGPHOTO2-BUGS.md).
+#
+# 0x5 = CFexpress|host. EOS_CaptureDestination is a BITMASK: 1=CFexpress,
+# 2=SD slot 2, 4=host. Use 0x6 if you shoot to SD slot 2 instead.
+#
+# FALLBACK for other camera bodies: if capture misbehaves, set
+# STAGE2_TETHER_CAPTURE=1 and drop POLARIS_EOS_CAPTUREDEST. That restores the
+# previous Internal-RAM tethered path, which downloads to the Polaris only and
+# does NOT write the camera's card. Edit this file on the device and restart
+# pgphoto; no reflash needed.
+export STAGE2_TETHER_CAPTURE=0
+export POLARIS_EOS_CAPTUREDEST=0x5
+
+# Diagnostics -- leave OFF. STAGE2_GPLOG registers a GP_LOG_ALL handler and
+# costs ~5.5s PER CAPTURE on this CPU, which pushes captures past delayMax and
+# makes them fail randomly. STAGE2_CARD_CAPTURE (wait-stretch) and
+# STAGE2_CARD_POLL both broke captures on hardware. See docs/CAPTURE-PATH.md.
+#export STAGE2_CAPTURE_DEBUG=1
+#export STAGE2_GPLOG=1
+
 exec $D/pgphoto.stage2ondisk "$@"

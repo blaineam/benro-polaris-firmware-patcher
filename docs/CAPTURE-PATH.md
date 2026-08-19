@@ -204,3 +204,149 @@ binary, so:
    shot and confirm the RAW+JPEG are on the camera's card *and* a copy is on the
    Polaris SD, with no hang. That is the first thing to try once the R5 II is
    attached.
+
+## HARDWARE RESULT (2026-08-18) — card-target capture WORKS
+
+Verified on a physical Canon EOS R5 Mark II with `STAGE2_TETHER_CAPTURE=0`
+(card mode) and the storage shim on, loader otherwise stock behaviour:
+
+- Shutter fires immediately, at normal speed.
+- **Images are written to the camera's own CF Express card** (confirmed by the
+  maintainer on the camera).
+- **Full-size copies land on the Polaris SD card**: 50 MB `.cr3` + 10 MB `.jpg`
+  pairs in `/app/sd/Lapse/class_NN/`. Not truncated, not empty.
+
+This satisfies the project requirement that capture must write to the camera's
+internal card *in addition to* downloading to the Polaris SD card.
+
+### The one remaining defect: the app is never notified
+
+Pure-observation event trace of a single capture (shim logging only, no
+behaviour change):
+
+```
+t+0.581s  event=4   GP_EVENT_CAPTURE_COMPLETE
+t+0.640s  event=0   UNKNOWN
+t+2.162s  event=0   UNKNOWN   (and only UNKNOWN thereafter)
+```
+
+`GP_EVENT_FILE_ADDED` (event=2) is **never delivered** — Canon's
+`ObjectAddedEx` is not translated by the fresh 2.5.34 ptp2 camlib in card mode.
+The bytes arrive anyway; the Benro app just never learns the photo exists, so it
+spins and then reports "shot failed" over a capture that in fact succeeded.
+
+**The remaining work is a notification bug, not a transfer bug.**
+
+### Two dead ends — do not repeat them
+
+Both were built on the false premise that the *file* was missing:
+
+1. **Wait-stretch** (re-poll `wait_for_event` for ~250 ms after
+   `CAPTURE_COMPLETE`). Harmless but pointless: the event never comes, so
+   stretching the window cannot surface it.
+2. **Filesystem poll** (walk the camera's storage after capture to find the new
+   object). **Actively harmful** — it contends for the single PTP session.
+   Observed on hardware: camera card LED went solid-read, the app hung
+   indefinitely, and one test double-fired the shutter. Left in the tree behind
+   `STAGE2_CARD_POLL=1`, default OFF. Leave it off.
+
+### Method note
+
+Both dead ends were pursued because "no `FILE_ADDED` event" was read as "no
+file", and `ls /app/sd/Lapse/` was never run. One `ls` refuted several hours of
+work. **Confirm the artifact exists on disk before interpreting event traces.**
+
+## SOLVED (2026-08-18): card + host capture, hardware-verified
+
+Both destinations at once — image on the **camera's CF Express card** AND
+downloaded to the **Polaris SD card** — on a Canon EOS R5 Mark II.
+
+### Root cause (two upstream bugs, compounding)
+
+Canon's `EOS_CaptureDestination` (0xD11C) is a **bitmask**, not an enum:
+
+```
+0x1 = CFexpress    0x2 = SD slot 2    0x4 = host
+0x5 = CFexpress|host      0x6 = SD|host
+```
+
+The R5 II advertises all five. Upstream 2.5.34 never surfaces them.
+
+**Bug 1 — card value picked by "first non-host".** `camera_canon_eos_update_capture_target()`:
+
+```c
+if (SupportedValue[i].u32 != PTP_CANON_EOS_CAPTUREDEST_HD) { cardval = ...; break; }
+```
+
+lands on `0x1` (card only). With the host absent from the mask the camera never
+emits `ObjectAdded`, so libgphoto2 has nothing to announce, and Benro's lapse
+task times out at `delayMax` (~7.03 s) → `state:-1`. No amount of event-handling
+work can fix this: the host is simply not a destination.
+
+**Bug 2 — host capacity only declared for the exact-host case.** Setting `0x5`
+alone yields `0x2019 PTP Device Busy` on Full-Press (`-110 I/O in progress`),
+because `ptp_canon_eos_pchddcapacity()` — the "host has room" handshake — is
+gated on `ct_val.u32 == PTP_CANON_EOS_CAPTUREDEST_HD`, i.e. exactly `4`. It is
+*also* nested inside `if (ct_val != CurrentValue)`, so once the property is
+already `0x5` from a previous run the declaration is skipped a second way and
+the camera can never recover on its own.
+
+### Fix (both in `container/dbg_patch.py`, applied to `camlibs/ptp2/config.c`)
+
+1. Log all supported destinations; honour `POLARIS_EOS_CAPTUREDEST` to force one.
+2. Declare host capacity whenever the host **bit** is set, independent of the
+   "value changed" guard.
+
+Capacity is declared **only when `AvailableShots` reads 0**. Declaring on every
+trigger drains the EOS event queue live view feeds from — that regressed live
+view on hardware and was caught immediately. The `AvailableShots` wait is also
+**bounded** (~2 s); upstream's is `while (1)`, and `polestar_app` watchdogs
+`pgphoto` at ~5 s, so an unbounded spin crash-loops the daemon.
+
+### Verified on hardware
+
+```
+POLARIS capturedest supported[0..4] = 0x1 0x5 0x2 0x6 0x4
+POLARIS capturedest OVERRIDE -> 0x5
+[stage2] capture: t+6.561s event=2 ret=0      <- GP_EVENT_FILE_ADDED (first all day)
+code[264] state:4                              <- downloaded
+```
+
+Live view works. RAW stays on the camera card; only the ~9.4 MB JPEG crosses to
+the Polaris, which is the desired split (the solver only needs the JPEG).
+
+### Announcement latency: ~0.94 s (the "6.1 s" was an instrumentation artifact)
+
+Four consecutive captures announce at **t+0.935 / 0.962 / 0.940 / 0.974 s**,
+all `state:4`, no failures. Against `delayMax` 7030 ms that is ~6 s of headroom,
+so no `delayMax` patch and no wait-stretch are required.
+
+**Do not enable `STAGE2_GPLOG` for normal use.** The gp_log bridge registers at
+`GP_LOG_ALL`, where libgphoto2 logs every PTP packet, and the callback runs six
+`strstr()` calls per line. On the Hi3559V200 that cost ~5.5 s per capture and
+pushed announcements to 6.5-6.8 s -- right onto the 7.03 s `delayMax`, which is
+what made shots fail intermittently. The bridge is a debugging tool only.
+
+Two conclusions were drawn from logging-inflated numbers and are WRONG:
+  * "the camera holds the object ~6 s and nothing on our side can help" -- no,
+    that was the logging.
+  * the ~86 polls/sec figure -- that measured a system throttled by its own
+    instrumentation.
+
+`STAGE2_CARD_CAPTURE` (wait-stretch) was enabled to buy margin against the
+inflated latency and **broke captures outright on hardware**. It is not needed
+at 0.94 s. Leave it unset, together with `STAGE2_CARD_POLL`.
+
+### Superseded analysis (kept: it is why the above is worded so strongly)
+
+The bus is **idle** for 6.1 s between the last property event (t+0.44 s) and
+`FILE_ADDED` (t+6.56 s); the download itself completes in the same millisecond
+as the announcement. So this is camera-side latency, not transfer time, and
+optimising the download path would gain nothing.
+
+Margin against `delayMax = ((shutter+1)*100*2+500)*10ms` is ~470 ms at 1/60 s.
+**This gets safer for astro, not worse** — `delayMax` scales with exposure, so
+long subs have far more headroom. Fast shutter speeds ride the edge.
+
+Untested: whether the 6.1 s is the RAW card write. If so, JPEG-only shooting
+would cut it sharply — worth measuring before optimising anything else.

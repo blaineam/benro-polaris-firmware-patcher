@@ -79,4 +79,138 @@ else:
     save(lib, t)
     print("[dbg_patch] library.c: 3 keep_device_on + 1 check_eos_events made non-fatal (no trace)")
 
+
+# ---- camlibs/ptp2/config.c : EOS CaptureDestination visibility + override ----
+#
+# WHY. Canon's EOS_CaptureDestination (0xD11C) is a BITMASK: 1 = camera card,
+# 4 = host. Upstream's camera_canon_eos_update_capture_target() picks the card
+# value by scanning the enum for the FIRST entry that is not 4:
+#
+#     if (SupportedValue[i].u32 != PTP_CANON_EOS_CAPTUREDEST_HD) { cardval = ...; break; }
+#
+# On the R5 Mark II that lands on 0x1 -- card ONLY. With the host absent from
+# the destination mask the camera writes its own card and never emits
+# ObjectAdded, so libgphoto2 has nothing to announce and Benro's lapse task
+# times out at delayMax (~7.03 s) and reports state:-1. Hardware trace
+# 2026-08-18 confirmed: shutter fires, image lands on the CF Express card,
+# CAPTURE_COMPLETE arrives at t+0.57s, ObjectAdded never does.
+#
+# The body advertised FIVE supported destinations ("prop d11c options changed,
+# type 3, count 5"), but upstream logs none of them and type-3 descriptors are
+# not dumped, so we cannot see which combined value exists. This patch:
+#   1. logs every supported value (so we learn the real enum on hardware), and
+#   2. honours POLARIS_EOS_CAPTUREDEST to force a destination (e.g. 0x5 =
+#      card|host), so a value can be tried WITHOUT another cross-build.
+#
+# Purely additive: with the env unset, behaviour is byte-identical to upstream
+# apart from the extra GP_LOG_D lines.
+DEST_ANCHOR = r'\tif \(value == 1\)\n\t\tvalue = cardval;'
+DEST_PATCH = (
+    '\t{\t/* POLARIS: capture-destination visibility + override */\n'
+    '\t\tconst char *_pdst = getenv("POLARIS_EOS_CAPTUREDEST");\n'
+    '\t\tif (dpd.FormFlag == PTP_DPFF_Enumeration) {\n'
+    '\t\t\tunsigned int _pi;\n'
+    '\t\t\tfor (_pi=0;_pi<dpd.FORM.Enum.NumberOfValues;_pi++)\n'
+    '\t\t\t\tGP_LOG_D ("POLARIS capturedest supported[%u] = 0x%x", _pi,\n'
+    '\t\t\t\t          dpd.FORM.Enum.SupportedValue[_pi].u32);\n'
+    '\t\t}\n'
+    '\t\tGP_LOG_D ("POLARIS capturedest current = 0x%x, cardval = %d",\n'
+    '\t\t          dpd.CurrentValue.u32, cardval);\n'
+    '\t\tif (_pdst && *_pdst) {\n'
+    '\t\t\tcardval = (int)strtol(_pdst, NULL, 0);\n'
+    '\t\t\tGP_LOG_D ("POLARIS capturedest OVERRIDE -> 0x%x", cardval);\n'
+    '\t\t}\n'
+    '\t}\n'
+    '\tif (value == 1)\n'
+    '\t\tvalue = cardval;'
+)
+
+t = load(cfg)
+if "POLARIS capturedest" in t:
+    print("[dbg_patch] config.c capturedest already patched -- skipping")
+else:
+    t = sub(t, DEST_ANCHOR, DEST_PATCH.replace('\\', '\\\\'), 1, "config.c capturedest override")
+    save(cfg, t)
+    print("[dbg_patch] config.c: capturedest enum logging + POLARIS_EOS_CAPTUREDEST override")
+
+
+# ---- camlibs/ptp2/config.c : declare host capacity for COMBINED destinations --
+#
+# WHY. EOS_CaptureDestination is a bitmask (1=CFexpress, 2=SD, 4=host), so 0x5
+# means "card AND host" -- the mode that writes the camera's own card and still
+# hands the image to us. Upstream only ever declares host storage capacity when
+# the destination is EXACTLY host:
+#
+#     if (ct_val.u32 == PTP_CANON_EOS_CAPTUREDEST_HD) { ptp_canon_eos_pchddcapacity(...) }
+#
+# With 0x5 that test is false, so the camera has the host in its destination
+# mask but was never told the host has room -- and refuses the shutter with
+# 0x2019 PTP Device Busy (surfaced as -110 'I/O in progress'). Hardware trace
+# 2026-08-18: "Canon EOS Full-Press failed (0x2019: PTP Device Busy)".
+#
+# Worse, the capacity call also sits inside `if (ct_val != CurrentValue)`, so
+# once the property is already 0x5 from a previous run the declaration is
+# skipped a second way -- the camera can never recover on its own.
+#
+# So: declare capacity whenever the host BIT is set and the destination is not
+# the plain-host case upstream already handles (avoids doing it twice for 0x4).
+#
+# The upstream wait for AvailableShots>0 is `while (1)` with no bound. We use a
+# bounded loop instead: polestar_app watchdogs pgphoto at ~5s, and an unbounded
+# spin here would crash-loop the daemon rather than fail one frame.
+CAP_ANCHOR = r'\t/\* otherwise we get DeviceBusy for some reason \*/\n\tif \(ct_val\.u32 != dpd\.CurrentValue\.u32\) \{'
+CAP_PATCH = (
+    '\t/* POLARIS: host is part of the destination mask -> it must declare capacity,\n'
+    '\t * otherwise the body answers Full-Press with 0x2019 PTP Device Busy. */\n'
+    '\tif ((ct_val.u32 & PTP_CANON_EOS_CAPTUREDEST_HD) &&\n'
+    '\t    (ct_val.u32 != PTP_CANON_EOS_CAPTUREDEST_HD)) {\n'
+    '\t\t/* Only declare when the body actually reports no room. Declaring on\n'
+    '\t\t * EVERY trigger drains the EOS event queue that live view feeds from\n'
+    '\t\t * and can stall the bounded wait, which broke live view on hardware. */\n'
+    '\t\tPTPDevicePropDesc _pav;\n'
+    '\t\tuint32_t _pshots = 0;\n'
+    '\t\tuint16_t _pret;\n'
+    '\t\tmemset (&_pav, 0, sizeof(_pav));\n'
+    '\t\tif (PTP_RC_OK == ptp_canon_eos_getdevicepropdesc (params,\n'
+    '\t\t\t\tPTP_DPC_CANON_EOS_AvailableShots, &_pav)) {\n'
+    '\t\t\t_pshots = _pav.CurrentValue.u32;\n'
+    '\t\t\tptp_free_devicepropdesc (&_pav);\n'
+    '\t\t}\n'
+    '\t\tif (_pshots > 0) {\n'
+    '\t\t\tGP_LOG_D ("POLARIS host capacity already good (%u shots)", _pshots);\n'
+    '\t\t\tgoto _pcap_done;\n'
+    '\t\t}\n'
+    '\t\t_pret = ptp_canon_eos_pchddcapacity(params, 0x0fffffff, 0x00001000, 0x00000001);\n'
+    '\t\tif (_pret == PTP_RC_DeviceBusy) _pret = PTP_RC_OK;\n'
+    '\t\tif (_pret != PTP_RC_OK) {\n'
+    '\t\t\tGP_LOG_D ("POLARIS pchddcapacity failed 0x%04x", _pret);\n'
+    '\t\t} else {\n'
+    '\t\t\tint _ptries = 0;\n'
+    '\t\t\tPTPDevicePropDesc _pdpd;\n'
+    '\t\t\tmemset (&_pdpd, 0, sizeof(_pdpd));\n'
+    '\t\t\twhile (_ptries++ < 40) {\t/* bounded: ~2s, watchdog is ~5s */\n'
+    '\t\t\t\tif (PTP_RC_OK != ptp_check_eos_events (params)) break;\n'
+    '\t\t\t\tif (PTP_RC_OK != ptp_canon_eos_getdevicepropdesc (params,\n'
+    '\t\t\t\t\t\tPTP_DPC_CANON_EOS_AvailableShots, &_pdpd)) break;\n'
+    '\t\t\t\tif (_pdpd.CurrentValue.u32 > 0) { ptp_free_devicepropdesc (&_pdpd); break; }\n'
+    '\t\t\t\tptp_free_devicepropdesc (&_pdpd);\n'
+    '\t\t\t\tusleep (50*1000);\n'
+    '\t\t\t}\n'
+    '\t\t\tGP_LOG_D ("POLARIS host capacity declared for dest 0x%x, tries=%d",\n'
+    '\t\t\t          ct_val.u32, _ptries);\n'
+    '\t\t}\n'
+    '\t\t_pcap_done: ;\n'
+    '\t}\n'
+    '\t/* otherwise we get DeviceBusy for some reason */\n'
+    '\tif (ct_val.u32 != dpd.CurrentValue.u32) {'
+)
+
+t = load(cfg)
+if "POLARIS host capacity" in t:
+    print("[dbg_patch] config.c pchddcapacity already patched -- skipping")
+else:
+    t = sub(t, CAP_ANCHOR, CAP_PATCH.replace('\\', '\\\\'), 1, "config.c combined-dest host capacity")
+    save(cfg, t)
+    print("[dbg_patch] config.c: host capacity declared for combined capture destinations")
+
 print("[dbg_patch] DONE -- POLARIS_DBG EOS-init non-fatal (production, no tracing) applied")
