@@ -270,3 +270,48 @@ not apply precession; compare sim-to-sim or mount-to-mount, not across.
 Licensing: `polaris-solve` is built from astrometry.net and is GPL; it runs as
 its own process and nothing GPL is linked into `pgphoto` or the MIT loader. See
 [LICENSE-AUDIT.md](LICENSE-AUDIT.md).
+
+## Measured mount performance (2026-08-19, after a fresh calibration)
+
+Numbers worth having, because two earlier estimates in this project were wrong.
+
+### Pointing: ~6-9 arcsec
+
+Five `goto --no-track` moves, commanded vs arrived, tracking OFF:
+
+| commanded | error alt | error az |
+|---|---|---|
+| alt 22.6477 az 204.9244 | +4.8" | -2.7" |
+| alt 21.1489 az 207.9239 | +13.7" | +2.0" |
+| alt 23.6527 az 203.9242 | +8.0" | +10.4" |
+| alt 22.8548 az 205.1268 | +11.6" | +6.9" |
+| alt 25.8580 az 202.6284 | +8.2" | +9.8" |
+
+**mean |error|: alt 9.3", az 6.4"**, and it holds position to 0.1" over 5 s.
+
+### Tracking: Dec excellent, RA drifts ~4.2 arcsec/s
+
+Over 20 s with tracking on:
+
+```
+Dec drift  -0.7"      <- essentially perfect
+RA  drift +83.2"      <- 4.2"/s, about 28% of the sidereal rate
+```
+
+That RA drift is a residual alignment error showing up as a slightly wrong
+tracking rate. Over a 60 s exposure it is ~250" of trailing, which is precisely
+what the auto-guider exists to remove (measured holding drift under 61").
+
+### TWO EARLIER ESTIMATES WERE WRONG -- how, so it is not repeated
+
+**"~90 arcsec pointing error" was measurement error, not the mount.**
+It was measured (a) with TRACKING ON, reading the pose seconds after arrival, so
+sky motion was counted as pointing error, and (b) against an alignment CORRUPTED
+by ConformU's sync tests, which sync to positions deliberately minutes of RA
+off. `goto` has `--no-track`; it was not used. Real accuracy is ~10x better.
+
+**Running a conformance suite against a live mount corrupts the alignment.**
+Conform verifies a driver honours arbitrary sync requests; this mount honours
+them literally. After such a run the mount slewed at 587"/s chasing a false
+model and pointed visibly too high. Recalibrate afterwards, or point conformance
+runs at `polaris-sim`.
