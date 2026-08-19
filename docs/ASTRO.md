@@ -274,6 +274,16 @@ it. Anything that needs to know reads the file, without opening a connection of
 its own. It is in `/tmp` deliberately — alignment does not survive a power cycle
 either.
 
+**What is and is not proven.** With Keep Awake on, the Wi-Fi survived closing the
+app — where before it went down 60 s after the last client left. One caveat
+worth knowing: a phone that closes the app often leaves a **stale TCP
+connection** behind (observed at 27 KB stuck unsent, surviving 4+ minutes), and
+while that lingers it is still a counted client. So the moment that finally
+proves Keep Awake alone is enough is when that stale socket expires and
+`WifiCount` falls to 1 rather than 0. Our client is registered, so it should —
+and `wifi-watch.log` records the answer either way, including a `wifi auto off`
+if one ever fires.
+
 > **The capture log contains credentials.** Opcode 790 returns the device's Wi-Fi
 > password and security answer (base64). `/app/sd/app-connect-capture.log` and
 > anything derived from it should be treated as sensitive — delete it when done,
@@ -335,6 +345,8 @@ Note it is *our reading* of the spec -- it reported 35/35 while ConformU found
 | Solver at live-view resolution (960×640) | 20–40″ over four fields, 1–4 s |
 | Real R5 II frame solved on device | 6.4″ vs upstream, 9.3 s |
 | **Real night sky solved on device** | 2 frames, log-odds 132 / 243, 27 / 48 matches, ~5 s |
+| Keep Awake registers as a client | `SP_ClientCtxAdd id[11] type[wifi] WifiCount[2]` |
+| Wi-Fi survived closing the Benro app | with Keep Awake on; previously died 60 s later |
 | Alpaca conformance | 35/35 |
 | Boot autostart | across real reboots |
 | Mount untouched while unaligned | 0 connections measured |
