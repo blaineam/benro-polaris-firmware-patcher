@@ -141,6 +141,15 @@ compass_for_solve() {
     awk -v a="$_saz" 'BEGIN{c=a-180; while(c<0)c+=360; while(c>=360)c-=360; printf "%.5f", c}'
 }
 
+# grab a live-view frame (no shutter); echo its path
+grab_frame() {
+    rm -f /tmp/autosolve-lv.jpg
+    "$ASTRO/polaris-mount" fetch --host 127.0.0.1 --port "$LIVEVIEW_PORT" \
+        --url-path "/?action=snapshot" --out /tmp/autosolve-lv.jpg >/dev/null 2>&1
+    [ -s /tmp/autosolve-lv.jpg ] || return 1
+    echo /tmp/autosolve-lv.jpg
+}
+
 # --- the whole reaction to one armed alignment --------------------------------
 # The protocol's yaw is a WIRE azimuth, not a compass azimuth:
 #   az > 180  ->  wire =  360 - az        az <= 180  ->  wire = -az
@@ -189,10 +198,7 @@ handle_arm() {
 
     # 1. LIVE VIEW first -- no shutter, and during the armed state the app will
     #    not let the user take a full frame anyway.
-    rm -f /tmp/autosolve-lv.jpg
-    "$ASTRO/polaris-mount" fetch --host 127.0.0.1 --port "$LIVEVIEW_PORT" \
-        --url-path "/?action=snapshot" --out /tmp/autosolve-lv.jpg >/dev/null 2>&1
-    _sol=$(solve_frame /tmp/autosolve-lv.jpg "$_hra" "$_hdec")
+    _sol=$(solve_frame "$(grab_frame)" "$_hra" "$_hdec")
     if good_solve "$_sol"; then
         log "live-view solve OK"
     else
@@ -241,22 +247,86 @@ handle_arm() {
     return $?
 }
 
-# correct the heading, then confirm the dialog
+# CORRECT -> CENTRE -> VERIFY -> CONFIRM
+#
+# The app has already slewed to the target's alt/az. Those coordinates are
+# correct (they come from ephemeris, not the compass); what is wrong is where
+# the mount PHYSICALLY lands for a commanded azimuth, because the compass
+# heading is off. So:
+#
+#   1. correct the heading (527) -- now the mount's frame is truthful
+#   2. re-issue the SAME goto (519) -- in the corrected frame it lands on the
+#      target, centring it
+#   3. solve again to check it really is centred
+#   4. repeat while the residual is still large (bounded)
+#   5. confirm (530 step:2), dismissing the dialog
+#
+# Step 3 is not optional decoration: without it we would confirm on faith. If
+# the residual never comes inside tolerance we confirm nothing and leave the
+# dialog for the user.
+CENTRE_TOL_DEG=${CENTRE_TOL_DEG:-0.15}     # ~9 arcmin; well inside a 5.4 deg field
+CENTRE_TRIES=${CENTRE_TRIES:-2}
+SLEW_SETTLE=${SLEW_SETTLE:-6}
+
+# angular separation between two alt/az pairs, degrees
+sep_deg() {
+    awk -v a1="$1" -v z1="$2" -v a2="$3" -v z2="$4" 'BEGIN{
+        d=3.14159265358979/180;
+        x=sin(a1*d)*sin(a2*d)+cos(a1*d)*cos(a2*d)*cos((z1-z2)*d);
+        if(x>1)x=1; if(x<-1)x=-1; printf "%.4f", atan2(sqrt(1-x*x),x)/d }'
+}
+
 apply_correction() {
     _ra=$1; _dec=$2; _yaw=$3; _pitch=$4
     _compass=$(compass_for_solve "$_ra" "$_dec") || return 1
+    _az=$(wire_to_az "$_yaw")
     log "heading correction: compass=$_compass"
+
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY RUN -- would send:"
-        log "    ->> 1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#"
-        log "    ->> 1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
+        log "    ->> 1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#      (fix heading)"
+        log "    ->> 1&519&3&state:1;yaw:$_yaw;pitch:$_pitch;lat:$LAT;track:0;speed:2;lng:$LON;#   (re-centre)"
+        log "    then re-solve, and once inside ${CENTRE_TOL_DEG} deg:"
+        log "    ->> 1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#   (confirm)"
         return 0
     fi
+
     mount_send "1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#"
-    log "confirming (530 step:2)"
-    mount_send "1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
-    log "done -- dialog should be dismissed"
-    return 0
+
+    _try=0
+    while [ $_try -lt "$CENTRE_TRIES" ]; do
+        _try=$((_try + 1))
+        log "centring pass $_try: re-issuing the goto in the corrected frame"
+        mount_send "1&519&3&state:1;yaw:$_yaw;pitch:$_pitch;lat:$LAT;track:0;speed:2;lng:$LON;#"
+        sleep "$SLEW_SETTLE"
+
+        _f=$(grab_frame) || { log "no frame to verify centring"; break; }
+        _v=$(solve_frame "$_f" "" "")
+        good_solve "$_v" || { log "verification solve failed"; break; }
+        _vra=$(echo  "$_v" | sed -n 's/.*"ra_deg":\([-0-9.]*\).*/\1/p')
+        _vdec=$(echo "$_v" | sed -n 's/.*"dec_deg":\([-0-9.]*\).*/\1/p')
+        _vj=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
+                radec2altaz --ra "$_vra" --dec "$_vdec" 2>/dev/null)
+        _valt=$(echo "$_vj" | sed -n 's/.*"alt_deg":\([-0-9.]*\).*/\1/p')
+        _vaz=$(echo  "$_vj" | sed -n 's/.*"az_deg":\([-0-9.]*\).*/\1/p')
+        _err=$(sep_deg "$_pitch" "$_az" "$_valt" "$_vaz")
+        log "  centring residual: ${_err} deg (tolerance ${CENTRE_TOL_DEG})"
+        _ok=$(awk -v e="$_err" -v t="$CENTRE_TOL_DEG" 'BEGIN{print (e<=t)?1:0}')
+        if [ "$_ok" = "1" ]; then
+            log "centred -- confirming (530 step:2)"
+            mount_send "1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
+            log "done -- dialog should be dismissed"
+            return 0
+        fi
+        # still off: refine the heading from this newer solve and try again
+        _compass=$(compass_for_solve "$_vra" "$_vdec") || break
+        log "  refining heading to compass=$_compass"
+        mount_send "1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#"
+    done
+
+    log "NOT confirming: could not verify the target is centred."
+    log "  the heading correction was applied; tap confirm yourself if it looks right."
+    return 1
 }
 
 log "autosolve watching (dry_run=$DRY_RUN focal=${FOCAL}mm gates: logodds>=$MIN_LOGODDS matches>=$MIN_MATCHES)"
