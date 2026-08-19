@@ -355,7 +355,19 @@ static void respond_json(int fd, const char *json) {
 }
 
 /* query/body param lookup: name=value, returns 1 if found */
-static int param(const char *qs, const char *name, char *out, size_t cap) {
+/* Alpaca's casing rule is SPLIT, and getting it half right fails half the
+ * suite either way:
+ *   - PUT body parameters are CASE-SENSITIVE. A wrongly-cased one is a
+ *     malformed request (HTTP 400). ConformU's device check requires this.
+ *   - GET query parameters are CASE-INSENSITIVE. A differently-cased one must
+ *     still be honoured (HTTP 200). ConformU's protocol check requires this.
+ * ClientTransactionID follows the same split: echoed when it arrives in a query
+ * string under any casing, exact-match only in a PUT body.
+ *
+ * I made everything case-sensitive after the device check and broke the
+ * protocol check -- 55 issues from one over-generalised fix. */
+static int param_ci(const char *qs, const char *name, char *out, size_t cap,
+                    int case_sensitive) {
     size_t nl = strlen(name);
     const char *p = qs;
     out[0] = 0;
@@ -366,11 +378,8 @@ static int param(const char *qs, const char *name, char *out, size_t cap) {
         if (!*p) break;
         amp = strchr(p, '&'); if (!amp) amp = p + strlen(p);
         eq  = memchr(p, '=', (size_t)(amp - p));
-        /* Alpaca parameter names are CASE-SENSITIVE. Matching them
-         * case-insensitively made us accept "tracking=..." for "Tracking",
-         * which ConformU flags on every PUT. My own conformance test asserted
-         * the opposite and "passed" -- it encoded the same misreading. */
-        if (eq && (size_t)(eq - p) == nl && strncmp(p, name, nl) == 0) {
+        if (eq && (size_t)(eq - p) == nl &&
+            (case_sensitive ? strncmp(p, name, nl) : strncasecmp(p, name, nl)) == 0) {
             size_t vl = (size_t)(amp - eq - 1);
             if (vl > cap - 1) vl = cap - 1;
             memcpy(out, eq + 1, vl); out[vl] = 0;
@@ -382,6 +391,7 @@ static int param(const char *qs, const char *name, char *out, size_t cap) {
 }
 
 static int param(const char *qs, const char *name, char *out, size_t cap);
+static int param_ci(const char *qs, const char *name, char *out, size_t cap, int cs);
 static int current_radec(double *ra, double *dec);
 /* Corrected-UTC string for polaris-mount. Slews MUST use the same clock the
  * reads use: goto-radec converts RA/Dec to alt/az, so running it on the raw
@@ -401,6 +411,15 @@ static int current_radec(double *ra, double *dec);
 static void utc_arg(char *out, size_t cap) {
     extern long tz_offset_sec(void);
     snprintf(out, cap, "--clock-offset %ld", tz_offset_sec());
+}
+
+/* Query-string lookup: case-INSENSITIVE (GET rule). */
+static int param(const char *qs, const char *name, char *out, size_t cap) {
+    return param_ci(qs, name, out, cap, 0);
+}
+/* Body lookup: case-SENSITIVE (PUT rule). */
+static int param_body(const char *b, const char *name, char *out, size_t cap) {
+    return param_ci(b, name, out, cap, 1);
 }
 
 /* ----------------------------------------------------------------- Alpaca */
@@ -554,9 +573,11 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             if (strcmp(m, P[i].meth)) continue;
             {
                 const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
                 char v2[128];
                 double dv; long lv; int bv;
-                if (!param(src, P[i].param, v2, sizeof v2)) {
+                if (!(body && *body ? param_body(src, P[i].param, v2, sizeof v2)
+                                    : param(src, P[i].param, v2, sizeof v2))) {
                     respond_400(fd, "required parameter missing or wrongly cased");
                     return 1;
                 }
@@ -564,7 +585,18 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
                     case 'b': if (!parse_bool_strict(v2, &bv))   { respond_400(fd, "not a boolean"); return 1; } break;
                     case 'd': if (!parse_double_strict(v2, &dv)) { respond_400(fd, "not a number");  return 1; } break;
                     case 'i': if (!parse_long_strict(v2, &lv))   { respond_400(fd, "not an integer");return 1; } break;
-                    case 's': if (!v2[0])                        { respond_400(fd, "empty value");   return 1; } break;
+                    case 's': {
+                        /* UTCDate must be a real ISO-8601 instant. Checking only
+                         * for non-empty let garbage through with HTTP 200. */
+                        int Y, Mo, D, h, mi; double se;
+                        if (sscanf(v2, "%d-%d-%dT%d:%d:%lf", &Y, &Mo, &D, &h, &mi, &se) < 6 ||
+                            Y < 1900 || Mo < 1 || Mo > 12 || D < 1 || D > 31 ||
+                            h < 0 || h > 23 || mi < 0 || mi > 59 || se < 0 || se >= 61) {
+                            respond_400(fd, "UTCDate is not an ISO-8601 instant");
+                            return 1;
+                        }
+                        break;
+                    }
                 }
             }
             break;
@@ -574,13 +606,16 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             !strcmp(m, "synctocoordinates") || !strcmp(m, "slewtoaltaz") ||
             !strcmp(m, "slewtoaltazasync")  || !strcmp(m, "synctoaltaz")) {
             const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
             const char *a = (strstr(m, "altaz")) ? "Azimuth"  : "RightAscension";
             const char *b = (strstr(m, "altaz")) ? "Altitude" : "Declination";
             char v2[128]; double dv;
-            if (!param(src, a, v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+            if (!(body && *body ? param_body(src, a, v2, sizeof v2) : param(src, a, v2, sizeof v2))
+                || !parse_double_strict(v2, &dv)) {
                 respond_400(fd, "bad or missing coordinate parameter"); return 1;
             }
-            if (!param(src, b, v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+            if (!(body && *body ? param_body(src, b, v2, sizeof v2) : param(src, b, v2, sizeof v2))
+                || !parse_double_strict(v2, &dv)) {
                 respond_400(fd, "bad or missing coordinate parameter"); return 1;
             }
         }
@@ -641,8 +676,10 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "connected")) {
         if (!strcmp(method, "PUT")) {
             const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
             char v2[32]; int bv;
-            if (!param(src, "Connected", v2, sizeof v2) || !parse_bool_strict(v2, &bv)) {
+            if (!(body && *body ? param_body(src, "Connected", v2, sizeof v2) : param(src, "Connected", v2, sizeof v2))
+                || !parse_bool_strict(v2, &bv)) {
                 respond_400(fd, "bad Connected value"); return 1;
             }
             /* A fresh connection is a fresh session: the target must be unset
@@ -671,6 +708,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
         if (!strcmp(m, "siteelevation")) { lo=-300; hi=10000; slot=&g_site_elev; pn="SiteElevation"; }
         if (!strcmp(method, "PUT")) {
             const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
             char v2[64]; double dv;
             if (!param(src, pn, v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
                 respond_400(fd, "bad value"); return 1;
@@ -685,6 +723,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "slewsettletime")) {
         if (!strcmp(method, "PUT")) {
             const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
             char v2[64]; long lv;
             if (!param(src, "SlewSettleTime", v2, sizeof v2) || !parse_long_strict(v2, &lv)) {
                 respond_400(fd, "bad value"); return 1;
@@ -754,6 +793,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
         char b[64];
         if (!strcmp(method, "PUT")) {
             const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
             char v2[64];
             const char *want = !strcmp(m, "targetrightascension")
                              ? "TargetRightAscension" : "TargetDeclination";
@@ -822,6 +862,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "synctocoordinates") || !strcmp(m, "synctotarget")) {
         static time_t last_sync = 0;
         const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
         char v2[64], cmd[640], out[1024], ua[64];
         double sra, sdec, alt = 0, az = 0;
         time_t now = time(NULL);
@@ -889,6 +930,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "slewtocoordinates") || !strcmp(m, "slewtocoordinatesasync")) {
         char ra_s[64], dec_s[64], cmd[512], out[1024];
         const char *src = (body && *body) ? body : qs;
+            /* PUT: body params are case-sensitive (see param_ci) */
         if (!param(src, "RightAscension", ra_s, sizeof ra_s) ||
             !param(src, "Declination", dec_s, sizeof dec_s)) {
             alpaca_error(fd, qs, 1025, "RightAscension/Declination required");
