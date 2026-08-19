@@ -177,8 +177,33 @@ log() { echo "$(date +%H:%M:%S) $*" >> "$LOG"; echo "$(date +%H:%M:%S) $*" >&2; 
 
 MOUNT_HOST=${MOUNT_HOST:-127.0.0.1}
 MOUNT_PORT=${MOUNT_PORT:-9090}
-mount_send() { "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" \
-                   send --msg "$1" >/dev/null 2>&1; }
+# IS THE APP ACTUALLY CONNECTED?
+#
+# This daemon exists to assist the Benro app's calibration. With no app
+# connected it has nothing to assist, and every connection it opens to the
+# control port is then pure risk: the device treats each one as an app
+# connecting, and connections arriving while no app is attached are the
+# suspected cause of a state the phone cannot recover from without a power
+# cycle -- the app never gets back in, and the mount has to be restarted.
+#
+# So: no app, no touching the mount. The phone shows up as an ESTABLISHED
+# connection to :9090 from the AP subnet; our own connections come from
+# 127.0.0.1 and are excluded, or we would see ourselves and call that an app.
+app_connected() {
+    netstat -tn 2>/dev/null | awk '
+        $4 ~ /:9090$/ && $6 == "ESTABLISHED" && $5 !~ /^127\./ { found = 1 }
+        END { exit !found }'
+}
+
+# Every write to the mount goes through here, so the guard goes here too.
+mount_send() {
+    if ! app_connected; then
+        log "NOT sending (no app connected): $1"
+        return 1
+    fi
+    "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" \
+                   send --msg "$1" >/dev/null 2>&1
+}
 
 # --- solve one jpeg; echo the JSON, or nothing --------------------------------
 # Pick the downsample from the ACTUAL image size, do not inherit the default.
@@ -670,6 +695,13 @@ LAST_ARM_T=0; LAST_ARM_YAW=""; LAST_ARM_PITCH=""
             fi
         elif [ -z "$LAST_YAW" ]; then
             log "530 step:1 seen but no preceding 519 -- cannot know the target; ignoring"
+        elif ! app_connected; then
+            # The triggers come from the LOG, which still holds events from a
+            # session that has since ended. Acting on those would open
+            # connections to the control port with no app attached -- the
+            # suspected cause of the phone being unable to reconnect without a
+            # power cycle. If nobody is calibrating, there is nothing to assist.
+            log "530 step:1 seen but NO APP IS CONNECTED -- not touching the mount"
         else
             LAST_ARM_T=$_now
             LAST_ARM_YAW=$LAST_YAW
