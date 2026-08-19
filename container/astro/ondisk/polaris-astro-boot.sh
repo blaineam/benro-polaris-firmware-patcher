@@ -79,9 +79,38 @@ SITE=/app/sd/polaris-astro/site.conf
         exit 0
     fi
 
-    echo "starting polaris-httpd on :$PORT (lat $LAT lon $LON focal ${FOCAL}mm)"
-    setsid "$ASTRO/polaris-httpd" --port "$PORT" --lat "$LAT" --lon "$LON" \
-        --focal "$FOCAL" </dev/null >/tmp/httpd.log 2>&1 &
+    # WAIT FOR ALIGNMENT BEFORE STARTING THE WEB SERVER.
+    #
+    # The server answers Alpaca/LX200 position queries, which means reading the
+    # mount -- and connecting to an UNALIGNED mount is what makes the Benro app
+    # demand a compass calibration. The server already refuses to read while
+    # unaligned, but the cleanest guarantee is simply not to be running yet.
+    #
+    # Alignment is detected PASSIVELY from the device's own 284 log lines
+    # (mode/track), so this loop opens no connections at all. track:3 is the
+    # never-aligned state; anything else means an alignment has completed.
+    #
+    # HTTPD_WAIT_ALIGNED=0 in site.conf starts it immediately instead.
+    if [ "${HTTPD_WAIT_ALIGNED:-1}" = "1" ]; then
+        echo "waiting for the mount to be aligned before starting polaris-httpd"
+        (
+            while :; do
+                _t=$(grep -a "code\[284\]" /app/Mlog.txt 2>/dev/null \
+                     | sed -n 's/.*track:\([0-9-][0-9]*\).*/\1/p' | tail -1)
+                if [ -n "$_t" ] && [ "$_t" != "3" ] && [ "$_t" != "-1" ]; then
+                    echo "$(date) mount reports track:$_t -- starting polaris-httpd on :$PORT"
+                    setsid "$ASTRO/polaris-httpd" --port "$PORT" --lat "$LAT" \
+                        --lon "$LON" --focal "$FOCAL" </dev/null >/tmp/httpd.log 2>&1 &
+                    exit 0
+                fi
+                sleep 10
+            done
+        ) >> "$LOG" 2>&1 &
+    else
+        echo "starting polaris-httpd on :$PORT (lat $LAT lon $LON focal ${FOCAL}mm)"
+        setsid "$ASTRO/polaris-httpd" --port "$PORT" --lat "$LAT" --lon "$LON" \
+            --focal "$FOCAL" </dev/null >/tmp/httpd.log 2>&1 &
+    fi
 
     # Optional protocol recorder, for working out the alignment flow. Set
     # CAPTURE_ALIGN_FLOW=1 in site.conf to enable. Uses polaris-logwatch (20 ms,

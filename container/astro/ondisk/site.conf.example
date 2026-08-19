@@ -14,6 +14,13 @@ FOCAL=400
 # 8080 is pgphoto's own MJPG stream; 80, 8081, 9090 and 22 are also taken.
 POLARIS_HTTPD_PORT=8090
 
+# Start the web server only AFTER the mount has been aligned. Connecting to an
+# unaligned mount makes the Benro app demand a compass calibration, so the
+# server simply does not run until there is something safe to talk to.
+# Detected passively from the device's own log -- no connections are made while
+# waiting. Set 0 to start it immediately regardless.
+HTTPD_WAIT_ALIGNED=1
+
 # ---- auto-solve during the app's calibration -------------------------------
 AUTOSOLVE=1
 # 1 = watch and log what it WOULD send, touch nothing. START HERE.

@@ -198,10 +198,22 @@ static int alignment_state(void) {
  * happens to be empty -- which, given how aggressively it is truncated, would
  * be most of the time. */
 static int may_read_mount(void) {
-    int a = alignment_state();
-    if (a == 1) return 1;
-    if (a == 0) return 0;
-    return g_last_track == -1 ? 1 : 0;      /* one bootstrap read */
+    /* UNKNOWN MEANS NO.
+     *
+     * This used to allow one "bootstrap" read when the alignment state was
+     * unknown, so it could learn the state by asking. That was wrong in the
+     * worst way: after every reboot the state IS unknown, so the first position
+     * read connected to an unaligned mount -- and connecting while unaligned is
+     * exactly what makes the Benro app demand a compass calibration. The user
+     * hit that, I fixed it, and then reintroduced it with this bootstrap.
+     *
+     * Alignment state is learned PASSIVELY from the device's own 284 log lines,
+     * which cost nothing. If we have never seen one, we do not know, and the
+     * safe answer is to stay quiet. Position reads fall back to the last solve.
+     *
+     * It also removes a hang: 518 never answers on an unaligned mount, so the
+     * bootstrap read waited out polaris-mount's timeout on every request. */
+    return alignment_state() == 1;
 }
 
 /* ------------------------------------------------------------ mount state */
@@ -410,6 +422,7 @@ static int param_ci(const char *qs, const char *name, char *out, size_t cap,
 static int param(const char *qs, const char *name, char *out, size_t cap);
 static int param_ci(const char *qs, const char *name, char *out, size_t cap, int cs);
 static int current_radec(double *ra, double *dec);
+static int may_read_mount(void);
 /* Corrected-UTC string for polaris-mount. Slews MUST use the same clock the
  * reads use: goto-radec converts RA/Dec to alt/az, so running it on the raw
  * device clock sent the mount ~105 deg (7 h) from the target while our position
@@ -1065,7 +1078,11 @@ static int current_radec(double *ra, double *dec) {
     double alt = 0, az = 0;
     *ra = 0; *dec = 0;
     snprintf(ub, sizeof ub, "--clock-offset %ld", tz_offset_sec());
-    if (mount_pose(&alt, &az, raw, sizeof raw)) {
+    /* Do not ask an UNALIGNED mount where it is pointing: 518 never answers in
+     * that state and polaris-mount waits out its timeout, so a client polling
+     * position before the user has calibrated simply hangs. Fall back to the
+     * last solve, which is the honest answer for "we cannot tell". */
+    if (may_read_mount() && mount_pose(&alt, &az, raw, sizeof raw)) {
         snprintf(cmd, sizeof cmd,
             "%s/polaris-mount --lat %.6f --lon %.6f %s altaz2radec --alt %.6f --az %.6f 2>/dev/null",
             g_astro, g_lat, g_lon, ub, alt, az);
