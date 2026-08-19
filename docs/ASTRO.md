@@ -85,7 +85,9 @@ AUTOSOLVE_DRY_RUN=1      # 1 = log what it WOULD do, touch nothing. Start here.
 MIN_LOGODDS=100          # solve-quality gates; below these it does nothing
 MIN_MATCHES=12
 CENTRE_TOL_DEG=0.15      # how well centred before it will confirm (~9 arcmin)
-MAX_ALIGN_ALT=65         # refuse to derive a heading above this altitude
+MAX_ALIGN_ALT=85         # hard stop near the zenith (see below)
+SOLVE_ARCSEC=60          # assumed solve accuracy, for the uncertainty check
+MAX_UNCERT_FRAC=0.25     # refuse if uncertainty exceeds this fraction of the correction
 
 # Auto-guiding after a successful alignment.
 GUIDE=0
@@ -207,6 +209,40 @@ Two things worth knowing:
 
 Set `HTTPD_WAIT_ALIGNED=1` to go back to not starting the server at all until an
 alignment has completed.
+
+---
+
+## How high is too high to derive a heading?
+
+Azimuth error is amplified by 1/cos(altitude), which makes it tempting to refuse
+well short of the zenith. The first cut refused above **65°** — and that was an
+instinct, not a calculation. It threw away a perfectly good solve at 70.4° on the
+first real night out.
+
+What matters is the amplified error *compared with the compass error being
+corrected*:
+
+| altitude | 1/cos | a 40″ solve becomes |
+|---|---|---|
+| 65° | 2.4× | 95″ = 0.03° |
+| 75° | 3.9× | 154″ = 0.04° |
+| 80° | 5.8× | 230″ = 0.06° |
+| 85° | 11.5× | 460″ = 0.13° |
+
+The compass error being corrected is **tens of degrees**. Even at 85° the
+amplified uncertainty is about a tenth of a degree — still an enormous
+improvement on not correcting at all.
+
+So the real test is not the altitude but whether the correction is worth making:
+the daemon computes the amplified azimuth uncertainty and refuses only if it
+exceeds `MAX_UNCERT_FRAC` (0.25) of the correction itself. On last night's
+refused solve — alt 70.4°, correction 44.6°, uncertainty 0.05° — it now proceeds.
+The gate only bites on marginal corrections: at 80° the correction must exceed
+0.38° to be accepted.
+
+`MAX_ALIGN_ALT` remains as a hard stop, now at **85°**, because that close to the
+zenith an alt-az mount's azimuth axis is ill-conditioned mechanically as well as
+mathematically.
 
 ---
 

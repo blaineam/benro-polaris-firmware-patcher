@@ -323,7 +323,39 @@ good_solve() {
 # The zenith rail is kept, because it is a real hazard and not a diagnostic:
 # azimuth is degenerate near the zenith and a heading derived there is amplified
 # by 1/cos(alt).
-MAX_ALIGN_ALT=${MAX_ALIGN_ALT:-65}
+# HOW HIGH IS TOO HIGH TO DERIVE A HEADING?
+#
+# Azimuth error is amplified by 1/cos(alt), so the instinct is to refuse well
+# short of the zenith. 65 was that instinct, and it was too strict -- it refused
+# a perfectly good solve at 70.4 deg on the first real night. What matters is
+# not the amplification on its own but the amplified error COMPARED WITH THE
+# COMPASS ERROR BEING CORRECTED:
+#
+#     alt   1/cos(alt)   our ~40" solve becomes
+#     65      2.4x        95"  = 0.03 deg
+#     75      3.9x       154"  = 0.04 deg
+#     80      5.8x       230"  = 0.06 deg
+#     85     11.5x       460"  = 0.13 deg
+#
+# The compass error we are correcting is TENS OF DEGREES. Even at 85 deg the
+# amplified uncertainty is roughly a tenth of a degree -- still enormously
+# better than not correcting. So the honest limit is much higher than 65, and
+# the real check is the one below: refuse only when the uncertainty is a
+# meaningful fraction of the correction itself.
+#
+# 85 remains a hard cap: past it 1/cos runs away, and an alt-az mount's azimuth
+# axis is mechanically ill-conditioned near the zenith regardless of our maths.
+MAX_ALIGN_ALT=${MAX_ALIGN_ALT:-85}
+
+# Assumed solve accuracy in arcsec, used to judge whether a correction derived
+# at this altitude is worth making. 60 is conservative: measured live-view
+# solves land at 20-40".
+SOLVE_ARCSEC=${SOLVE_ARCSEC:-60}
+
+# Refuse if the amplified azimuth uncertainty exceeds this fraction of the
+# correction being applied -- i.e. if the correction would not be a clear
+# improvement on leaving it alone.
+MAX_UNCERT_FRAC=${MAX_UNCERT_FRAC:-0.25}
 
 # echo the compass value to send, or nothing if the geometry is unsafe
 compass_for_solve() {
@@ -338,9 +370,38 @@ compass_for_solve() {
     _too_high=$(awk -v a="$_salt" -v m="$MAX_ALIGN_ALT" 'BEGIN{print (a>m)?1:0}')
     if [ "$_too_high" = "1" ]; then
         log "REFUSING: solved altitude ${_salt} is above ${MAX_ALIGN_ALT} deg."
-        log "  azimuth is degenerate near the zenith (error amplified by 1/cos(alt));"
-        log "  a heading derived here would be worse than no correction."
+        log "  this close to the zenith the azimuth axis is ill-conditioned both"
+        log "  mathematically (1/cos(alt)) and mechanically; no heading from here."
         return 1
+    fi
+
+    # Is a correction derived at this altitude actually worth making? Compare
+    # the amplified azimuth uncertainty against the size of the correction.
+    # This is the check that matters; the altitude cap above is just a backstop.
+    # The size of the correction is the POINTING ERROR: where the app believes
+    # it is pointing (ARM_AZ) versus where the solve says it actually is
+    # (_saz). Comparing against the derived compass value instead would be
+    # comparing two different quantities and would give a meaningless number.
+    if [ -n "${ARM_AZ:-}" ]; then
+        _verdict=$(awk -v alt="$_salt" -v cur="$ARM_AZ" -v new="$_saz" \
+                       -v acc="$SOLVE_ARCSEC" -v frac="$MAX_UNCERT_FRAC" 'BEGIN{
+            pi = 3.14159265358979;
+            c = cos(alt * pi / 180.0);
+            if (c < 0.0001) c = 0.0001;
+            unc = (acc / c) / 3600.0;            # deg of azimuth uncertainty
+            d = new - cur;
+            while (d > 180) d -= 360; while (d < -180) d += 360;
+            if (d < 0) d = -d;                   # size of the correction, deg
+            printf "%.4f %.4f %d", unc, d, (d > 0 && unc > frac * d) ? 1 : 0 }')
+        _unc=$(echo "$_verdict" | cut -d" " -f1)
+        _corr=$(echo "$_verdict" | cut -d" " -f2)
+        _bad=$(echo "$_verdict" | cut -d" " -f3)
+        log "  azimuth uncertainty at alt ${_salt}: ${_unc} deg; correction is ${_corr} deg"
+        if [ "$_bad" = "1" ]; then
+            log "REFUSING: the uncertainty is more than ${MAX_UNCERT_FRAC} of the correction --"
+            log "  this heading would not be a clear improvement on leaving it alone."
+            return 1
+        fi
     fi
     awk -v a="$_saz" 'BEGIN{c=a-180; while(c<0)c+=360; while(c>=360)c-=360; printf "%.5f", c}'
 }
