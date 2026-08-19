@@ -116,6 +116,82 @@ static int run_capture(const char *cmd, char *out, size_t cap) {
     return out[0] ? 0 : -1;
 }
 
+
+/* ---- passive state, straight out of the device's own log ------------------
+ *
+ * The device logs every 284 reply it sends the app:
+ *     code[284],val[mode:8;state:0;track:1;speed:2;...]
+ * Reading that file costs ZERO connections, so we can always show mode/track
+ * without touching the control port. track:3 means never-aligned; it becomes 0
+ * or 1 once an alignment completes.
+ *
+ * This is what makes "only poll when already aligned" possible: we learn the
+ * alignment state for free, and only open a real connection when the mount is
+ * in a state where doing so will not nag the app into re-prompting for compass
+ * calibration.
+ */
+static int log_state(int *mode, int *track) {
+    char buf[65536], *p, *last = NULL;
+    int fd;
+    struct stat st;
+    ssize_t n;
+    *mode = -1; *track = -1;
+    if (stat("/app/Mlog.txt", &st) != 0) return 0;
+    fd = open("/app/Mlog.txt", O_RDONLY);
+    if (fd < 0) return 0;
+    if ((size_t)st.st_size > sizeof buf - 1)
+        lseek(fd, st.st_size - (off_t)(sizeof buf - 1), SEEK_SET);
+    n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    /* last occurrence wins -- the log is append-ordered */
+    for (p = buf; (p = strstr(p, "code[284]")) != NULL; p++) last = p;
+    if (!last) return 0;
+    { const char *m = strstr(last, "mode:");  if (m) *mode  = atoi(m + 5); }
+    { const char *t = strstr(last, "track:"); if (t) *track = atoi(t + 6); }
+    return (*mode >= 0 || *track >= 0);
+}
+
+/* Last track value we have ever observed, from the log OR from a real read.
+ * Mlog.txt is truncated constantly (seen at 124 bytes), so "no 284 in the log
+ * right now" is the common case and does NOT mean "unaligned" -- it means we
+ * do not know yet. Remembering the last value makes the decision stable. */
+static int g_last_track = -1;
+
+static void note_track(int track) {
+    if (track >= 0) g_last_track = track;
+}
+
+/* Tri-state: 1 aligned, 0 known-unaligned, -1 unknown. */
+static int alignment_state(void) {
+    int mode, track;
+    if (log_state(&mode, &track) && track >= 0) {
+        note_track(track);
+        return track != 3;
+    }
+    if (g_last_track >= 0) return g_last_track != 3;
+    return -1;                       /* never seen any state */
+}
+
+/* May we open a connection to the mount?
+ *
+ * Rule (the user's): only poll when it is already aligned. Connecting while the
+ * mount is unaligned is what made the Benro app re-prompt for compass
+ * calibration.
+ *
+ * Unknown is allowed exactly once, to bootstrap: a real read sends 284, the
+ * device logs its reply, and every decision after that is evidence-based. That
+ * costs at most one connection ever, versus refusing forever whenever the log
+ * happens to be empty -- which, given how aggressively it is truncated, would
+ * be most of the time. */
+static int may_read_mount(void) {
+    int a = alignment_state();
+    if (a == 1) return 1;
+    if (a == 0) return 0;
+    return g_last_track == -1 ? 1 : 0;      /* one bootstrap read */
+}
+
 /* ------------------------------------------------------------ mount state */
 
 /* Ask the mount where it is.
@@ -450,8 +526,9 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "rightascension") || !strcmp(m, "declination")) {
         double ra = 0, dec = 0;
         char b[64];
-        if (!last_solution(&ra, &dec)) {
-            /* No solve yet: fall back to the mount's own idea via altaz->radec. */
+        if (!last_solution(&ra, &dec) && may_read_mount()) {
+            /* No solve yet: fall back to the mount's own idea via altaz->radec.
+             * Skipped while unaligned -- connecting then nags the app. */
             char cmd[512], out[512], raw[512];
             double alt = 0, az = 0;
             mount_pose(&alt, &az, raw, sizeof raw);
@@ -587,6 +664,8 @@ static const char PAGE[] =
 "      +row('field',f(o.field_w_deg,2)+'\\u00b0 \\u00d7 '+f(o.field_h_deg,2)+'\\u00b0')\n"
 "      +row('matches',o.nmatch+' of '+o.nfield)+row('solve time',f(o.solve_seconds,2)+' s')\n"
 "    : '<div class=row><span>no solution yet</span><span></span></div>';\n"
+"  document.getElementById('mnt').innerHTML=row('aligned',s.aligned?'yes':'no')\n"
+"    +row('tracking',s.tracking?'yes':'no')+(s.mount_read?'':'');\n"
 "  if(s.mount_read){document.getElementById('mnt').innerHTML=\n"
 "    row('alt',f(s.alt,3)+'\\u00b0')+row('az',f(s.az,3)+'\\u00b0')\n"
 "    +row('aligned',s.aligned?'yes':'no')+row('tracking',s.tracking?'yes':'no')}\n"
@@ -656,7 +735,7 @@ static void handle(int fd) {
     if (!strcmp(path, "/api/state")) {
         char status[32], log[4096], logesc[8192], result[4096], raw[1024], out[16384];
         double alt = 0, az = 0;
-        int aligned = 0, tracking = 0, want_mount = 0;
+        int aligned = 0, tracking = 0, want_mount = 0, mount_blocked = 0;
         read_file(JOB_STATUS, status, sizeof status);
         if (!status[0]) snprintf(status, sizeof status, "idle");
         { char *e = status + strlen(status);
@@ -680,18 +759,36 @@ static void handle(int fd) {
          *
          * Mount fields are populated ONLY for /api/state?mount=1, which the
          * page issues from an explicit Refresh button. */
+        /* Alignment/mode always come from the LOG -- free, no connections. */
+        { int lmode, ltrack;
+          if (log_state(&lmode, &ltrack) && ltrack >= 0) note_track(ltrack);
+          (void)lmode;
+          aligned  = (g_last_track >= 0 && g_last_track != 3);
+          tracking = (g_last_track == 1); }
+
+        /* An ACTIVE read (which opens a connection) happens only when asked
+         * AND only when the mount is already aligned. While it is unaligned --
+         * i.e. exactly when the app is running its calibration -- connecting
+         * makes the app re-prompt for compass calibration, so we refuse. */
         { char mq[8];
           if (param(qs, "mount", mq, sizeof mq) && mq[0] == '1')
               want_mount = 1; }
+        if (want_mount && !may_read_mount()) {
+            want_mount = 0;
+            mount_blocked = 1;
+        }
         if (want_mount && mount_pose(&alt, &az, raw, sizeof raw)) {
-            aligned  = strstr(raw, "\"aligned\":true") != NULL;
+            /* a real read is authoritative -- record it for later decisions */
             { const char *t = strstr(raw, "\"track\":");
-              tracking = t && atoi(t + 8) != 0; }
+              if (t) { note_track(atoi(t + 8)); tracking = atoi(t + 8) == 1; } }
+            if (strstr(raw, "\"aligned\":true")) aligned = 1;
+            else if (strstr(raw, "\"aligned\":false")) aligned = 0;
         }
         snprintf(out, sizeof out,
-            "{\"status\":\"%s\",\"mount_read\":%s,\"alt\":%.4f,\"az\":%.4f,"
+            "{\"status\":\"%s\",\"mount_read\":%s,\"mount_blocked\":%s,"
+            "\"alt\":%.4f,\"az\":%.4f,"
             "\"aligned\":%s,\"tracking\":%s,\"solution\":%s,\"log\":\"%s\"}",
-            status, want_mount?"true":"false", alt, az,
+            status, want_mount?"true":"false", mount_blocked?"true":"false", alt, az,
             aligned?"true":"false", tracking?"true":"false", result, logesc);
         respond_json(fd, out);
         return;
