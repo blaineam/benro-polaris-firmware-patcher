@@ -51,6 +51,7 @@ SITE=/app/sd/polaris-astro/site.conf
             cp /app/sd/polaris-astro/polaris-httpd \
                /app/sd/polaris-astro/polaris-solve \
                /app/sd/polaris-astro/polaris-extract \
+               /app/sd/polaris-astro/polaris-logwatch \
                /app/sd/polaris-astro/polaris-mount "$ASTRO"/ 2>/dev/null
             cp /app/sd/polaris-astro/*.sh "$ASTRO"/ 2>/dev/null
             chmod +x "$ASTRO"/* 2>/dev/null
@@ -82,13 +83,35 @@ SITE=/app/sd/polaris-astro/site.conf
     # CAPTURE_ALIGN_FLOW=1 in site.conf to enable. Uses polaris-logwatch (20 ms,
     # truncation-safe) rather than a shell poll -- Mlog.txt is truncated every
     # few seconds and a 1 s shell loop demonstrably loses whole messages.
-    if [ "${CAPTURE_ALIGN_FLOW:-0}" = "1" ] && [ -x "$ASTRO/polaris-logwatch" ]; then
+    if [ "${CAPTURE_ALIGN_FLOW:-0}" = "1" ] && [ -x "$ASTRO/polaris-logwatch" ] \
+       && ! pgrep -f "align-flow.log" >/dev/null 2>&1; then
         echo "starting align-flow recorder -> /app/sd/align-flow.log"
         setsid "$ASTRO/polaris-logwatch" \
             --match "code:530" --match "code:531" --match "code:519" \
             --match "code:527" --match "code:285" --match "code:517" \
             --match "code[530]" --match "code[531]" --match "code[519]" \
             --out /app/sd/align-flow.log </dev/null >/dev/null 2>&1 &
+    fi
+    # Auto-solve during the app's calibration. Set AUTOSOLVE=1 in site.conf.
+    #
+    # AUTOSOLVE_DRY_RUN defaults to 1 ON PURPOSE: armed, this writes a heading
+    # correction and an alignment confirm to a live mount. Run it dry once,
+    # confirm from /app/sd/polaris-autosolve.log that the solve is good and the
+    # correction looks sane, THEN set AUTOSOLVE_DRY_RUN=0.
+    if [ "${AUTOSOLVE:-0}" = "1" ] && [ -x "$ASTRO/polaris-autosolve.sh" ]; then
+        # Idempotent, like the httpd guard above. Without this a second run of
+        # the hook (or a manual restart that killed only ONE pid) leaves two
+        # daemons reacting to the same alignment -- observed on hardware, with
+        # both a stub-mode and a live-mode instance answering one injected 530.
+        if pgrep -f "polaris-autosolve" >/dev/null 2>&1; then
+            echo "autosolve already running -- not starting a second"
+            exit 0
+        fi
+        echo "starting autosolve (dry_run=${AUTOSOLVE_DRY_RUN:-1})"
+        LAT="$LAT" LON="$LON" FOCAL_MM="$FOCAL" \
+        DRY_RUN="${AUTOSOLVE_DRY_RUN:-1}" \
+        MIN_LOGODDS="${MIN_LOGODDS:-100}" MIN_MATCHES="${MIN_MATCHES:-12}" \
+        setsid sh "$ASTRO/polaris-autosolve.sh" </dev/null >/tmp/autosolve.out 2>&1 &
     fi
 } >> "$LOG" 2>&1 &
 

@@ -45,6 +45,12 @@ static double g_focal = 400.0;
 
 /* ---------------------------------------------------------------- helpers */
 
+static double stage2_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1.0e6;
+}
+
 static void set_status(const char *s) {
     int fd = open(JOB_STATUS, O_WRONLY|O_CREAT|O_TRUNC, 0644);
     if (fd >= 0) { write(fd, s, strlen(s)); close(fd); }
@@ -124,14 +130,38 @@ static int mount_pose(double *alt, double *az, char *raw, size_t rawcap) {
     const char *p;
     int ok = 0;
 
+    /* CACHE. Every polaris-mount invocation opens a NEW TCP connection to the
+     * control port, which the device treats as an app connecting
+     * (SP_EVENT_APP_CONNECT) and answers by pushing a state banner. With the
+     * page polling every 1.5 s that is two fresh connections per poll, and the
+     * Benro app flashes its celestial-position banner continuously. Observed on
+     * hardware. So hold the last reading and only re-ask occasionally. */
+    static double c_alt = 0, c_az = 0, c_when = 0;
+    static char   c_raw[512] = {0};
+    static int    c_ok = 0;
+    double now = stage2_now_ms();
+    double ttl = 5000.0;                     /* ms */
+    {
+        const char *e = getenv("POLARIS_MOUNT_CACHE_MS");
+        if (e && *e) ttl = atof(e);
+    }
+    if (c_when != 0.0 && (now - c_when) < ttl) {
+        *alt = c_alt; *az = c_az;
+        if (raw) snprintf(raw, rawcap, "%s", c_raw);
+        return c_ok;
+    }
+
     snprintf(cmd, sizeof cmd, "%s/polaris-mount --host 127.0.0.1 pose 2>/dev/null", g_astro);
     if (run_capture(cmd, buf, sizeof buf) >= 0 && buf[0]) {
         p = strstr(buf, "\"alt_deg\":"); if (p) { *alt = atof(p + 10); ok = 1; }
         p = strstr(buf, "\"az_deg\":");  if (p) { *az  = atof(p + 9);  ok = 1; }
     }
     snprintf(cmd, sizeof cmd, "%s/polaris-mount --host 127.0.0.1 state 2>/dev/null", g_astro);
-    if (run_capture(cmd, buf, sizeof buf) >= 0 && raw)
-        snprintf(raw, rawcap, "%s", buf);
+    if (run_capture(cmd, buf, sizeof buf) >= 0) {
+        snprintf(c_raw, sizeof c_raw, "%s", buf);
+        if (raw) snprintf(raw, rawcap, "%s", buf);
+    }
+    c_alt = *alt; c_az = *az; c_ok = ok; c_when = now;
     return ok;
 }
 
@@ -453,7 +483,7 @@ static const char PAGE[] =
 "  fetch('/api/solve?mode='+m+(a?'&apply=1':''),{method:'POST'}).then(tick)}\n"
 "function tick(){fetch('/api/state').then(r=>r.json()).then(s=>{\n"
 "  var st=document.getElementById('st');st.textContent=s.status;st.className='s '+s.status;\n"
-"  var busy=s.status==='running';\n"
+"  var busy=s.status==='running';rate(busy);\n"
 "  ['b1','b2','b3'].forEach(i=>document.getElementById(i).disabled=busy);\n"
 "  var o=s.solution;\n"
 "  document.getElementById('sol').innerHTML = (o&&o.solved)\n"
@@ -466,7 +496,7 @@ static const char PAGE[] =
 "    +row('aligned',s.aligned?'yes':'no')+row('tracking',s.tracking?'yes':'no');\n"
 "  document.getElementById('log').textContent=s.log||'(empty)';\n"
 "})}\n"
-"tick();setInterval(tick,1500);\n"
+"tick();var iv=setInterval(tick,4000);\n// poll fast only while a job is actually running\nfunction rate(busy){clearInterval(iv);iv=setInterval(tick,busy?1500:4000)}\n\n"
 "</script></body></html>";
 
 /* ------------------------------------------------------------------- main */
