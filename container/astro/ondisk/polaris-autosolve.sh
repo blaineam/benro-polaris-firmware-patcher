@@ -48,8 +48,62 @@ LIVEVIEW_PORT=${LIVEVIEW_PORT:-8080}
 # real mount.
 STUB_FRAME=${STUB_FRAME:-}
 STUB_UTC=${STUB_UTC:-}
+
+# ---- THE DEVICE CLOCK IS NOT UTC -------------------------------------------
+#
+# The Polaris' system clock runs on LOCAL time while `date -u` reports it as
+# UTC. Measured: device said 2026-08-18T19:49:48 "UTC" when true UTC was
+# 2026-08-19T02:49:51 -- seven hours, i.e. the PDT offset.
+#
+# Seven hours is ~105 deg of hour angle, so every RA/Dec <-> alt/az conversion
+# is grossly wrong. Verified against the simulator, whose clock IS correct:
+#     sim truth            alt 44.988  az 23.057
+#     device clock as-is   alt 16.508  az  7.148
+#     device clock +7h     alt 44.947  az 22.948   <- matches
+#
+# Nothing running purely on the device could catch this: both halves of every
+# earlier test shared the same wrong clock, so the error cancelled. It would
+# have produced a confidently wrong compass correction on the first real night.
+#
+# TZ_OFFSET_SEC is what to ADD to the device clock to get UTC. "auto" reads it
+# from the app's own 782 message (date/time/zone), which is authoritative --
+# the app tells the device its timezone every time it connects.
+TZ_OFFSET_SEC=${TZ_OFFSET_SEC:-auto}
+
+detect_tz_offset() {
+    # 782 looks like: val:date:2026-08-18;time:18:09:50;zone:--25200;
+    # The zone field is seconds EAST of UTC (so -25200 for PDT). Note the app
+    # writes a stray extra '-'; tolerate one or two.
+    _z=$(grep -a "code:782" /app/Mlog.txt 2>/dev/null \
+         | sed -n 's/.*zone:-\{1,2\}\([0-9][0-9]*\).*/\1/p' | tail -1)
+    if [ -n "$_z" ]; then
+        echo $(( _z ))          # zone is negative -> add |zone| to reach UTC
+        return 0
+    fi
+    return 1
+}
+
+if [ "$TZ_OFFSET_SEC" = "auto" ]; then
+    if TZ_OFFSET_SEC=$(detect_tz_offset); then
+        :
+    else
+        TZ_OFFSET_SEC=0
+    fi
+fi
+
+# UTC as a string polaris-mount accepts, corrected for the device clock.
+utc_now() {
+    _e=$(( $(date +%s) + TZ_OFFSET_SEC ))
+    date -u -d "@$_e" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null \
+      || date -u -r "$_e" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null
+}
+
 UTCARG=""
-[ -n "$STUB_UTC" ] && UTCARG="--utc $STUB_UTC"
+if [ -n "$STUB_UTC" ]; then
+    UTCARG="--utc $STUB_UTC"
+elif [ "${TZ_OFFSET_SEC:-0}" -ne 0 ] 2>/dev/null; then
+    UTCARG="--utc $(utc_now)"
+fi
 if [ -n "$STUB_FRAME" ] || [ -n "$STUB_UTC" ]; then
     DRY_RUN=${DRY_RUN:-1}
 fi
@@ -58,7 +112,10 @@ export LAT LON
 
 log() { echo "$(date +%H:%M:%S) $*" >> "$LOG"; echo "$(date +%H:%M:%S) $*" >&2; }
 
-mount_send() { "$ASTRO/polaris-mount" --host 127.0.0.1 send --msg "$1" >/dev/null 2>&1; }
+MOUNT_HOST=${MOUNT_HOST:-127.0.0.1}
+MOUNT_PORT=${MOUNT_PORT:-9090}
+mount_send() { "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" \
+                   send --msg "$1" >/dev/null 2>&1; }
 
 # --- solve one jpeg; echo the JSON, or nothing --------------------------------
 # Pick the downsample from the ACTUAL image size, do not inherit the default.
@@ -86,8 +143,26 @@ solve_frame() {
     # blind, and blind is ~50x slower at this focal length (361.7s vs 7.3s
     # measured on this device), which would hang the calibration dialog.
     if [ -n "$_hra" ]; then
-        DOWNSAMPLE="$_ds" FOCAL_MM="$FOCAL" \
-            sh "$ASTRO/polaris-align.sh" "$_f" "$FOCAL" "$_hra" "$_hdec" "${HINT_RADIUS:-20}" 2>>"$LOG"
+        # HINT_RADIUS must cover the COMPASS ERROR, which is the whole reason we
+        # are plate-solving. Measured against the simulator with a 37.5 deg
+        # error (hint 39.2 deg from truth) on a 960x640 frame:
+        #     20 deg  -> FAILED after 120 s (burned the whole cpulimit)
+        #     45 deg  -> solved in 1 s
+        #     90 deg  -> solved in 3 s
+        #     blind   -> solved in 3 s
+        # So a too-narrow hint is WORSE THAN NO HINT: it fails slowly. The old
+        # default of 20 deg could never have aligned a cold-start compass.
+        _out=$(DOWNSAMPLE="$_ds" FOCAL_MM="$FOCAL" \
+            sh "$ASTRO/polaris-align.sh" "$_f" "$FOCAL" "$_hra" "$_hdec" "${HINT_RADIUS:-60}" 2>>"$LOG")
+        if echo "$_out" | grep -q '"solved":true'; then
+            echo "$_out"; return 0
+        fi
+        # Hinted solve failed: the hint itself may be the problem. Retry blind.
+        # At live-view resolution that costs seconds, not minutes -- the project's
+        # old 361 s blind figure was measured on full-res 8192 px frames.
+        log "hinted solve failed -- retrying blind (the hint may be the problem)"
+        DOWNSAMPLE="$_ds" FOCAL_MM="$FOCAL" MOUNT_HINT=0 \
+            sh "$ASTRO/polaris-align.sh" "$_f" "$FOCAL" 2>>"$LOG"
     else
         DOWNSAMPLE="$_ds" FOCAL_MM="$FOCAL" MOUNT_HINT=0 \
             sh "$ASTRO/polaris-align.sh" "$_f" "$FOCAL" 2>>"$LOG"
@@ -125,6 +200,7 @@ MAX_ALIGN_ALT=${MAX_ALIGN_ALT:-65}
 # echo the compass value to send, or nothing if the geometry is unsafe
 compass_for_solve() {
     _sra=$1; _sdec=$2
+    [ -n "$STUB_UTC" ] || [ "${TZ_OFFSET_SEC:-0}" -eq 0 ] 2>/dev/null || UTCARG="--utc $(utc_now)"
     _j=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
             radec2altaz --ra "$_sra" --dec "$_sdec" 2>/dev/null)
     _salt=$(echo "$_j" | sed -n 's/.*"alt_deg":\([-0-9.]*\).*/\1/p')
@@ -141,8 +217,43 @@ compass_for_solve() {
     awk -v a="$_saz" 'BEGIN{c=a-180; while(c<0)c+=360; while(c>=360)c-=360; printf "%.5f", c}'
 }
 
-# grab a live-view frame (no shutter); echo its path
+# grab a frame; echo its path
+#
+# CAPTURE_MODE=liveview (default) pulls pgphoto's MJPG snapshot -- no shutter.
+# CAPTURE_MODE=render is the SIMULATOR camera: ask the sim where it is REALLY
+# pointing and render that patch of sky with polaris-skysim. That closes the
+# loop with no hardware and no sky, so motor commands can be exercised for real
+# -- the daemon sends genuine 527/519/530, the sim moves, and the next rendered
+# frame reflects where it actually ended up.
+SIM_STATUS=${SIM_STATUS:-}                 # host:port of the sim's status port
+RENDER_W=${RENDER_W:-960}
+RENDER_H=${RENDER_H:-640}
+
 grab_frame() {
+    if [ "${CAPTURE_MODE:-liveview}" = "render" ]; then
+        [ -n "$SIM_STATUS" ] || { log "CAPTURE_MODE=render needs SIM_STATUS=host:port"; return 1; }
+        _sh=$(echo "$SIM_STATUS" | cut -d: -f1)
+        _sp=$(echo "$SIM_STATUS" | cut -d: -f2)
+        rm -f /tmp/simstatus.json
+        "$ASTRO/polaris-mount" fetch --host "$_sh" --port "$_sp" \
+            --url-path "/" --out /tmp/simstatus.json >/dev/null 2>&1
+        _tra=$(sed -n 's/.*"true_ra_deg": *\([-0-9.]*\).*/\1/p'  /tmp/simstatus.json)
+        _tdec=$(sed -n 's/.*"true_dec_deg": *\([-0-9.]*\).*/\1/p' /tmp/simstatus.json)
+        [ -n "$_tra" ] || { log "could not read the sim's true pointing"; return 1; }
+        _idx=""
+        for f in "${INDEXES:-/app/sd/astrometry}"/index-*.fits; do
+            [ -f "$f" ] && _idx="$_idx --index $f"
+        done
+        rm -f /tmp/autosolve-lv.jpg
+        "$ASTRO/polaris-skysim" $_idx --ra "$_tra" --dec "$_tdec" \
+            --focal-mm "$FOCAL" --sensor-mm 36 \
+            --width "$RENDER_W" --height "$RENDER_H" \
+            --out /tmp/autosolve-lv.jpg >/dev/null 2>&1
+        [ -s /tmp/autosolve-lv.jpg ] || { log "render failed"; return 1; }
+        log "  [sim camera] rendered the sky at ra=$_tra dec=$_tdec"
+        echo /tmp/autosolve-lv.jpg
+        return 0
+    fi
     rm -f /tmp/autosolve-lv.jpg
     "$ASTRO/polaris-mount" fetch --host 127.0.0.1 --port "$LIVEVIEW_PORT" \
         --url-path "/?action=snapshot" --out /tmp/autosolve-lv.jpg >/dev/null 2>&1
@@ -169,6 +280,7 @@ handle_arm() {
     log "ARMED: app target yaw=$_yaw (az=$_az) pitch=$_pitch -- solving"
 
     # the app's target, as a search hint
+    [ -n "$STUB_UTC" ] || [ "${TZ_OFFSET_SEC:-0}" -eq 0 ] 2>/dev/null || UTCARG="--utc $(utc_now)"
     _hint=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
               altaz2radec --alt "$_pitch" --az "$_az" 2>/dev/null)
     _hra=$(echo "$_hint"  | sed -n 's/.*"ra_deg":\([-0-9.]*\).*/\1/p')
@@ -324,6 +436,7 @@ apply_correction() {
         good_solve "$_v" || { log "verification solve failed"; break; }
         _vra=$(echo  "$_v" | sed -n 's/.*"ra_deg":\([-0-9.]*\).*/\1/p')
         _vdec=$(echo "$_v" | sed -n 's/.*"dec_deg":\([-0-9.]*\).*/\1/p')
+        [ -n "$STUB_UTC" ] || [ "${TZ_OFFSET_SEC:-0}" -eq 0 ] 2>/dev/null || UTCARG="--utc $(utc_now)"
         _vj=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
                 radec2altaz --ra "$_vra" --dec "$_vdec" 2>/dev/null)
         _valt=$(echo "$_vj" | sed -n 's/.*"alt_deg":\([-0-9.]*\).*/\1/p')
@@ -349,6 +462,7 @@ apply_correction() {
     return 1
 }
 
+log "clock: device is $(date "+%H:%M:%S"), TZ_OFFSET_SEC=$TZ_OFFSET_SEC -> UTC $(utc_now)"
 log "autosolve watching (dry_run=$DRY_RUN focal=${FOCAL}mm gates: logodds>=$MIN_LOGODDS matches>=$MIN_MATCHES)"
 
 LAST_YAW=""; LAST_PITCH=""

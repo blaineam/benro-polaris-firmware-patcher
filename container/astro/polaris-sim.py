@@ -254,15 +254,38 @@ class Server(socketserver.ThreadingTCPServer):
 
 class StatusHandler(socketserver.BaseRequestHandler):
     """A tiny out-of-band channel so a test can ask where the mount REALLY
-    points — the equivalent of looking at the sky."""
+    points — the equivalent of looking at the sky.
+
+    Speaks minimal HTTP rather than dumping raw JSON on connect, so ordinary
+    clients can read it: curl, and polaris-mount's `fetch` (which is how the
+    on-device daemon renders the sim's view of the sky). Raw-JSON-on-connect
+    looked fine against a hand-rolled reader and failed against both.
+    """
     def handle(self):
-        self.request.sendall((json.dumps(self.server.mount.status()) + "\n").encode())
+        try:
+            self.request.settimeout(2.0)
+            try:
+                self.request.recv(4096)          # discard the request line
+            except Exception:
+                pass
+            body = json.dumps(self.server.mount.status()) + "\n"
+            self.request.sendall(
+                ("HTTP/1.1 200 OK\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Content-Length: %d\r\n"
+                 "Access-Control-Allow-Origin: *\r\n"
+                 "Connection: close\r\n\r\n" % len(body)).encode() + body.encode())
+        except Exception:
+            pass
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=9090)
     ap.add_argument("--status-port", type=int, default=9091)
+    # Loopback by default. Bind wider only to drive the sim from another
+    # machine (e.g. the real daemon running on the Polaris).
+    ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--lat", type=float, default=40.0)
     ap.add_argument("--lon", type=float, default=-111.9)
     ap.add_argument("--az-error", type=float, default=37.5,
@@ -288,12 +311,12 @@ def main():
             time.sleep(0.05)
     threading.Thread(target=ticker, daemon=True).start()
 
-    srv = Server(("127.0.0.1", a.port), Handler)
+    srv = Server((a.bind, a.port), Handler)
     srv.mount = mount; srv.log = a.log; srv.stopping = False
-    st = Server(("127.0.0.1", a.status_port), StatusHandler)
+    st = Server((a.bind, a.status_port), StatusHandler)
     st.mount = mount; st.log = False; st.stopping = False
     threading.Thread(target=st.serve_forever, daemon=True).start()
-    print(f"[sim] Polaris on 127.0.0.1:{a.port} (status {a.status_port}); "
+    print(f"[sim] Polaris on {a.bind}:{a.port} (status {a.status_port}); "
           f"az_error={a.az_error} lat={a.lat} lon={a.lon}", flush=True)
     try:
         srv.serve_forever()
