@@ -197,6 +197,46 @@ pick_downsample() {
     fi
 }
 
+# Keep frames we could not solve. A failed solve currently leaves NOTHING to
+# look at -- the frame is discarded and the log keeps 200 characters of solver
+# output -- so a repeatable failure (e.g. "it never solves facing west") cannot
+# be diagnosed after the fact, only guessed at. Guessing is what produced this
+# comment.
+#
+# Retains the last KEEP_FAILED (default 20) frames alongside the star count the
+# extractor found, which is the number that actually distinguishes "not enough
+# stars in the sky" from "plenty of stars, solver/hint problem".
+keep_failed_frame() {
+    _kf=$1
+    [ "${KEEP_FAILED:-20}" = "0" ] && return 0
+    [ -s "$_kf" ] || return 0
+    _kd=/app/sd/polaris-astro/failed
+    mkdir -p "$_kd" 2>/dev/null || return 0
+    _kt=$(date +%Y%m%d-%H%M%S)
+    cp "$_kf" "$_kd/$_kt.jpg" 2>/dev/null || return 0
+    # Star count at the SAME downsample and star cap the solve used -- this is
+    # the number that says whether the sky or the solver is the problem.
+    # polaris-extract writes the star list to STDOUT with its stats as leading
+    # "#" comments, so the count is the non-comment lines. (It does NOT write
+    # stats to stderr; capturing stderr here got nothing.)
+    "$ASTRO/polaris-extract" --jpeg "$_kf" --downsample "$(pick_downsample "$_kf")" \
+        --max-stars "${MAXSTARS:-200}" --stats > "$_kd/$_kt.stars" 2>/dev/null
+    _kn=$(grep -c -v '^#' "$_kd/$_kt.stars" 2>/dev/null)
+    _kh=$(grep '^#' "$_kd/$_kt.stars" 2>/dev/null | tr '\n' ' ')
+    log "kept failed frame: $_kd/$_kt.jpg"
+    log "  stars extracted: ${_kn:-0} (cap ${MAXSTARS:-200})"
+    log "  extractor: $_kh"
+    { printf 'stars=%s cap=%s\n' "${_kn:-0}" "${MAXSTARS:-200}"; printf '%s\n' "$_kh"; } \
+        > "$_kd/$_kt.txt" 2>/dev/null
+    # bound the directory so a bad night cannot fill the card
+    _kc=$(ls -t "$_kd"/*.jpg 2>/dev/null | wc -l)
+    if [ "$_kc" -gt "${KEEP_FAILED:-20}" ]; then
+        ls -t "$_kd"/*.jpg 2>/dev/null | tail -n +$((${KEEP_FAILED:-20}+1)) | while read -r _old; do
+            rm -f "$_old" "${_old%.jpg}.txt" "${_old%.jpg}.stars" 2>/dev/null
+        done
+    fi
+}
+
 solve_frame() {
     _f=$1; _hra=$2; _hdec=$3
     [ -s "$_f" ] || return 1
@@ -436,47 +476,42 @@ handle_arm() {
         return $?
     fi
 
-    # 1. LIVE VIEW first -- no shutter, and during the armed state the app will
-    #    not let the user take a full frame anyway.
-    _sol=$(solve_frame "$(grab_frame)" "$_hra" "$_hdec")
+    # LIVE VIEW is the ONLY frame source during calibration. No shutter is
+    # fired: the app blocks the user from a full frame in this state, and an
+    # externally-initiated capture is refused by the device and wedges the
+    # camera (see below).
+    _lvf=$(grab_frame)
+    _sol=$(solve_frame "$_lvf" "$_hra" "$_hdec")
     if good_solve "$_sol"; then
         log "live-view solve OK"
     else
-        # 2. fall back to a full capture, as specified.
+        # NO CAPTURE FALLBACK. Live view is the only frame source here.
         #
-        # DRY RUN MUST TOUCH NOTHING. Firing the shutter is an action on the
-        # user's camera, so it belongs behind the same guard as the alignment
-        # writes -- the first version fired it before the DRY_RUN check, which
-        # made "safe mode" command the camera anyway.
-        if [ "$DRY_RUN" = "1" ]; then
-            log "live-view solve failed -- DRY RUN, not firing a capture; stopping here"
-            return 1
-        fi
-        log "live-view solve failed -- falling back to a full capture"
-        _before=$(ls -t /app/sd/normal/*.jpg /app/sd/Lapse/class_*/*.jpg 2>/dev/null | head -1)
-        mount_send '1&272&2&step:1#'
-        mount_send '1&272&2&step:2;point:1;time:0;para:1,-1;bulb:0;#'
-        mount_send '1&272&2&step:3;point:1;time:0;photoCnt:1;#'
-        _i=0; _f=""
-        while [ $_i -lt 40 ]; do
-            sleep 1; _i=$((_i+1))
-            _f=$(ls -t /app/sd/normal/*.jpg /app/sd/Lapse/class_*/*.jpg 2>/dev/null | head -1)
-            [ -n "$_f" ] && [ "$_f" != "$_before" ] && break
-            _f=""
-        done
-        if [ -z "$_f" ]; then
-            log "no full frame either -- LEAVING THE DIALOG ALONE (user taps confirm)"
-            return 1
-        fi
-        sleep 2
-        log "full frame: $_f"
-        _sol=$(solve_frame "$_f" "$_hra" "$_hdec")
-        good_solve "$_sol" || {
-            log "full-frame solve failed too -- LEAVING THE DIALOG ALONE"
-            log "  solver said: $(echo "$_sol" | tail -c 200)"
-            return 1
-        }
-        log "full-frame solve OK"
+        # There WAS a fallback that fired the 272 step:1/2/3 lapse sequence when
+        # the live-view solve failed. It caused real damage on hardware: "shot
+        # failed" in the app, and then the camera would not capture again until
+        # it was power-cycled AND the USB replugged. Live view kept streaming
+        # the whole time, which is what made it look survivable.
+        #
+        # The cause is not subtle and I had already written it down in
+        # solve-now.sh before shipping this: astro mode does not accept an
+        # externally-initiated capture. Opcode 264 is ignored outright, and the
+        # 272 lapse sequence worked exactly once and was refused afterwards
+        # while tracking was running. A refused 272 still leaves a LAPSE TASK
+        # established on the device that nothing ever aborts -- that is the
+        # wedge, and why only a USB re-enumeration clears it.
+        #
+        # So there is nothing to fall back TO. Firing a capture during the
+        # calibration dialog cannot produce a frame and can only break the
+        # camera. If live view will not solve, we leave the dialog alone and the
+        # user taps confirm, exactly as when a solve fails for any other reason.
+        #
+        # If you want a full-frame solve, take the shot in the Benro app
+        # yourself and run: solve-now.sh --latest
+        log "live-view solve failed -- LEAVING THE DIALOG ALONE (user taps confirm)"
+        log "  solver said: $_sol"
+        keep_failed_frame "$_lvf"
+        return 1
     fi
 
     _ra=$(echo  "$_sol" | sed -n 's/.*"ra_deg":\([-0-9.]*\).*/\1/p')
