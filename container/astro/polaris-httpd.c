@@ -37,6 +37,8 @@
 #define JOB_LOG        "/tmp/polaris-job.log"
 #define JOB_STATUS     "/tmp/polaris-job.status"   /* idle|running|done|failed */
 #define JOB_RESULT     "/tmp/polaris-job.result"   /* solver JSON */
+#define JOB_PID        "/tmp/polaris-job.pid"      /* pid of the running job */
+#define JOB_START      "/tmp/polaris-job.start"    /* unix time it began */
 #define ASTRO_DIR      "/app/astro"
 
 static const char *g_astro = ASTRO_DIR;
@@ -278,27 +280,53 @@ static int mount_pose(double *alt, double *az, char *raw, size_t rawcap) {
  * Modes 1/2 exist because astro mode refuses externally-initiated captures --
  * opcode 264 is ignored and the 272 lapse sequence is refused while tracking.
  * In astro mode the user triggers the shot in the Benro app and we follow. */
-static void start_solve(int apply, int mode) {
+static int start_solve(int apply, int mode) {
     pid_t pid;
     char status[32];
     read_file(JOB_STATUS, status, sizeof status);
-    if (strncmp(status, "running", 7) == 0) return;   /* already busy */
+    if (strncmp(status, "running", 7) == 0) {
+        /* RUNNING, or ONLY LOOKS LIKE IT. A job that died without setting a
+         * final status used to hold this lock forever, and every later solve
+         * was refused silently -- the page just did nothing, which reads as
+         * "the solver is broken". Trust the pid, not the string. */
+        char pb[32]; long jp = 0;
+        read_file(JOB_PID, pb, sizeof pb);
+        jp = atol(pb);
+        if (jp > 0 && kill((pid_t)jp, 0) == 0) return 0;  /* genuinely running */
+        set_status("failed");                              /* stale -- clear it */
+        unlink(JOB_PID);
+    }
 
     set_status("running");
     unlink(JOB_RESULT);
+    { FILE *f = fopen(JOB_START, "w"); if (f) { fprintf(f, "%ld\n", (long)time(NULL)); fclose(f); } }
 
     pid = fork();
-    if (pid < 0) { set_status("failed"); return; }
-    if (pid > 0) { int st; waitpid(pid, &st, 0); return; }   /* reap the middle child */
+    if (pid < 0) { set_status("failed"); return -1; }
+    if (pid > 0) { int st; waitpid(pid, &st, 0); return 1; } /* reap the middle child */
 
     /* ---- middle child: fork again so the job is orphaned to init ---- */
     if (fork() > 0) _exit(0);
 
     /* ---- grandchild: the actual job ---- */
     setsid();
+    { FILE *f = fopen(JOB_PID, "w"); if (f) { fprintf(f, "%ld\n", (long)getpid()); fclose(f); } }
     {
         char cmd[1024];
-        int fd = open(JOB_LOG, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        int fd, i;
+        /* CLOSE THE CLIENT SOCKET WE INHERITED.
+         *
+         * fork() hands the job a copy of the accepted connection, so the HTTP
+         * response is written and the parent closes its end -- but the socket
+         * stays open in the job, the client never sees EOF, and the request
+         * hangs for as long as the job runs. With a --wait job that is five
+         * minutes of a browser tab spinning on a request that was actually
+         * answered immediately. Close everything above stderr and give the job
+         * its own stdin. */
+        for (i = 3; i < 64; i++) close(i);
+        fd = open("/dev/null", O_RDONLY);
+        if (fd >= 0) { dup2(fd, 0); if (fd != 0) close(fd); }
+        fd = open(JOB_LOG, O_WRONLY|O_CREAT|O_TRUNC, 0644);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
         const char *mflag = (mode == 1) ? "--latest" : (mode == 2 ? "--wait" : "");
         /* --focal auto: let polaris-align.sh resolve it (manual override file,
@@ -311,6 +339,7 @@ static void start_solve(int apply, int mode) {
                  apply ? "--apply" : "", JOB_RESULT, JOB_LOG);
         int rc = system(cmd);
         set_status(rc == 0 ? "done" : "failed");
+        unlink(JOB_PID);
         _exit(0);
     }
 }
@@ -1332,6 +1361,8 @@ static const char PAGE[] =
 "<button id=b1 onclick=go(0,'latest')>Solve Latest Frame</button>"
 "<button id=b2 onclick=go(0,'wait')>Wait for Next Shot</button>"
 "<button id=b3 class=alt onclick=go(1,'latest')>Solve Latest &amp; Apply</button>"
+"<button id=b4 class=alt onclick=cancel()>Cancel</button>"
+"<div id=msg style='color:var(--dim);font-size:12.5px;margin-top:8px'></div>"
 "<div style='color:var(--dim);font-size:12.5px;margin-top:8px'>In astro mode the app "
 "owns the shutter &mdash; trigger the shot in the Benro app, then solve it here.</div>"
 "<div class=row style='margin-top:10px'><span>status</span>"
@@ -1362,11 +1393,24 @@ static const char PAGE[] =
 "return s+D+'\\u00b0 '+M+'\\u2032 '+S.toFixed(1)+'\\u2033'}\n"
 "function row(k,v){return '<div class=row><span>'+k+'</span><span>'+v+'</span></div>'}\n"
 "function go(a,m){['b1','b2','b3'].forEach(i=>document.getElementById(i).disabled=true);\n"
-"  fetch('/api/solve?mode='+m+(a?'&apply=1':''),{method:'POST'}).then(tick)}\n"
+"  fetch('/api/solve?mode='+m+(a?'&apply=1':''),{method:'POST'})\n"
+"   .then(r=>r.json()).then(d=>{\n"
+"     if(d.started===false)document.getElementById('msg').textContent=\n"
+"       (d.reason||'did not start')+' ('+(d.elapsed_sec||0)+'s so far) \u2014 press Cancel to stop it';\n"
+"     else document.getElementById('msg').textContent='';\n"
+"     tick()})}\n"
+"function cancel(){fetch('/api/cancel',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
+"  document.getElementById('msg').textContent=d.cancelled?'cancelled':(d.reason||'nothing to cancel');\n"
+"  tick()})}\n"
 "function tick(){fetch('/api/state').then(r=>r.json()).then(s=>{\n"
-"  var st=document.getElementById('st');st.textContent=s.status;st.className='s '+s.status;\n"
+"  var st=document.getElementById('st');\n"
+"  st.textContent=s.status+((s.status==='running'&&s.elapsed_sec)?' '+s.elapsed_sec+'s':'');\n"
+"  st.className='s '+s.status;\n"
+"  if(s.status==='running'&&s.elapsed_sec>20)document.getElementById('msg').textContent=\n"
+"    'searching a range of focal lengths \u2014 this takes up to ~4 min; set a focal length below to make it fast';\n"
 "  var busy=s.status==='running';rate(busy);\n"
 "  ['b1','b2','b3'].forEach(i=>document.getElementById(i).disabled=busy);\n"
+"  document.getElementById('b4').disabled=!busy;\n"
 "  var o=s.solution;\n"
 "  document.getElementById('sol').innerHTML = (o&&o.solved)\n"
 "    ? row('RA',hms(o.ra_deg))+row('Dec',dms(o.dec_deg))+row('roll',f(o.roll_deg,2)+'\\u00b0')\n"
@@ -1459,6 +1503,7 @@ static void handle(int fd) {
         char status[32], log[4096], logesc[8192], result[4096], raw[1024], out[16384];
         double alt = 0, az = 0;
         int aligned = 0, tracking = 0, want_mount = 0, mount_blocked = 0;
+        long elapsed = 0;
         read_file(JOB_STATUS, status, sizeof status);
         if (!status[0]) snprintf(status, sizeof status, "idle");
         { char *e = status + strlen(status);
@@ -1507,11 +1552,13 @@ static void handle(int fd) {
             if (strstr(raw, "\"aligned\":true")) aligned = 1;
             else if (strstr(raw, "\"aligned\":false")) aligned = 0;
         }
+        { char sb[32]; long st0; read_file(JOB_START, sb, sizeof sb); st0 = atol(sb);
+          elapsed = (st0 > 0 && !strcmp(status, "running")) ? (long)time(NULL) - st0 : 0; }
         snprintf(out, sizeof out,
-            "{\"status\":\"%s\",\"mount_read\":%s,\"mount_blocked\":%s,"
+            "{\"status\":\"%s\",\"elapsed_sec\":%ld,\"mount_read\":%s,\"mount_blocked\":%s,"
             "\"alt\":%.4f,\"az\":%.4f,"
             "\"aligned\":%s,\"tracking\":%s,\"solution\":%s,\"log\":\"%s\"}",
-            status, want_mount?"true":"false", mount_blocked?"true":"false", alt, az,
+            status, elapsed, want_mount?"true":"false", mount_blocked?"true":"false", alt, az,
             aligned?"true":"false", tracking?"true":"false", result, logesc);
         respond_json(fd, out);
         return;
@@ -1524,6 +1571,28 @@ static void handle(int fd) {
      * electrical contacts and reports NO focal length, and a body will stamp a
      * stale value into EXIF for one. A typed-in number is better information
      * than anything we can infer, so it outranks EXIF. "auto" deletes it. */
+    /* Cancel a running solve. A range search runs for minutes and there was no
+     * way to stop it except waiting -- during which every other solve request
+     * was refused. */
+    if (!strcmp(path, "/api/cancel")) {
+        char pb[32]; long jp = 0; int killed = 0;
+        read_file(JOB_PID, pb, sizeof pb);
+        jp = atol(pb);
+        if (jp > 0 && kill((pid_t)jp, 0) == 0) {
+            /* the job is a session leader (setsid), so signal the whole group
+             * -- killing only the shell would leave polaris-solve running and
+             * still holding the cpu. */
+            kill((pid_t)-jp, SIGTERM);
+            kill((pid_t)jp, SIGTERM);
+            killed = 1;
+        }
+        set_status("failed");
+        unlink(JOB_PID);
+        respond_json(fd, killed ? "{\"cancelled\":true}"
+                                : "{\"cancelled\":false,\"reason\":\"nothing running\"}");
+        return;
+    }
+
     if (!strcmp(path, "/api/focal")) {
         char ovr[64] = "", cache[64] = "", out[512];
         if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
@@ -1569,7 +1638,21 @@ static void handle(int fd) {
             if (!strcmp(m, "latest")) mode = 1;
             else if (!strcmp(m, "wait")) mode = 2;
         }
-        start_solve(apply, mode);
+        if (start_solve(apply, mode) == 0) {
+            /* Do not lie by omission. This used to answer started:true whether
+             * or not anything started, so a solve requested while a long one
+             * was still running looked like a solve that failed. A range
+             * search takes ~148 s, so that window is minutes wide. */
+            char busy[192], sb[32]; long st0 = 0, el = 0;
+            read_file(JOB_START, sb, sizeof sb);
+            st0 = atol(sb);
+            if (st0 > 0) el = (long)time(NULL) - st0;
+            snprintf(busy, sizeof busy,
+                     "{\"started\":false,\"reason\":\"a solve is already running\","
+                     "\"elapsed_sec\":%ld}", el);
+            respond_json(fd, busy);
+            return;
+        }
         respond_json(fd, "{\"started\":true}");
         return;
     }

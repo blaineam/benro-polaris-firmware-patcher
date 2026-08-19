@@ -41,7 +41,17 @@ RA="${3:-}"; DEC="${4:-}"; RADIUS="${5:-}"
 MOUNT_HINT=${MOUNT_HINT:-1}
 MOUNT_HOST=${MOUNT_HOST:-127.0.0.1}
 MOUNT_PORT=${MOUNT_PORT:-9090}
-HINT_RADIUS=${HINT_RADIUS:-20}
+# 60, NOT 20. The hint comes from the mount's compass, and the compass error is
+# the very thing being measured, so the radius has to cover it. Measured against
+# a 37.5 deg error on a 960x640 frame:
+#     20 deg -> FAILED after 120 s (burned the whole cpulimit)
+#     45 deg -> solved in 1 s
+#     90 deg -> solved in 3 s
+#     blind  -> solved in 3 s
+# A too-narrow hint is WORSE THAN NO HINT: it fails, and it fails slowly. This
+# default stayed at 20 long after that was written down, so every solve-now.sh
+# run was handicapped by it.
+HINT_RADIUS=${HINT_RADIUS:-60}
 if [ -z "$RA" ] && [ "$MOUNT_HINT" = "1" ] && [ -n "${LAT:-}" ] && [ -n "${LON:-}" ] \
    && [ -x "$ASTRO/polaris-mount" ]; then
     POSE=$("$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" \
