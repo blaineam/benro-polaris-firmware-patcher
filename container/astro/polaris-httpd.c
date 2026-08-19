@@ -561,7 +561,10 @@ static const char PAGE[] =
 "<div class=row style='margin-top:10px'><span>status</span>"
 "<span><span id=st class='s idle'>idle</span></span></div></div>"
 "<div class=card><h2>Last solution</h2><div id=sol></div></div>"
-"<div class=card><h2>Mount</h2><div id=mnt></div></div>"
+"<div class=card><h2>Mount</h2><div id=mnt></div>"
+"<button class=alt style='margin-top:8px;padding:7px 12px;font-size:13px' onclick=mnow()>Read Mount</button>"
+"<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Read on demand only &mdash; polling the mount "
+"makes the Benro app re-prompt for compass calibration.</div></div>"
 "<div class=card><h2>Log</h2><pre id=log>&hellip;</pre></div>"
 "<script>\n"
 "function f(n,d){return (n===undefined||n===null||isNaN(n))?'--':Number(n).toFixed(d)}\n"
@@ -584,8 +587,9 @@ static const char PAGE[] =
 "      +row('field',f(o.field_w_deg,2)+'\\u00b0 \\u00d7 '+f(o.field_h_deg,2)+'\\u00b0')\n"
 "      +row('matches',o.nmatch+' of '+o.nfield)+row('solve time',f(o.solve_seconds,2)+' s')\n"
 "    : '<div class=row><span>no solution yet</span><span></span></div>';\n"
-"  document.getElementById('mnt').innerHTML=row('alt',f(s.alt,3)+'\\u00b0')+row('az',f(s.az,3)+'\\u00b0')\n"
-"    +row('aligned',s.aligned?'yes':'no')+row('tracking',s.tracking?'yes':'no');\n"
+"  if(s.mount_read){document.getElementById('mnt').innerHTML=\n"
+"    row('alt',f(s.alt,3)+'\\u00b0')+row('az',f(s.az,3)+'\\u00b0')\n"
+"    +row('aligned',s.aligned?'yes':'no')+row('tracking',s.tracking?'yes':'no')}\n"
 "  document.getElementById('log').textContent=s.log||'(empty)';\n"
 "})}\n"
 "tick();var iv=setInterval(tick,4000);\n// poll fast only while a job is actually running\nfunction rate(busy){clearInterval(iv);iv=setInterval(tick,busy?1500:4000)}\n\n"
@@ -652,7 +656,7 @@ static void handle(int fd) {
     if (!strcmp(path, "/api/state")) {
         char status[32], log[4096], logesc[8192], result[4096], raw[1024], out[16384];
         double alt = 0, az = 0;
-        int aligned = 0, tracking = 0;
+        int aligned = 0, tracking = 0, want_mount = 0;
         read_file(JOB_STATUS, status, sizeof status);
         if (!status[0]) snprintf(status, sizeof status, "idle");
         { char *e = status + strlen(status);
@@ -662,16 +666,33 @@ static void handle(int fd) {
         read_file(JOB_RESULT, result, sizeof result);
         { char *e = strchr(result, '\n'); if (e) *e = 0; }
         if (!strstr(result, "\"solved\"")) snprintf(result, sizeof result, "null");
-        if (mount_pose(&alt, &az, raw, sizeof raw)) {
+
+        /* DO NOT poll the mount on a timer.
+         *
+         * Every polaris-mount call opens a fresh TCP connection to the control
+         * port; the device treats each one as an app connecting
+         * (SP_EVENT_APP_CONNECT) and answers with a state push. With the page
+         * polling on an interval that nagged the Benro app into repeatedly
+         * prompting for compass calibration -- confirmed by isolation: httpd
+         * idle produced 0 connections in 15 s, four /api/state polls produced
+         * exactly four. Caching only reduced the rate; the fix is to not do it
+         * unless the user actually asks.
+         *
+         * Mount fields are populated ONLY for /api/state?mount=1, which the
+         * page issues from an explicit Refresh button. */
+        { char mq[8];
+          if (param(qs, "mount", mq, sizeof mq) && mq[0] == '1')
+              want_mount = 1; }
+        if (want_mount && mount_pose(&alt, &az, raw, sizeof raw)) {
             aligned  = strstr(raw, "\"aligned\":true") != NULL;
             { const char *t = strstr(raw, "\"track\":");
               tracking = t && atoi(t + 8) != 0; }
         }
         snprintf(out, sizeof out,
-            "{\"status\":\"%s\",\"alt\":%.4f,\"az\":%.4f,\"aligned\":%s,\"tracking\":%s,"
-            "\"solution\":%s,\"log\":\"%s\"}",
-            status, alt, az, aligned?"true":"false", tracking?"true":"false",
-            result, logesc);
+            "{\"status\":\"%s\",\"mount_read\":%s,\"alt\":%.4f,\"az\":%.4f,"
+            "\"aligned\":%s,\"tracking\":%s,\"solution\":%s,\"log\":\"%s\"}",
+            status, want_mount?"true":"false", alt, az,
+            aligned?"true":"false", tracking?"true":"false", result, logesc);
         respond_json(fd, out);
         return;
     }

@@ -81,9 +81,13 @@ solve_frame() {
     _f=$1; _hra=$2; _hdec=$3
     [ -s "$_f" ] || return 1
     _ds=$(pick_downsample "$_f")
+    # polaris-align.sh takes the hint POSITIONALLY: <img> <focal> <ra> <dec> <radius>.
+    # HINT_RA/HINT_DEC env vars are NOT read -- setting those silently solved
+    # blind, and blind is ~50x slower at this focal length (361.7s vs 7.3s
+    # measured on this device), which would hang the calibration dialog.
     if [ -n "$_hra" ]; then
-        DOWNSAMPLE="$_ds" FOCAL_MM="$FOCAL" HINT_RA="$_hra" HINT_DEC="$_hdec" \
-            sh "$ASTRO/polaris-align.sh" "$_f" "$FOCAL" 2>>"$LOG"
+        DOWNSAMPLE="$_ds" FOCAL_MM="$FOCAL" \
+            sh "$ASTRO/polaris-align.sh" "$_f" "$FOCAL" "$_hra" "$_hdec" "${HINT_RADIUS:-20}" 2>>"$LOG"
     else
         DOWNSAMPLE="$_ds" FOCAL_MM="$FOCAL" MOUNT_HINT=0 \
             sh "$ASTRO/polaris-align.sh" "$_f" "$FOCAL" 2>>"$LOG"

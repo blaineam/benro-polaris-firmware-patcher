@@ -110,6 +110,7 @@ SITE=/app/sd/polaris-astro/site.conf
         echo "starting autosolve (dry_run=${AUTOSOLVE_DRY_RUN:-1})"
         LAT="$LAT" LON="$LON" FOCAL_MM="$FOCAL" \
         DRY_RUN="${AUTOSOLVE_DRY_RUN:-1}" \
+        STUB_FRAME="${STUB_FRAME:-}" STUB_UTC="${STUB_UTC:-}" \
         MIN_LOGODDS="${MIN_LOGODDS:-100}" MIN_MATCHES="${MIN_MATCHES:-12}" \
         setsid sh "$ASTRO/polaris-autosolve.sh" </dev/null >/tmp/autosolve.out 2>&1 &
     fi
