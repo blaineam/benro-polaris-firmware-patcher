@@ -73,23 +73,34 @@ Put the card back in the Polaris and run once:
 
     /app/sd/polaris-astro/install_astro.sh
 
-(That copies the three binaries to /app/astro. The index files are read
-straight off the card at /app/sd/astrometry — they are never copied into
-flash.) Over ssh instead of sneakernet, the same layout works:
+That copies the binaries and scripts to /app/astro, creates a site.conf if you
+have none, and installs the boot hook so everything starts by itself. If a boot
+hook is already there (the patcher's --ssh-key option uses the same file) it is
+preserved and chained, so ssh keeps working. Undo it all with
+/app/sd/polaris-astro/uninstall_astro.sh.
+
+The index files are read straight off the card at /app/sd/astrometry and are
+never copied into flash.
+
+Over ssh instead of sneakernet, the same layout works:
 
     scp -r COPY-TO-SD-CARD-ROOT/. root@<polaris ip>:/app/sd/
     ssh root@<polaris ip> /app/sd/polaris-astro/install_astro.sh
+
+THEN EDIT /app/sd/polaris-astro/site.conf -- LAT and LON are required and
+cannot be guessed. Reboot, and open http://<polaris ip>:8090/.
 
 Test it on a real frame
 -----------------------
 Shoot with the Polaris as usual. Frames land in /app/sd/DCIM/100SPCAM/.
 
-  /app/astro/polaris-align.sh /app/sd/DCIM/100SPCAM/IMG_0001.JPG 400
+  /app/astro/polaris-align.sh /app/sd/normal/SP_0001.jpg
 
-Pass the mount's rough pointing when you have it — on a long lens it is worth
-about 10x:
+The focal length comes from the frame's EXIF, so there is nothing to pass for a
+normal lens. Override it for a telescope or manual lens, which report none —
+either in the web UI, or as the second argument:
 
-  /app/astro/polaris-align.sh /app/sd/DCIM/100SPCAM/IMG_0001.JPG 400 <ra_deg> <dec_deg> 20
+  /app/astro/polaris-align.sh /app/sd/normal/SP_0001.jpg 400
 
 Output is one JSON line: ra_deg, dec_deg, roll_deg, pixscale_arcsec, field size,
 parity, the CD matrix, match odds and how long the solve took.

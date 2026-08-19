@@ -31,6 +31,15 @@ SITE=/app/sd/polaris-astro/site.conf
 {
     echo "$(date) polaris-astro boot hook"
 
+    # CHAIN ANY HOOK THAT WAS HERE FIRST. /app/network_telnetd.sh is a single
+    # slot and the patcher's ssh option uses the same file, so install_astro.sh
+    # moves an existing one aside rather than deleting it. Run it before we do
+    # anything, so ssh comes up even if everything below fails.
+    if [ -x /app/network_telnetd.pre-astro.sh ]; then
+        echo "running pre-existing hook /app/network_telnetd.pre-astro.sh"
+        /app/network_telnetd.pre-astro.sh || echo "  (it returned $?)"
+    fi
+
     # Wait for the microSD to actually mount. Bounded, so a missing card cannot
     # stall boot forever, but long enough that a slow card still works.
     i=0
