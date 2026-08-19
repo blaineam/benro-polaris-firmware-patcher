@@ -86,3 +86,11 @@ CAPTURE_ALIGN_FLOW=0
 # point. Either one forces dry-run unless DRY_RUN is set explicitly.
 #STUB_FRAME=/app/sd/astro-bench/259A8092.JPG
 #STUB_UTC=2026-01-15T05:30:00
+
+# Master switch. 0 starts nothing except the wifi watchdog -- a clean baseline
+# for telling a device-level fault apart from anything this project does.
+POLARIS_ASTRO=1
+
+# Record AP/hostapd/interface state to /app/sd/wifi-watch.log. Local reads
+# only; opens no sockets. Useful for faults that kill your ssh session too.
+WIFI_WATCH=1

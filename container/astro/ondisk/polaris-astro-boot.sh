@@ -44,6 +44,33 @@ SITE=/app/sd/polaris-astro/site.conf
         echo "no $SITE after ${i} tries -- microSD not mounted?"
     fi
 
+    # WIFI WATCHDOG -- always, and first.
+    #
+    # The AP disappears when the phone disconnects and only a power cycle
+    # brings it back. That cannot be observed over ssh, because ssh dies with
+    # the AP, so this records local state to the microSD where it survives both
+    # the fault and the power cycle. It opens no sockets and connects to
+    # nothing, so it cannot be causing what it measures. WIFI_WATCH=0 to skip.
+    if [ "${WIFI_WATCH:-1}" = "1" ] && [ -x /app/sd/polaris-astro/wifi-watch.sh ]; then
+        mkdir -p "$ASTRO"
+        cp /app/sd/polaris-astro/wifi-watch.sh "$ASTRO"/ 2>/dev/null
+        chmod 755 "$ASTRO/wifi-watch.sh" 2>/dev/null
+        if ! ps 2>/dev/null | grep -q "[w]ifi-watch"; then
+            echo "starting wifi-watch"
+            setsid "$ASTRO/wifi-watch.sh" </dev/null >/dev/null 2>&1 &
+        fi
+    fi
+
+    # MASTER SWITCH. POLARIS_ASTRO=0 in site.conf starts nothing below this
+    # point -- no web server, no autosolve, no guider -- which gives a clean
+    # baseline for deciding whether a device-level fault has anything to do
+    # with this project at all. The watchdog above still runs, so the baseline
+    # is still recorded.
+    if [ "${POLARIS_ASTRO:-1}" != "1" ]; then
+        echo "POLARIS_ASTRO=0 -- starting nothing else (baseline mode)"
+        exit 0
+    fi
+
     i=0
     while [ $i -lt 30 ] && [ ! -x "$ASTRO/polaris-httpd" ]; do
         if [ -x /app/sd/polaris-astro/polaris-httpd ]; then
