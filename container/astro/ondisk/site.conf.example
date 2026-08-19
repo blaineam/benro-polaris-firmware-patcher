@@ -33,6 +33,11 @@ CENTRE_TOL_DEG=0.15
 # zenith and the error is amplified by 1/cos(alt).
 MAX_ALIGN_ALT=65
 
+# Seconds to wait before attempting another alignment. The app re-sends its
+# 519/530 while the dialog is open, and without this the daemon re-arms on every
+# repeat and slews the mount each time.
+ARM_COOLDOWN=120
+
 # ---- auto-guiding ----------------------------------------------------------
 GUIDE=0
 GUIDE_DRY_RUN=1

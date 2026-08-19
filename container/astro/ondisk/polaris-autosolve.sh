@@ -548,6 +548,7 @@ log "clock: device is $(date "+%H:%M:%S"), TZ_OFFSET_SEC=$TZ_OFFSET_SEC -> UTC $
 log "autosolve watching (dry_run=$DRY_RUN focal=${FOCAL}mm gates: logodds>=$MIN_LOGODDS matches>=$MIN_MATCHES)"
 
 LAST_YAW=""; LAST_PITCH=""
+LAST_ARM_T=0; LAST_ARM_YAW=""; LAST_ARM_PITCH=""
 "$ASTRO/polaris-logwatch" --match "code:519" --match "code:530" --match "code:782" \
   | while read -r line; do
     case "$line" in
@@ -560,10 +561,30 @@ LAST_YAW=""; LAST_PITCH=""
         [ -n "$LAST_YAW" ] && log "target from 519: yaw=$LAST_YAW pitch=$LAST_PITCH"
         ;;
       *"code:530"*"step:1"*)
-        if [ -n "$LAST_YAW" ]; then
-            handle_arm "$LAST_YAW" "$LAST_PITCH"
-        else
+        # RATE-LIMIT. The app re-sends 519/530 while its dialog is open, so
+        # without this the daemon re-arms on every repeat -- observed looping
+        # indefinitely, slewing the mount on each pass. An armed daemon doing
+        # that all night is far worse than one that gives up.
+        #
+        # After an attempt we refuse to start another for ARM_COOLDOWN seconds,
+        # and we ignore a repeat of the SAME target entirely: if it did not work
+        # the first time, doing it again unchanged will not help.
+        _now=$(date +%s)
+        _since=$(( _now - ${LAST_ARM_T:-0} ))
+        if [ "$_since" -lt "${ARM_COOLDOWN:-120}" ]; then
+            if [ "$LAST_YAW" = "${LAST_ARM_YAW:-}" ] && [ "$LAST_PITCH" = "${LAST_ARM_PITCH:-}" ]; then
+                : # same target, still cooling down -- silently ignore the repeat
+            else
+                log "new target while cooling down (${_since}s of ${ARM_COOLDOWN:-120}s) -- ignoring"
+            fi
+        elif [ -z "$LAST_YAW" ]; then
             log "530 step:1 seen but no preceding 519 -- cannot know the target; ignoring"
+        else
+            LAST_ARM_T=$_now
+            LAST_ARM_YAW=$LAST_YAW
+            LAST_ARM_PITCH=$LAST_PITCH
+            handle_arm "$LAST_YAW" "$LAST_PITCH"
+            log "cooling down for ${ARM_COOLDOWN:-120}s before another attempt"
         fi
         ;;
     esac
