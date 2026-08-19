@@ -166,13 +166,30 @@ python3 tests/alpaca_conformance.py http://<polaris ip>:8090
 | Drift measurement | 0–0.4% error over 20″–9000″ |
 | Guiding loop, real motor commands | drift held <61″ vs 408″ unguided |
 
+### Verified with the REAL app, simulated sky
+
+A genuine calibration — real `519` goto, real `530 step:1` — against a sky
+rendered at the app's own target offset by a known amount:
+
+| | target az | rendered az | solved az | recovered |
+|---|---|---|---|---|
+| clock uncorrected | 224.781 | 229.781 | 229.787 | 5.006° |
+| clock corrected | 183.331 | 188.331 | 188.343 | 5.012° |
+
+Both recover an injected 5.000° to within 43 arcsec, well inside the 0.15°
+centring tolerance. The device's absolute time was separately cross-checked
+against an independent implementation: the residual is 8–23 arcmin, which is
+precession from J2000 to the current epoch (26.6 yr x 50.3"/yr ~ 22 arcmin), not
+error. A clock fault would show as ~105° of RA, not fractions of a degree.
+
 ### NOT verified
 
 - **Real stars.** Everything above used rendered fields or daylight frames. The
   geometry is proven at live-view resolution; whether your sky gives enough
   signal in a short live-view frame is not something this repo can answer.
-- **The real `530 step:1` trigger.** The daemon's detection has only ever been
-  driven by log lines written by the test, not by an actual calibration.
+- **A confirmed alignment on real sky.** The armed path has been driven for real
+  in dry run; nothing has yet written a heading correction to a live mount
+  outside the simulator.
 - **Any camera other than the R5 Mark II**, and any firmware other than 4.0.0.32.
 
 ### Known limitations
