@@ -38,6 +38,8 @@
 #define JOB_STATUS     "/tmp/polaris-job.status"   /* idle|running|done|failed */
 #define JOB_RESULT     "/tmp/polaris-job.result"   /* solver JSON */
 #define JOB_PID        "/tmp/polaris-job.pid"      /* pid of the running job */
+#define KEEPWIFI_FLAG  "/app/sd/polaris-astro/keep-wifi-awake"
+#define KEEPWIFI_PID   "/tmp/wifi-keepalive.pid"
 #define JOB_START      "/tmp/polaris-job.start"    /* unix time it began */
 #define ASTRO_DIR      "/app/astro"
 
@@ -1383,6 +1385,15 @@ static const char PAGE[] =
 "<button class=alt style='margin-top:8px;padding:7px 12px;font-size:13px' onclick=mnow()>Read Mount</button>"
 "<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Read on demand only &mdash; polling the mount "
 "makes the Benro app re-prompt for compass calibration.</div></div>"
+"<div class=card><h2>Wi-Fi</h2><div id=kws style='margin-bottom:8px'></div>"
+"<button style='padding:9px 14px;font-size:14px' onclick=kw(1)>Keep Awake</button>"
+"<button class=alt style='padding:9px 14px;font-size:14px' onclick=kw(0)>Allow Sleep</button>"
+"<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>The Polaris powers its "
+"Wi-Fi down 60 s after the app disconnects &mdash; the network disappears and only a "
+"power cycle (or a Bluetooth wake from the app) brings it back. Keeping it awake holds "
+"one connection open so that timer never fires. It uses battery, and it waits until the "
+"mount is aligned before connecting, because connecting earlier makes the Benro app ask "
+"for a compass calibration.</div></div>"
 "<div class=card><h2>Log</h2><pre id=log>&hellip;</pre></div>"
 "<script>\n"
 "function f(n,d){return (n===undefined||n===null||isNaN(n))?'--':Number(n).toFixed(d)}\n"
@@ -1437,6 +1448,14 @@ static const char PAGE[] =
 "  fetch('/api/focal?focal='+encodeURIComponent(val),{method:'POST'})\n"
 "   .then(r=>r.json()).then(d=>{if(d.ok){if(v==='auto')document.getElementById('fin').value='';fshow(d)}\n"
 "     else e.textContent=d.error||'failed'})}\n"
+"function kwshow(d){var t;\n"
+"  if(d.enabled&&d.running)t=d.aligned?'<b>keeping Wi-Fi awake</b>':'<b>armed</b> \u2014 waiting for the mount to be aligned';\n"
+"  else if(d.enabled)t='<b>enabled</b> but the helper is not running';\n"
+"  else t='Wi-Fi will sleep 60 s after the app disconnects (firmware default)';\n"
+"  document.getElementById('kws').innerHTML=t}\n"
+"function kwload(){fetch('/api/keepwifi').then(r=>r.json()).then(kwshow)}\n"
+"function kw(v){fetch('/api/keepwifi?on='+v,{method:'POST'}).then(r=>r.json()).then(kwshow)}\n"
+"kwload();\n"
 "fload();\n"
 "tick();var iv=setInterval(tick,4000);\n// poll fast only while a job is actually running\nfunction rate(busy){clearInterval(iv);iv=setInterval(tick,busy?1500:4000)}\n\n"
 "</script></body></html>";
@@ -1593,6 +1612,71 @@ static void handle(int fd) {
         return;
     }
 
+    /* Keep the wifi radio awake.
+     *
+     * The firmware powers wifi down 60 s after the last client disconnects
+     * ("wifi auto off" in its own log) and unloads the driver, which takes the
+     * SSID, ssh and this page with it. There is no setting for that, so the
+     * workaround is to stay connected: one idle TCP connection to the control
+     * port keeps the client count above zero.
+     *
+     * OFF by default and deliberately so -- it costs battery, and the device
+     * counts our connection as an app connecting, which is what makes the Benro
+     * app demand a compass calibration while the mount is unaligned. The helper
+     * therefore waits for alignment before it connects. */
+    if (!strcmp(path, "/api/keepwifi")) {
+        char out[320]; int on = 0, running = 0;
+        if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
+            char v[16] = "";
+            if (!param(qs, "on", v, sizeof v) && body) param(body, "on", v, sizeof v);
+            if (v[0] == '1' || !strcmp(v, "true")) {
+                FILE *f = fopen(KEEPWIFI_FLAG, "w");
+                if (f) { fputs("1\n", f); fclose(f); }
+                /* Launch unconditionally; the script refuses to double-start
+                 * using a pidfile. Do NOT guard with `ps | grep` here: the
+                 * guard runs in a subshell whose own command line contains the
+                 * pattern, so it matches itself and never starts anything. */
+                { char cmd[320];
+                  snprintf(cmd, sizeof cmd,
+                     "setsid %s/wifi-keepalive.sh </dev/null >/dev/null 2>&1 &", g_astro);
+                  if (system(cmd) == -1) { /* reported via `running` below */ } }
+            } else {
+                char pb[32]; long kp;
+                unlink(KEEPWIFI_FLAG);
+                read_file(KEEPWIFI_PID, pb, sizeof pb);
+                kp = atol(pb);
+                if (kp > 0) {
+                    int w;
+                    /* it is a session leader, so signal the group -- killing
+                     * only the script would leave the nc holding the socket,
+                     * and the whole point is to release it */
+                    kill((pid_t)-kp, SIGTERM);
+                    kill((pid_t)kp, SIGTERM);
+                    /* VERIFY, do not assume. Reporting "off" while the helper
+                     * is still holding the connection is worse than useless --
+                     * the wifi would stay awake and the page would say it is
+                     * not. Escalate if TERM was not enough. */
+                    for (w = 0; w < 20 && kill((pid_t)kp, 0) == 0; w++) usleep(100000);
+                    if (kill((pid_t)kp, 0) == 0) {
+                        kill((pid_t)-kp, SIGKILL);
+                        kill((pid_t)kp, SIGKILL);
+                        for (w = 0; w < 10 && kill((pid_t)kp, 0) == 0; w++) usleep(100000);
+                    }
+                }
+                unlink(KEEPWIFI_PID);
+            }
+        }
+        { FILE *f = fopen(KEEPWIFI_FLAG, "r"); if (f) { on = 1; fclose(f); } }
+        { char pb[32]; long kp; read_file(KEEPWIFI_PID, pb, sizeof pb); kp = atol(pb);
+          running = (kp > 0 && kill((pid_t)kp, 0) == 0); }
+        snprintf(out, sizeof out,
+                 "{\"ok\":true,\"enabled\":%s,\"running\":%s,\"aligned\":%s}",
+                 on ? "true" : "false", running ? "true" : "false",
+                 may_read_mount() ? "true" : "false");
+        respond_json(fd, out);
+        return;
+    }
+
     if (!strcmp(path, "/api/focal")) {
         char ovr[64] = "", cache[64] = "", out[512];
         if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
@@ -1675,6 +1759,7 @@ static int make_discovery_socket(void) {
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);      /* children must not hold the listener */
     setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
@@ -1702,6 +1787,7 @@ static int make_listener(int port) {
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);      /* children must not hold the listener */
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -1772,10 +1858,17 @@ int main(int argc, char **argv) {
         }
         if (FD_ISSET(sfd, &rf)) {
             int c = accept(sfd, NULL, NULL);
+            /* CLOSE-ON-EXEC. Anything we launch with system() forks a shell
+             * that would otherwise inherit this socket, and a LONG-LIVED child
+             * (the wifi keepalive runs forever) then holds the client
+             * connection open so the HTTP response never completes and the
+             * browser hangs on a request that was already answered. */
+            if (c >= 0) fcntl(c, F_SETFD, FD_CLOEXEC);
             if (c >= 0) { handle(c); close(c); }
         }
         if (lxfd >= 0 && FD_ISSET(lxfd, &rf)) {
             int c = accept(lxfd, NULL, NULL);
+            if (c >= 0) fcntl(c, F_SETFD, FD_CLOEXEC);
             if (c >= 0) {
                 /* LX200 clients hold the socket open and poll once a second, so
                  * the session runs in a child; handling it inline would block

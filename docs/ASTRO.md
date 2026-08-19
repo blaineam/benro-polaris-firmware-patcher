@@ -210,6 +210,46 @@ alignment has completed.
 
 ---
 
+## The Wi-Fi turns itself off 60 seconds after the app disconnects
+
+This is stock firmware behaviour, not a fault in this project, and it surprises
+everyone who tries to use the Polaris headlessly. Captured from the device's own
+log at the moment it happens:
+
+```
+01:41:16  SP_ClientCtxDel: id[3], type[wifi]; WifiCount[0]   the app disconnected
+01:42:16  WifiBtTask[201]: wifi auto off                      exactly 60 s later
+01:42:16  SP_SetWifiState[0]
+01:42:17  remove@/bus/platform/drivers/bcmdhd_wlan            driver unloaded
+01:42:17  MsgFromWifiBt --> val[wifi:0; bt:1;]                wifi off, bluetooth on
+```
+
+Sixty seconds after the **last** Wi-Fi client disconnects, the firmware powers
+the radio down and unloads the driver, leaving Bluetooth as the wake path. The
+SSID disappears; ssh, this web page, Alpaca and LX200 all go with it. There is
+no setting for it — `/app/wifi/` holds only start/stop scripts, and the timer
+lives inside the `polaris_wifi_bt` binary.
+
+### Keep Awake
+
+The trigger is the client count reaching **zero**, so the workaround is to stay
+connected: the **Wi-Fi** card on the web page holds one idle TCP connection to
+the control port, and the timer never fires. The setting is stored on the
+microSD (`keep-wifi-awake`) and survives a reboot.
+
+It is **off by default**, for two honest reasons:
+
+- **It costs battery.** The radio stays powered for as long as it is on.
+- **The device counts our connection as an app connecting.** While the mount is
+  unaligned that is exactly what makes the Benro app demand a compass
+  calibration, so the helper *waits for alignment* before it connects. Until
+  then the page shows it as armed rather than active.
+
+Turning it off releases the connection immediately, and the normal 60 s timer
+applies again from the next disconnect.
+
+---
+
 ## ASCOM Alpaca
 
 Point Stellarium, NINA or SkySafari at `<polaris ip>:8090`, device 0.

@@ -166,6 +166,16 @@ SITE=/app/sd/polaris-astro/site.conf
             --match "code[530]" --match "code[531]" --match "code[519]" \
             --out /app/sd/align-flow.log </dev/null >/dev/null 2>&1 &
     fi
+    # Keep the wifi radio awake, if it was turned on from the web UI. The flag
+    # lives on the microSD so the choice survives a reboot. The helper itself
+    # waits for the mount to be aligned before it connects to anything.
+    if [ -f /app/sd/polaris-astro/keep-wifi-awake ] && [ -x "$ASTRO/wifi-keepalive.sh" ]; then
+        if ! ps 2>/dev/null | grep -q "[w]ifi-keepalive"; then
+            echo "starting wifi-keepalive (keep-wifi-awake is set)"
+            setsid "$ASTRO/wifi-keepalive.sh" </dev/null >/dev/null 2>&1 &
+        fi
+    fi
+
     # Auto-solve during the app's calibration. Set AUTOSOLVE=1 in site.conf.
     #
     # AUTOSOLVE_DRY_RUN defaults to 1 ON PURPOSE: armed, this writes a heading
