@@ -75,9 +75,76 @@ static void usage(const char* me) {
 "pixel coordinates regardless of --downsample.\n", me);
 }
 
+/* ------------------------------------------------------------------------
+ * EXIF focal length.
+ *
+ * WHY THIS IS HERE: the pixel scale the solver searches is derived from the
+ * focal length, and a wrong focal makes the solve IMPOSSIBLE rather than
+ * merely slow -- a 70 mm frame searched at 400 mm looks for 2.3 arcsec/pix
+ * when the truth is 13.4, so no quad can ever match. That is not theoretical:
+ * a whole night of frames failed to solve for exactly this reason, with a
+ * config that said 400 and a zoom lens sitting at 70.
+ *
+ * A config value cannot track a zoom lens. The frame itself knows, so ask it.
+ * We are already decoding this JPEG, so the marker costs one extra read.
+ *
+ * Deliberately minimal: IFD0 -> ExifIFD -> FocalLength (0x920A, RATIONAL).
+ * Every read is bounds-checked against the marker length; a malformed or
+ * absent tag simply yields 0 and the caller falls back.
+ * ---------------------------------------------------------------------- */
+static unsigned rd16(const unsigned char* p, int be)
+{ return be ? (unsigned)(p[0] << 8 | p[1]) : (unsigned)(p[1] << 8 | p[0]); }
+
+static unsigned rd32(const unsigned char* p, int be)
+{
+    return be ? ((unsigned)p[0] << 24 | (unsigned)p[1] << 16 | (unsigned)p[2] << 8 | p[3])
+              : ((unsigned)p[3] << 24 | (unsigned)p[2] << 16 | (unsigned)p[1] << 8 | p[0]);
+}
+
+/* returns focal length in mm, or 0 if not found */
+static double exif_focal_mm(const unsigned char* d, unsigned len)
+{
+    unsigned tiff, ifd, n, i, exififd = 0;
+    int be;
+    if (len < 14 || memcmp(d, "Exif\0\0", 6) != 0) return 0.0;
+    tiff = 6;
+    if (d[tiff] == 'M' && d[tiff + 1] == 'M') be = 1;
+    else if (d[tiff] == 'I' && d[tiff + 1] == 'I') be = 0;
+    else return 0.0;
+    if (tiff + 8 > len) return 0.0;
+    ifd = tiff + rd32(d + tiff + 4, be);
+
+    /* IFD0: we only want the pointer to the Exif sub-IFD */
+    if (ifd + 2 > len || ifd < tiff) return 0.0;
+    n = rd16(d + ifd, be);
+    for (i = 0; i < n; i++) {
+        unsigned e = ifd + 2 + i * 12;
+        if (e + 12 > len) break;
+        if (rd16(d + e, be) == 0x8769) { exififd = tiff + rd32(d + e + 8, be); break; }
+    }
+    if (!exififd || exififd + 2 > len || exififd < tiff) return 0.0;
+
+    n = rd16(d + exififd, be);
+    for (i = 0; i < n; i++) {
+        unsigned e = exififd + 2 + i * 12, off, num, den;
+        if (e + 12 > len) break;
+        if (rd16(d + e, be) != 0x920A) continue;      /* FocalLength */
+        if (rd16(d + e + 2, be) != 5) return 0.0;     /* must be RATIONAL */
+        off = tiff + rd32(d + e + 8, be);
+        if (off + 8 > len || off < tiff) return 0.0;
+        num = rd32(d + off, be);
+        den = rd32(d + off + 4, be);
+        if (!den) return 0.0;
+        return (double)num / (double)den;
+    }
+    return 0.0;
+}
+
 int main(int argc, char** argv) {
     const char* fn = NULL;
     int ds = 4, minpix = 3, maxpix = 500, maxstars = 300, margin = 16, stats = 0;
+    double focal_mm = 0.0;                 /* from EXIF; 0 = unknown */
+    char focalbuf[32];
     int y_bottom = 1;                 /* FITS convention by default */
     double ksigma = 5.0;
     int i;
@@ -124,7 +191,18 @@ int main(int argc, char** argv) {
     cinfo.err = jpeg_std_error(&jerr);
     jpeg_create_decompress(&cinfo);
     jpeg_stdio_src(&cinfo, f);
+    /* keep APP1 (EXIF) -- must be requested BEFORE read_header or it is dropped */
+    jpeg_save_markers(&cinfo, JPEG_APP0 + 1, 0xFFFF);
     jpeg_read_header(&cinfo, TRUE);
+    {
+        jpeg_saved_marker_ptr m;
+        for (m = cinfo.marker_list; m; m = m->next) {
+            if (m->marker == JPEG_APP0 + 1) {
+                focal_mm = exif_focal_mm(m->data, m->data_length);
+                if (focal_mm > 0) break;
+            }
+        }
+    }
     fullW = cinfo.image_width; fullH = cinfo.image_height;
     /* libjpeg gives us the reduced size almost free during the IDCT */
     cinfo.scale_num = 1; cinfo.scale_denom = ds;
@@ -269,15 +347,22 @@ int main(int argc, char** argv) {
     if (nstars > maxstars) nstars = maxstars;
 
     gettimeofday(&tv1, NULL);
+    if (focal_mm > 0) snprintf(focalbuf, sizeof focalbuf, "%.1fmm(exif)", focal_mm);
+    else              snprintf(focalbuf, sizeof focalbuf, "unknown");
     if (stats)
         fprintf(stderr,
                 "[extract] %dx%d decoded at 1/%d (full %dx%d), bg=%.1f noise=%.2f "
-                "thresh=%.1f stars=%d  %.3f s\n",
+                "thresh=%.1f stars=%d focal=%s  %.3f s\n",
                 W, H, ds, fullW, fullH, bg, noise, bg + ksigma * noise, nstars,
+                focalbuf,
                 (tv1.tv_sec - tv0.tv_sec) + (tv1.tv_usec - tv0.tv_usec) * 1e-6);
 
     printf("# polaris-extract: %s\n# full resolution %d x %d\n# y-origin: %s\n",
            fn, fullW, fullH, y_bottom ? "bottom (FITS)" : "top (image)");
+    /* The caller reads this to pick the pixel-scale search range. Absent for
+     * live-view frames, which carry no EXIF -- the caller falls back there. */
+    if (focal_mm > 0)
+        printf("# exif focal-mm %.4f\n", focal_mm);
     for (i = 0; i < nstars; i++) {
         double yy = y_bottom ? (fullH - 1 - stars[i].y) : stars[i].y;
         printf("%.3f %.3f %.1f\n", stars[i].x, yy, stars[i].flux);

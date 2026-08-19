@@ -77,9 +77,88 @@ W=$(sed -n 's/^# full resolution \([0-9]*\) x .*/\1/p' "$STARS")
 H=$(sed -n 's/^# full resolution [0-9]* x \([0-9]*\)/\1/p' "$STARS")
 [ -n "$W" ] && [ -n "$H" ] || { echo '{"solved":false,"error":"no image size"}'; exit 3; }
 
-set -- $IDXARGS --stars "$STARS" --width "$W" --height "$H" --cpulimit "$SOLVE_TIMEOUT"
-[ -n "$FOCAL" ] && set -- "$@" --focal-mm "$FOCAL" --sensor-mm "$SENSOR_MM"
-[ -n "$RA" ] && [ -n "$DEC" ] && [ -n "$RADIUS" ] && \
-    set -- "$@" --ra "$RA" --dec "$DEC" --radius "$RADIUS"
+# ---- pixel scale: EXIF first, then config, then a realistic lens range -----
+#
+# A WRONG FOCAL MAKES THE SOLVE IMPOSSIBLE, NOT SLOW. The scale search is
+# derived from it, so a 70 mm frame searched at 400 mm hunts 2.3 arcsec/pix
+# when the truth is 13.4 and no quad can ever match. An entire night of frames
+# failed this way -- config said 400, the zoom was at 70. Those same frames
+# solved in 5 s once the focal was right.
+#
+# So the frame's own EXIF wins over any configured value: a config number
+# cannot follow a zoom ring. If there is no EXIF (live-view frames carry none)
+# we use the configured focal, and if there is neither -- or the focal we tried
+# does not solve -- we search the whole range of focal lengths that could
+# plausibly be on this mount rather than guessing a single wrong one.
+EXIF_FOCAL=$(sed -n 's/^# exif focal-mm \([0-9][0-9.]*\).*/\1/p' "$STARS" | head -1)
+FOCAL_MIN=${FOCAL_MIN:-8}          # ultra-wide
+FOCAL_MAX=${FOCAL_MAX:-3000}       # long telephoto; nothing realistic exceeds this
 
-exec "$ASTRO/polaris-solve" "$@"
+# The range search is the SAFETY NET, not the fast path: measured 148 s on this
+# device versus 5 s with a known focal. It therefore gets its own, longer
+# budget -- with the caller's 45 s it would always time out and the net would
+# never actually catch anything.
+RANGE_TIMEOUT=${RANGE_TIMEOUT:-240}
+
+# LIVE-VIEW FRAMES CARRY NO EXIF, so without this every calibration solve would
+# take the 148 s path. The lens does not change between a capture and the live
+# view seconds later, so remember the last focal a real frame reported and use
+# it for frames that cannot say. If the lens HAS been changed since, that focal
+# simply fails to solve and we fall through to the range search anyway.
+FOCAL_CACHE=${FOCAL_CACHE:-/app/sd/polaris-astro/last-focal}
+if [ -n "$EXIF_FOCAL" ]; then
+    mkdir -p "$(dirname "$FOCAL_CACHE")" 2>/dev/null
+    printf '%s\n' "$EXIF_FOCAL" > "$FOCAL_CACHE" 2>/dev/null
+fi
+CACHED_FOCAL=""
+[ -z "$EXIF_FOCAL" ] && [ -r "$FOCAL_CACHE" ] && \
+    CACHED_FOCAL=$(sed -n 's/^\([0-9][0-9.]*\)$/\1/p' "$FOCAL_CACHE" | head -1)
+
+solve_with() {
+    _scale=$1
+    set -- $IDXARGS --stars "$STARS" --width "$W" --height "$H" --cpulimit "$SOLVE_TIMEOUT"
+    [ -n "$_scale" ] && set -- "$@" $_scale
+    [ -n "$RA" ] && [ -n "$DEC" ] && [ -n "$RADIUS" ] && \
+        set -- "$@" --ra "$RA" --dec "$DEC" --radius "$RADIUS"
+    "$ASTRO/polaris-solve" "$@"
+}
+
+# arcsec/pixel bounds implied by the focal range. Long lens -> small scale.
+range_args() {
+    awk -v s="$SENSOR_MM" -v w="$W" -v fmin="$FOCAL_MIN" -v fmax="$FOCAL_MAX" 'BEGIN{
+        pix = s / w;
+        lo  = 206264.806 * atan2(pix / fmax, 1) * 0.9;
+        hi  = 206264.806 * atan2(pix / fmin, 1) * 1.1;
+        printf "--scale-low %.6f --scale-high %.6f", lo, hi }'
+}
+
+TRIED=""
+if [ -n "$EXIF_FOCAL" ]; then
+    if [ -n "$FOCAL" ] && [ "$FOCAL" != "$EXIF_FOCAL" ]; then
+        echo "[polaris-align] focal: EXIF says ${EXIF_FOCAL}mm, config says ${FOCAL}mm -- trusting EXIF" >&2
+    else
+        echo "[polaris-align] focal from EXIF: ${EXIF_FOCAL}mm" >&2
+    fi
+    TRIED="${EXIF_FOCAL}mm (exif)"
+    OUT=$(solve_with "--focal-mm $EXIF_FOCAL --sensor-mm $SENSOR_MM")
+    case "$OUT" in *'"solved":true'*) echo "$OUT"; exit 0;; esac
+elif [ -n "$CACHED_FOCAL" ]; then
+    echo "[polaris-align] no EXIF (live view?) -- using ${CACHED_FOCAL}mm from the last frame that had it" >&2
+    TRIED="${CACHED_FOCAL}mm (cached)"
+    OUT=$(solve_with "--focal-mm $CACHED_FOCAL --sensor-mm $SENSOR_MM")
+    case "$OUT" in *'"solved":true'*) echo "$OUT"; exit 0;; esac
+    # a cached focal that no longer solves is worse than none -- drop it so we
+    # do not pay for it on every subsequent frame
+    rm -f "$FOCAL_CACHE" 2>/dev/null
+elif [ -n "$FOCAL" ]; then
+    echo "[polaris-align] focal from config: ${FOCAL}mm (frame has no EXIF)" >&2
+    TRIED="${FOCAL}mm (config)"
+    OUT=$(solve_with "--focal-mm $FOCAL --sensor-mm $SENSOR_MM")
+    case "$OUT" in *'"solved":true'*) echo "$OUT"; exit 0;; esac
+fi
+
+[ -n "$TRIED" ] && echo "[polaris-align] $TRIED did not solve -- retrying across ${FOCAL_MIN}-${FOCAL_MAX}mm" >&2
+[ -n "$TRIED" ] || echo "[polaris-align] no focal known -- searching ${FOCAL_MIN}-${FOCAL_MAX}mm" >&2
+exec "$ASTRO/polaris-solve" $(range_args) $IDXARGS --stars "$STARS" \
+     --width "$W" --height "$H" --cpulimit "$RANGE_TIMEOUT" \
+     ${RA:+--ra "$RA"} ${DEC:+--dec "$DEC"} ${RADIUS:+--radius "$RADIUS"}

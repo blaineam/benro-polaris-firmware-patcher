@@ -8,7 +8,26 @@
 LAT=00.00000
 LON=000.00000
 # Lens focal length in mm.
-FOCAL=400
+# FOCAL IS ONLY A FALLBACK. The solver reads the focal length from each frame's
+# EXIF, which is the only thing that tracks a zoom lens. Order of preference:
+#   1. the frame's own EXIF                      (real captures)
+#   2. the focal cached from the last EXIF frame (live view carries no EXIF)
+#   3. this value
+#   4. a search across FOCAL_MIN..FOCAL_MAX
+# A WRONG FOCAL MAKES THE SOLVE IMPOSSIBLE, NOT SLOW: a 70mm frame searched at
+# 400mm hunts 2.3 arcsec/pix when the truth is 13.4, and no quad can match. A
+# whole night failed that way before the solver read EXIF.
+FOCAL=70
+
+# Fallback search range when no focal is known at all. Realistic bounds for a
+# lens on this mount. Costs ~148 s versus ~5 s with a known focal, so it is the
+# safety net rather than the normal path, and gets its own longer budget.
+# NOTE: the shipped index files (4110-4119) cover roughly 14-400mm on full
+# frame. Widening this range does not by itself let a 3000mm lens solve --
+# that needs finer indexes; see fetch-indexes.sh.
+FOCAL_MIN=8
+FOCAL_MAX=3000
+RANGE_TIMEOUT=240
 
 # ---- web UI + Alpaca ------------------------------------------------------
 # 8080 is pgphoto's own MJPG stream; 80, 8081, 9090 and 22 are also taken.
