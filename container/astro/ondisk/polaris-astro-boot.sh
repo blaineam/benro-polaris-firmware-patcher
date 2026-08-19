@@ -48,11 +48,15 @@ SITE=/app/sd/polaris-astro/site.conf
     while [ $i -lt 30 ] && [ ! -x "$ASTRO/polaris-httpd" ]; do
         if [ -x /app/sd/polaris-astro/polaris-httpd ]; then
             mkdir -p "$ASTRO"
-            cp /app/sd/polaris-astro/polaris-httpd \
-               /app/sd/polaris-astro/polaris-solve \
-               /app/sd/polaris-astro/polaris-extract \
-               /app/sd/polaris-astro/polaris-logwatch \
-               /app/sd/polaris-astro/polaris-mount "$ASTRO"/ 2>/dev/null
+            # Every binary the daemons need. polaris-logwatch is autosolve's
+            # trigger detector and polaris-match is the guider's drift
+            # measurement -- omit either and the feature silently does nothing.
+            for _b in polaris-httpd polaris-solve polaris-extract \
+                      polaris-logwatch polaris-match polaris-skysim \
+                      polaris-mount; do
+                [ -f "/app/sd/polaris-astro/$_b" ] \
+                    && cp "/app/sd/polaris-astro/$_b" "$ASTRO"/ 2>/dev/null
+            done
             cp /app/sd/polaris-astro/*.sh "$ASTRO"/ 2>/dev/null
             chmod +x "$ASTRO"/* 2>/dev/null
         fi

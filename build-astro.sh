@@ -48,7 +48,7 @@ docker run --rm \
   -v "$HERE/container":/opt/patcher:ro \
   -v "$OUT":/out \
   --entrypoint /bin/bash "$IMG" -c \
-  'bash /opt/patcher/astro/build_solver.sh arm /work/out/astro && mkdir -p /out/COPY-TO-SD-CARD-ROOT/polaris-astro && arm-linux-gnueabi-gcc -O2 -std=gnu11 -mfloat-abi=soft -Wall -Wextra /opt/patcher/astro/polaris-httpd.c -o /work/out/astro/polaris-httpd -lm && cp /work/out/astro/polaris-solve /work/out/astro/polaris-extract /work/out/astro/polaris-mount /work/out/astro/polaris-httpd /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ && cp /opt/patcher/astro/ondisk/*.sh /out/COPY-TO-SD-CARD-ROOT/polaris-astro/'
+  'bash /opt/patcher/astro/build_solver.sh arm /work/out/astro && mkdir -p /out/COPY-TO-SD-CARD-ROOT/polaris-astro && for t in polaris-httpd polaris-logwatch polaris-match; do arm-linux-gnueabi-gcc -O2 -std=gnu11 -mfloat-abi=soft -Wall -Wextra /opt/patcher/astro/$t.c -o /work/out/astro/$t -lm || exit 1; done && cp /work/out/astro/polaris-solve /work/out/astro/polaris-extract /work/out/astro/polaris-mount /work/out/astro/polaris-skysim /work/out/astro/polaris-httpd /work/out/astro/polaris-logwatch /work/out/astro/polaris-match /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ && cp /opt/patcher/astro/ondisk/*.sh /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ && cp /opt/patcher/astro/ondisk/site.conf.example /out/COPY-TO-SD-CARD-ROOT/polaris-astro/'
 
 if [ "$WANT_IDX" = "1" ]; then
   echo "[*] selecting + downloading index files for ${FMIN}-${FMAX}mm…"

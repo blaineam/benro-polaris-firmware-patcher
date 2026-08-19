@@ -1,0 +1,56 @@
+# Benro Polaris astro configuration.
+# Copy to site.conf on the microSD:  /app/sd/polaris-astro/site.conf
+# Read at boot by /app/network_telnetd.sh.
+
+# ---- REQUIRED -------------------------------------------------------------
+# Your observing position, decimal degrees (north/east positive). The solver's
+# search hint and the Alpaca site properties both come from here.
+LAT=00.00000
+LON=000.00000
+# Lens focal length in mm.
+FOCAL=400
+
+# ---- web UI + Alpaca ------------------------------------------------------
+# 8080 is pgphoto's own MJPG stream; 80, 8081, 9090 and 22 are also taken.
+POLARIS_HTTPD_PORT=8090
+
+# ---- auto-solve during the app's calibration -------------------------------
+AUTOSOLVE=1
+# 1 = watch and log what it WOULD send, touch nothing. START HERE.
+# 0 = ARMED: corrects the heading (527), slews to centre, confirms (530 step:2).
+# Run dry once, read /app/sd/polaris-autosolve.log, then set 0.
+AUTOSOLVE_DRY_RUN=1
+
+# Solve-quality gates. Below these the daemon does NOTHING and leaves the dialog
+# for you -- a wrong alignment is worse than no alignment.
+MIN_LOGODDS=100
+MIN_MATCHES=12
+
+# How well centred before it will confirm (deg). 0.15 is ~9 arcmin.
+CENTRE_TOL_DEG=0.15
+
+# Refuse to derive a heading above this altitude: azimuth is degenerate near the
+# zenith and the error is amplified by 1/cos(alt).
+MAX_ALIGN_ALT=65
+
+# ---- auto-guiding ----------------------------------------------------------
+GUIDE=0
+GUIDE_DRY_RUN=1
+GUIDE_INTERVAL=30        # seconds between drift checks
+GUIDE_THRESH=60          # correct once drift exceeds this many arcsec
+
+# ---- clock -----------------------------------------------------------------
+# The Polaris runs LOCAL time while reporting it as UTC. Seven hours is ~105 deg
+# of hour angle, so this matters enormously. "auto" reads the true offset from
+# the app's own 782 message. Only override if you know why.
+TZ_OFFSET_SEC=auto
+
+# ---- debugging -------------------------------------------------------------
+# Record the app<->device protocol to /app/sd/align-flow.log.
+CAPTURE_ALIGN_FLOW=0
+
+# TEST ONLY: solve this image instead of the camera, at this pretend time.
+# MUST be unset for real use or it solves the same frame no matter where you
+# point. Either one forces dry-run unless DRY_RUN is set explicitly.
+#STUB_FRAME=/app/sd/astro-bench/259A8092.JPG
+#STUB_UTC=2026-01-15T05:30:00
