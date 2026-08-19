@@ -31,6 +31,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <ctype.h>
 
 #define PORT_DEFAULT   8080
 #define JOB_LOG        "/tmp/polaris-job.log"
@@ -380,9 +381,25 @@ static int param_ci(const char *qs, const char *name, char *out, size_t cap,
         eq  = memchr(p, '=', (size_t)(amp - p));
         if (eq && (size_t)(eq - p) == nl &&
             (case_sensitive ? strncmp(p, name, nl) : strncasecmp(p, name, nl)) == 0) {
-            size_t vl = (size_t)(amp - eq - 1);
-            if (vl > cap - 1) vl = cap - 1;
-            memcpy(out, eq + 1, vl); out[vl] = 0;
+            /* URL-DECODE. Bodies are application/x-www-form-urlencoded, so a
+             * timestamp arrives as 2026-08-19T05%3A48%3A38Z. Returning the raw
+             * text made ISO-8601 validation reject perfectly good dates -- and
+             * my curl test passed only because curl sent literal colons. */
+            const char *src = eq + 1;
+            size_t vl = (size_t)(amp - eq - 1), i2 = 0, o2 = 0;
+            for (; i2 < vl && o2 + 1 < cap; i2++) {
+                if (src[i2] == '%' && i2 + 2 < vl &&
+                    isxdigit((unsigned char)src[i2+1]) && isxdigit((unsigned char)src[i2+2])) {
+                    char hx[3] = { src[i2+1], src[i2+2], 0 };
+                    out[o2++] = (char)strtol(hx, NULL, 16);
+                    i2 += 2;
+                } else if (src[i2] == '+') {
+                    out[o2++] = ' ';
+                } else {
+                    out[o2++] = src[i2];
+                }
+            }
+            out[o2] = 0;
             return 1;
         }
         p = amp;
