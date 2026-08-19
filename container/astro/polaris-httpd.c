@@ -39,6 +39,12 @@
 #define ASTRO_DIR      "/app/astro"
 
 static const char *g_astro = ASTRO_DIR;
+/* Which mount to talk to. Defaults to the real one on this device; point it at
+ * polaris-sim to run a conformance suite without commanding real motors --
+ * ConformU fires dozens of slews and syncs and wedged polestar_app when aimed
+ * at the hardware. */
+static const char *g_mount_host = "127.0.0.1";
+static int         g_mount_port = 9090;
 static double g_lat = 0.0, g_lon = 0.0;
 static int    g_have_pos = 0;
 static double g_focal = 400.0;
@@ -227,12 +233,12 @@ static int mount_pose(double *alt, double *az, char *raw, size_t rawcap) {
         return c_ok;
     }
 
-    snprintf(cmd, sizeof cmd, "%s/polaris-mount --host 127.0.0.1 pose 2>/dev/null", g_astro);
+    snprintf(cmd, sizeof cmd, "%s/polaris-mount --host %s --port %d pose 2>/dev/null", g_astro, g_mount_host, g_mount_port);
     if (run_capture(cmd, buf, sizeof buf) >= 0 && buf[0]) {
         p = strstr(buf, "\"alt_deg\":"); if (p) { *alt = atof(p + 10); ok = 1; }
         p = strstr(buf, "\"az_deg\":");  if (p) { *az  = atof(p + 9);  ok = 1; }
     }
-    snprintf(cmd, sizeof cmd, "%s/polaris-mount --host 127.0.0.1 state 2>/dev/null", g_astro);
+    snprintf(cmd, sizeof cmd, "%s/polaris-mount --host %s --port %d state 2>/dev/null", g_astro, g_mount_host, g_mount_port);
     if (run_capture(cmd, buf, sizeof buf) >= 0) {
         snprintf(c_raw, sizeof c_raw, "%s", buf);
         if (raw) snprintf(raw, rawcap, "%s", buf);
@@ -372,6 +378,19 @@ static int param(const char *qs, const char *name, char *out, size_t cap) {
 
 static int param(const char *qs, const char *name, char *out, size_t cap);
 static int current_radec(double *ra, double *dec);
+/* Corrected-UTC string for polaris-mount. Slews MUST use the same clock the
+ * reads use: goto-radec converts RA/Dec to alt/az, so running it on the raw
+ * device clock sent the mount ~105 deg (7 h) from the target while our position
+ * reads were correct -- ConformU saw "Slewed 379127 arc seconds away". Third
+ * place this same clock bug has surfaced. */
+static void utc_arg(char *out, size_t cap) {
+    struct tm g; time_t t;
+    extern time_t utc_now(void);
+    t = utc_now();
+    gmtime_r(&t, &g);
+    snprintf(out, cap, "--utc %04d-%02d-%02dT%02d:%02d:%02d",
+             g.tm_year+1900, g.tm_mon+1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
+}
 
 /* ----------------------------------------------------------------- Alpaca */
 /*
@@ -430,7 +449,7 @@ static long tz_offset_sec(void) {
     if (buf[0]) cached = atol(buf);
     return cached;
 }
-static time_t utc_now(void) { return time(NULL) + tz_offset_sec(); }
+time_t utc_now(void) { return time(NULL) + tz_offset_sec(); }
 
 static void alpaca_value(int fd, const char *qs, const char *value_json) {
     char out[1024];
@@ -586,10 +605,27 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
         !strcmp(m, "canmoveaxis") || !strcmp(m, "canunpark") ||
         !strcmp(m, "cansetdeclinationrate") || !strcmp(m, "cansetrightascensionrate"))
         { alpaca_value(fd, qs, "false"); return 1; }
-    if (!strcmp(m, "canslew") || !strcmp(m, "canslewasync") || !strcmp(m, "cansync"))
+    if (!strcmp(m, "canslew") || !strcmp(m, "canslewasync"))
         { alpaca_value(fd, qs, "true"); return 1; }
-    if (!strcmp(m, "atpark") || !strcmp(m, "athome") || !strcmp(m, "ispulseguiding"))
+    /* CanSync is FALSE, deliberately.
+     *
+     * ASCOM Sync means "the scope is really HERE -- correct your pointing model
+     * in BOTH axes". All we can do is correct the compass heading, which is an
+     * AZIMUTH-only correction; declination cannot be synced at all. Conform
+     * measured the consequence: Dec off by ~3600 arcsec after every sync.
+     *
+     * Advertising a capability we cannot honour is worse than not having it: a
+     * client would sync, believe its model was corrected, and point wrong for
+     * the rest of the session. Our own plate-solve alignment still uses the
+     * compass correction internally -- that is a different contract, made
+     * against a measured sky position rather than a client's assertion. */
+    if (!strcmp(m, "cansync"))
         { alpaca_value(fd, qs, "false"); return 1; }
+    if (!strcmp(m, "atpark") || !strcmp(m, "athome"))
+        { alpaca_value(fd, qs, "false"); return 1; }
+    /* NOT ispulseguiding: CanPulseGuide is False, so it must raise
+     * NotImplemented. It used to be answered "false" by this branch, which sat
+     * ABOVE the check that was supposed to reject it -- so the fix never ran. */
     if (!strcmp(m, "sideofpier")) { alpaca_value(fd, qs, "-1"); return 1; }
 
     if (!strcmp(m, "connected")) {
@@ -767,8 +803,13 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     }
 
     /* --- slew / sync --- */
-    if (!strcmp(m, "slewtocoordinates") || !strcmp(m, "slewtocoordinatesasync") ||
-        !strcmp(m, "synctocoordinates")) {
+    if (!strcmp(m, "synctocoordinates") || !strcmp(m, "synctotarget")) {
+        alpaca_error(fd, qs, 1024,
+            "not implemented: this mount can only correct azimuth (compass "
+            "heading), so a two-axis sync cannot be honoured");
+        return 1;
+    }
+    if (!strcmp(m, "slewtocoordinates") || !strcmp(m, "slewtocoordinatesasync")) {
         char ra_s[64], dec_s[64], cmd[512], out[1024];
         const char *src = (body && *body) ? body : qs;
         if (!param(src, "RightAscension", ra_s, sizeof ra_s) ||
@@ -777,7 +818,9 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             return 1;
         }
         double ra_deg, dec_deg;
+        char ua[64];
         char *endp = NULL;
+        utc_arg(ua, sizeof ua);
         ra_deg = strtod(ra_s, &endp) * 15.0;          /* hours -> degrees */
         if (endp == ra_s) { alpaca_error(fd, qs, 1025, "RightAscension is not a number"); return 1; }
         endp = NULL;
@@ -788,13 +831,28 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
         }
         if (!strcmp(m, "synctocoordinates"))
             snprintf(cmd, sizeof cmd,
-                     "%s/polaris-mount --lat %.6f --lon %.6f align --solved-ra %.6f --solved-dec %.6f 2>&1",
-                     g_astro, g_lat, g_lon, ra_deg, dec_deg);
+                     "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s align --solved-ra %.6f --solved-dec %.6f 2>&1",
+                     g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, ra_deg, dec_deg);
         else
             snprintf(cmd, sizeof cmd,
-                     "%s/polaris-mount --lat %.6f --lon %.6f goto-radec --ra %.6f --dec %.6f 2>&1",
-                     g_astro, g_lat, g_lon, ra_deg, dec_deg);
-        run_capture(cmd, out, sizeof out);
+                     "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s goto-radec --ra %.6f --dec %.6f 2>&1",
+                     g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, ra_deg, dec_deg);
+        /* The spec REQUIRES these to set the target properties; Conform reads
+         * them back and got ValueNotSet. (My earlier edit for this silently
+         * failed to apply -- I used replace() without asserting a match.) */
+        g_target_ra = ra_deg; g_target_dec = dec_deg; g_target_set = 1;
+
+        if (!strcmp(m, "slewtocoordinatesasync")) {
+            /* Async MUST return immediately and leave Slewing true while the
+             * goto runs. Running it inline took 8.2 s and reported Slewing
+             * false, failing both the timing target and the state check. */
+            pid_t pid = fork();
+            if (pid == 0) { char o2[1024]; run_capture(cmd, o2, sizeof o2); _exit(0); }
+            if (pid > 0) g_slew_pid = pid;
+            else run_capture(cmd, out, sizeof out);   /* fork failed: do it inline */
+        } else {
+            run_capture(cmd, out, sizeof out);
+        }
         alpaca_value(fd, qs, "null");
         return 1;
     }
@@ -802,39 +860,57 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
      * NotImplemented for these while advertising the capability is a spec
      * violation, and ConformU flags every variant. They act on the stored
      * target, which is why TargetRA/Dec must be settable. */
-    if (!strcmp(m, "slewtotarget") || !strcmp(m, "slewtotargetasync") ||
-        !strcmp(m, "synctotarget")) {
-        char cmd[512], out[1024];
+    if (!strcmp(m, "slewtotarget") || !strcmp(m, "slewtotargetasync")) {
+        char cmd[640], out[1024], ua[64];
+        utc_arg(ua, sizeof ua);
         if (!g_target_set) {
             alpaca_error(fd, qs, 1026, "target not set");   /* ValueNotSet */
             return 1;
         }
-        if (!strcmp(m, "synctotarget"))
-            snprintf(cmd, sizeof cmd,
-                     "%s/polaris-mount --lat %.6f --lon %.6f align --solved-ra %.6f --solved-dec %.6f 2>&1",
-                     g_astro, g_lat, g_lon, g_target_ra, g_target_dec);
-        else
-            snprintf(cmd, sizeof cmd,
-                     "%s/polaris-mount --lat %.6f --lon %.6f goto-radec --ra %.6f --dec %.6f 2>&1",
-                     g_astro, g_lat, g_lon, g_target_ra, g_target_dec);
-        run_capture(cmd, out, sizeof out);
+        snprintf(cmd, sizeof cmd,
+                     "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s goto-radec --ra %.6f --dec %.6f 2>&1",
+                     g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, g_target_ra, g_target_dec);
+        if (!strcmp(m, "slewtotargetasync")) {
+            pid_t pid = fork();
+            if (pid == 0) { char o2[1024]; run_capture(cmd, o2, sizeof o2); _exit(0); }
+            if (pid > 0) g_slew_pid = pid;
+            else run_capture(cmd, out, sizeof out);
+        } else {
+            run_capture(cmd, out, sizeof out);
+        }
         alpaca_value(fd, qs, "null");
         return 1;
     }
 
     if (!strcmp(m, "abortslew")) {
         char cmd[256], out[512];
-        snprintf(cmd, sizeof cmd, "%s/polaris-mount --host 127.0.0.1 abort 2>&1", g_astro);
+        if (g_slew_pid > 0) { kill(g_slew_pid, SIGTERM); g_slew_pid = -1; }
+        snprintf(cmd, sizeof cmd, "%s/polaris-mount --host %s --port %d abort 2>&1", g_astro, g_mount_host, g_mount_port);
         run_capture(cmd, out, sizeof out);
         alpaca_value(fd, qs, "null");
         return 1;
     }
 
+    /* VALID Alpaca members we do not implement must answer 200 with
+     * ErrorNumber 1024 -- a client checks Can* and then expects a proper
+     * NotImplemented, not an HTTP error. Returning 400 for these (my previous
+     * over-correction) produced nine "Unexpected error" issues. Only a name
+     * that is not in the spec at all is a malformed URL. */
+    {
+        static const char *known[] = {
+            "park", "unpark", "setpark", "findhome", "moveaxis", "pulseguide",
+            "slewtoaltaz", "slewtoaltazasync", "synctoaltaz",
+            "action", "commandblind", "commandbool", "commandstring", "dispose",
+            "devicestate", "connect", "disconnect", "connecting", NULL
+        };
+        int k;
+        for (k = 0; known[k]; k++)
+            if (!strcmp(m, known[k])) {
+                alpaca_error(fd, qs, 1024, "not implemented");
+                return 1;
+            }
+    }
     (void)v;
-    /* An unrecognised method NAME is a malformed URL, not an unimplemented
-     * feature -- ConformU probes with a truncated name ("descrip") and requires
-     * an HTTP error. Genuinely unimplemented-but-valid members are handled
-     * above and answer 200 with ErrorNumber 1024. */
     respond_400(fd, "unknown method name");
     return 1;
 }
@@ -1003,8 +1079,8 @@ static void lx200_session(int fd) {
                     } else {
                         char cm[512], o2[512];
                         snprintf(cm, sizeof cm,
-                          "%s/polaris-mount --lat %.6f --lon %.6f goto-radec --ra %.6f --dec %.6f 2>&1",
-                          g_astro, g_lat, g_lon, tgt_ra, tgt_dec);
+                          "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f goto-radec --ra %.6f --dec %.6f 2>&1",
+                          g_astro, g_mount_host, g_mount_port, g_lat, g_lon, tgt_ra, tgt_dec);
                         run_capture(cm, o2, sizeof o2);
                         lx_send(fd, "0");          /* 0 = slew started */
                     }
@@ -1012,14 +1088,14 @@ static void lx200_session(int fd) {
                     if (have_ra && have_dec) {
                         char cm[512], o2[512];
                         snprintf(cm, sizeof cm,
-                          "%s/polaris-mount --lat %.6f --lon %.6f align --solved-ra %.6f --solved-dec %.6f 2>&1",
-                          g_astro, g_lat, g_lon, tgt_ra, tgt_dec);
+                          "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f align --solved-ra %.6f --solved-dec %.6f 2>&1",
+                          g_astro, g_mount_host, g_mount_port, g_lat, g_lon, tgt_ra, tgt_dec);
                         run_capture(cm, o2, sizeof o2);
                     }
                     lx_send(fd, "Aligned#");
                 } else if (!strncmp(c, "Q", 1)) {
                     char cm[256], o2[256];
-                    snprintf(cm, sizeof cm, "%s/polaris-mount --host 127.0.0.1 abort 2>&1", g_astro);
+                    snprintf(cm, sizeof cm, "%s/polaris-mount --host %s --port %d abort 2>&1", g_astro, g_mount_host, g_mount_port);
                     run_capture(cm, o2, sizeof o2);
                     /* :Q# has no reply */
                 } else if (!strncmp(c, "GVP", 3)) { lx_send(fd, "Benro Polaris#");
@@ -1313,6 +1389,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--astro") && i+1 < argc) g_astro = argv[++i];
         else if (!strcmp(argv[i], "--lx200-port") && i+1 < argc) lx_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-discovery")) discovery = 0;
+        else if (!strcmp(argv[i], "--mount-host") && i+1 < argc) g_mount_host = argv[++i];
+        else if (!strcmp(argv[i], "--mount-port") && i+1 < argc) g_mount_port = atoi(argv[++i]);
         else {
             fprintf(stderr,
                 "usage: %s [--port N] --lat DEG --lon DEG [--focal MM] [--astro DIR]\n", argv[0]);
@@ -1341,8 +1419,8 @@ int main(int argc, char **argv) {
     }
 
     if (access(JOB_STATUS, F_OK) != 0) set_status("idle");
-    fprintf(stderr, "polaris-httpd on :%d  (lat %.5f lon %.5f focal %.0fmm)\n",
-            port, g_lat, g_lon, g_focal);
+    fprintf(stderr, "polaris-httpd on :%d  (lat %.5f lon %.5f focal %.0fmm, mount %s:%d)\n",
+            port, g_lat, g_lon, g_focal, g_mount_host, g_mount_port);
     if (lxfd >= 0) fprintf(stderr, "LX200 on :%d\n", lx_port);
     if (dfd  >= 0) fprintf(stderr, "Alpaca discovery on udp:%d\n", ALPACA_DISCOVERY_PORT);
 
@@ -1379,7 +1457,13 @@ int main(int argc, char **argv) {
             }
         }
         if (dfd >= 0 && FD_ISSET(dfd, &rf)) handle_discovery(dfd, port);
-        { int st; while (waitpid(-1, &st, WNOHANG) > 0) { } }   /* reap finished sessions */
+        {   /* Reap finished LX200 sessions -- but NOT the slew child, whose
+             * liveness IS the Slewing property. Reaping it with waitpid(-1)
+             * made every async slew report Slewing=false immediately. */
+            int st; pid_t r;
+            while ((r = waitpid(-1, &st, WNOHANG)) > 0)
+                if (r == g_slew_pid) g_slew_pid = -1;
+        }
     }
     return 0;
 }
