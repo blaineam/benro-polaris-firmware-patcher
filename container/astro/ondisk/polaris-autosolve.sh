@@ -77,13 +77,38 @@ TZ_OFFSET_SEC=${TZ_OFFSET_SEC:-auto}
 # and cache it here, where it survives truncation and restarts.
 TZ_CACHE=${TZ_CACHE:-/app/sd/polaris-astro/tz.cache}
 
+# Parse one 782's zone field into "seconds to ADD to the device clock to get UTC".
+#
+# The field is seconds EAST of UTC, so the answer is its NEGATION:
+#     zone -25200 (PDT)  -> add +25200
+#     zone  +3600 (CET)  -> add  -3600
+#
+# The app writes a stray leading '-' before the value, so PDT appears as
+# "zone:--25200". Strip AT MOST ONE stray dash, then parse what remains as a
+# SIGNED integer. The first version required leading dashes and discarded the
+# sign, so it only worked west of UTC -- fine in Pacific time, silently wrong
+# in Europe or Asia. Nothing here is specific to one timezone.
+parse_zone_field() {
+    # Accept "-25200", "--25200" (stray dash, as the app writes it), "+3600",
+    # "-+3600" and bare "3600". We do not know every form the app might emit,
+    # so parse permissively rather than assume the one we happened to observe.
+    _raw=$(echo "$1" | sed -n 's/.*zone:\([-+]\{0,2\}[0-9][0-9]*\).*/\1/p')
+    [ -n "$_raw" ] || return 1
+    case "$_raw" in
+      --*) _sec=$(echo "$_raw" | sed 's/^-//') ;;   # stray dash + negative
+      -+*) _sec=$(echo "$_raw" | sed 's/^-+//') ;;  # stray dash + positive
+      +*)  _sec=$(echo "$_raw" | sed 's/^+//') ;;
+      *)   _sec=$_raw ;;
+    esac
+    case "$_sec" in ''|*[!0-9-]*|-) return 1;; esac
+    echo $(( 0 - _sec ))
+}
+
 detect_tz_offset() {
-    # 782 looks like: val:date:2026-08-18;time:18:09:50;zone:--25200;
-    # zone is seconds EAST of UTC (-25200 for PDT); the app writes a stray extra
-    # '-', so tolerate one or two. We return the amount to ADD to reach UTC.
-    _z=$(grep -a "code:782" /app/Mlog.txt 2>/dev/null \
-         | sed -n 's/.*zone:-\{1,2\}\([0-9][0-9]*\).*/\1/p' | tail -1)
-    if [ -n "$_z" ]; then echo $(( _z )); return 0; fi
+    _line=$(grep -a "code:782" /app/Mlog.txt 2>/dev/null | tail -1)
+    if [ -n "$_line" ] && _z=$(parse_zone_field "$_line"); then
+        echo "$_z"; return 0
+    fi
     if [ -s "$TZ_CACHE" ]; then
         _z=$(cat "$TZ_CACHE" 2>/dev/null)
         case "$_z" in ''|*[!0-9-]*) return 1;; esac
@@ -94,12 +119,12 @@ detect_tz_offset() {
 
 # called from the watcher loop the moment a 782 goes past
 note_tz_from_line() {
-    _z=$(echo "$1" | sed -n 's/.*zone:-\{1,2\}\([0-9][0-9]*\).*/\1/p')
+    _z=$(parse_zone_field "$1") || return 0
     [ -n "$_z" ] || return 0
     mkdir -p "$(dirname "$TZ_CACHE")" 2>/dev/null
     if [ "$_z" != "$(cat "$TZ_CACHE" 2>/dev/null)" ]; then
         echo "$_z" > "$TZ_CACHE"
-        log "clock: app reported its timezone (zone -$_z) -> cached in $TZ_CACHE"
+        log "clock: app reported its timezone (offset to UTC ${_z}s) -> cached in $TZ_CACHE"
     fi
     if [ "$TZ_AUTO" = "1" ] && [ "$_z" != "$TZ_OFFSET_SEC" ]; then
         log "clock: TZ_OFFSET_SEC $TZ_OFFSET_SEC -> $_z (UTC now $(TZ_OFFSET_SEC=$_z; utc_now))"
@@ -283,10 +308,33 @@ grab_frame() {
     # It deliberately does NOT read 518: during a first calibration the mount is
     # at track:3 and 518 is silent. The 519 target is always available.
     if [ "${CAPTURE_MODE:-liveview}" = "render" ] && [ -z "$SIM_STATUS" ]; then
-        [ -n "$ARM_AZ" ] || { log "render-from-target needs an armed 519 first"; return 1; }
-        _raz=$(awk -v a="$ARM_AZ" -v o="${RENDER_AZ_OFFSET:-0}" \
+        # SIMULATED SKY ON A REAL MOUNT, THAT ACTUALLY CONVERGES.
+        #
+        # Render at the mount's CURRENTLY REPORTED pose plus a tracked error,
+        # not at the app's target. That difference is everything:
+        #
+        #   - anchored to the target, the fake sky never moves when the mount
+        #     does, so the centring residual stays at the injected offset
+        #     forever and the loop cannot converge. (Observed: 3.97 deg, twice,
+        #     then give up.)
+        #   - anchored to the reported pose, a real slew moves the fake sky with
+        #     it, exactly as the real sky would appear to.
+        #
+        # SIM_ERR is the simulated compass error. A real 527 makes the mount
+        # report the azimuth it was just told it is looking at, which by
+        # definition eliminates the error -- so we zero SIM_ERR when we send one.
+        # After that, reported == true and re-slewing to the target centres it.
+        _rp=$("$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" pose 2>/dev/null)
+        _paz=$(echo "$_rp" | sed -n 's/.*"az_deg":\([-0-9.]*\).*/\1/p')
+        _palt=$(echo "$_rp" | sed -n 's/.*"alt_deg":\([-0-9.]*\).*/\1/p')
+        if [ -z "$_paz" ]; then
+            log "render-from-pose: the mount did not report 518; falling back to the armed target"
+            _paz="$ARM_AZ"; _palt="$ARM_ALT"
+            [ -n "$_paz" ] || { log "  and no armed target either"; return 1; }
+        fi
+        _raz=$(awk -v a="$_paz" -v o="${SIM_ERR:-0}" \
                  'BEGIN{v=a+o; while(v<0)v+=360; while(v>=360)v-=360; printf "%.6f", v}')
-        _ralt=$(awk -v a="$ARM_ALT" -v o="${RENDER_ALT_OFFSET:-0}" 'BEGIN{printf "%.6f", a+o}')
+        _ralt=$(awk -v a="$_palt" -v o="${SIM_ERR_ALT:-0}" 'BEGIN{printf "%.6f", a+o}')
         [ -n "$STUB_UTC" ] || [ "${TZ_OFFSET_SEC:-0}" -eq 0 ] 2>/dev/null || UTCARG="--utc $(utc_now)"
         _rj=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
                 altaz2radec --alt "$_ralt" --az "$_raz" 2>/dev/null)
@@ -303,7 +351,7 @@ grab_frame() {
             --width "${RENDER_W:-960}" --height "${RENDER_H:-640}" \
             --out /tmp/autosolve-lv.jpg >/dev/null 2>&1
         [ -s /tmp/autosolve-lv.jpg ] || { log "render failed"; return 1; }
-        log "  [simulated sky] target alt=$ARM_ALT az=$ARM_AZ, offset by ${RENDER_AZ_OFFSET:-0} deg az"
+        log "  [simulated sky] mount reports alt=$_palt az=$_paz, simulated error ${SIM_ERR:-0} deg"
         log "  [simulated sky] rendered alt=$_ralt az=$_raz -> ra=$_rra dec=$_rdec"
         echo /tmp/autosolve-lv.jpg
         return 0
@@ -503,6 +551,14 @@ apply_correction() {
     fi
 
     mount_send "1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#"
+    # The mount now reports the azimuth it was just told it is looking at, so in
+    # the simulation the compass error is gone. Zeroing it here is what lets the
+    # fake sky behave like a real one from this point on.
+    if [ "${CAPTURE_MODE:-liveview}" = "render" ] && [ -z "$SIM_STATUS" ] \
+       && [ "${SIM_ERR:-0}" != "0" ]; then
+        log "  [simulated sky] correction applied -- simulated error ${SIM_ERR} -> 0"
+        SIM_ERR=0
+    fi
 
     _try=0
     while [ $_try -lt "$CENTRE_TRIES" ]; do

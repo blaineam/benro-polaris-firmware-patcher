@@ -309,6 +309,36 @@ static void respond(int fd, int code, const char *ctype, const char *body, size_
     if (blen) send_all(fd, body, blen);
 }
 
+/* Alpaca requires an HTTP error status for a malformed REQUEST (bad parameter
+ * value, bad parameter name casing, unknown method), as distinct from a
+ * well-formed request the device cannot satisfy -- that is HTTP 200 with
+ * ErrorNumber set. We were answering 200 for both. */
+static void respond_400(int fd, const char *why) {
+    char body[256];
+    int n = snprintf(body, sizeof body, "400 Bad Request: %s\n", why);
+    respond(fd, 400, "text/plain", body, (size_t)n);
+}
+
+static int parse_bool_strict(const char *v, int *out) {
+    if (!strcmp(v, "True")  || !strcmp(v, "true"))  { *out = 1; return 1; }
+    if (!strcmp(v, "False") || !strcmp(v, "false")) { *out = 0; return 1; }
+    return 0;
+}
+
+static int parse_double_strict(const char *v, double *out) {
+    char *end = NULL;
+    if (!v || !*v) return 0;
+    *out = strtod(v, &end);
+    return end != v && *end == '\0';
+}
+
+static int parse_long_strict(const char *v, long *out) {
+    char *end = NULL;
+    if (!v || !*v) return 0;
+    *out = strtol(v, &end, 10);
+    return end != v && *end == '\0';
+}
+
 static void respond_json(int fd, const char *json) {
     respond(fd, 200, "application/json", json, strlen(json));
 }
@@ -325,7 +355,11 @@ static int param(const char *qs, const char *name, char *out, size_t cap) {
         if (!*p) break;
         amp = strchr(p, '&'); if (!amp) amp = p + strlen(p);
         eq  = memchr(p, '=', (size_t)(amp - p));
-        if (eq && (size_t)(eq - p) == nl && strncasecmp(p, name, nl) == 0) {
+        /* Alpaca parameter names are CASE-SENSITIVE. Matching them
+         * case-insensitively made us accept "tracking=..." for "Tracking",
+         * which ConformU flags on every PUT. My own conformance test asserted
+         * the opposite and "passed" -- it encoded the same misreading. */
+        if (eq && (size_t)(eq - p) == nl && strncmp(p, name, nl) == 0) {
             size_t vl = (size_t)(amp - eq - 1);
             if (vl > cap - 1) vl = cap - 1;
             memcpy(out, eq + 1, vl); out[vl] = 0;
@@ -357,13 +391,41 @@ static const char *g_req_body = NULL;
 /* ClientTransactionID from query string, falling back to the PUT body. */
 static long client_txn(const char *qs) {
     char cid[32];
-    if (param(qs, "ClientTransactionID", cid, sizeof cid)) return atol(cid);
-    if (g_req_body && param(g_req_body, "ClientTransactionID", cid, sizeof cid))
-        return atol(cid);
-    return 0;
+    long v;
+    char *end = NULL;
+    const char *src = NULL;
+    if (param(qs, "ClientTransactionID", cid, sizeof cid)) src = cid;
+    else if (g_req_body && param(g_req_body, "ClientTransactionID", cid, sizeof cid)) src = cid;
+    if (!src) return 0;
+    v = strtol(cid, &end, 10);
+    /* Must be a valid UNSIGNED integer. A negative or unparseable value is
+     * treated as absent and echoed as 0 -- echoing it back produces JSON the
+     * client cannot parse into its unsigned field. */
+    if (end == cid || *end != '\0' || v < 0) return 0;
+    return v;
 }
 static double g_target_ra = 0.0, g_target_dec = 0.0;
 static int    g_target_set = 0;
+static int    g_connected = 1;
+static double g_site_elev = 0.0;
+
+/* THE DEVICE CLOCK IS NOT UTC. It runs local time while reporting itself as
+ * UTC; ConformU caught this as "Scope and ASCOM sidereal times are more than 1
+ * hour apart" -- 7 hours, i.e. the whole PDT offset. The autosolve daemon was
+ * fixed for this; polaris-httpd was not, so every Alpaca client saw wrong
+ * positions. Offset is the app's own value, cached by the daemon. */
+static long tz_offset_sec(void) {
+    static long cached = -1;
+    char buf[64];
+    if (cached >= 0) return cached;
+    cached = 0;
+    { const char *e = getenv("TZ_OFFSET_SEC");
+      if (e && *e) { cached = atol(e); return cached; } }
+    read_file("/app/sd/polaris-astro/tz.cache", buf, sizeof buf);
+    if (buf[0]) cached = atol(buf);
+    return cached;
+}
+static time_t utc_now(void) { return time(NULL) + tz_offset_sec(); }
 
 static void alpaca_value(int fd, const char *qs, const char *value_json) {
     char out[1024];
@@ -426,6 +488,82 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (strncmp(path, "/api/v1/telescope/0/", 20) != 0) return 0;
     m = path + 20;
 
+    /* ---- validate the REQUEST before answering it ------------------------
+     *
+     * ConformU sends deliberately bad values (empty string, "abcd", wrong
+     * name casing) and requires HTTP 400. Returning 200 for these was 40 of
+     * the 44 issues it found. Each entry names the parameter the spec defines
+     * and how it must parse; a value that does not is a malformed request. */
+    if (!strcmp(method, "PUT")) {
+        static const struct { const char *meth, *param; char type; } P[] = {
+            { "connected",                "Connected",               'b' },
+            { "tracking",                 "Tracking",                'b' },
+            { "doesrefraction",           "DoesRefraction",          'b' },
+            { "declinationrate",          "DeclinationRate",         'd' },
+            { "rightascensionrate",       "RightAscensionRate",      'd' },
+            { "guideratedeclination",     "GuideRateDeclination",    'd' },
+            { "guideraterightascension",  "GuideRateRightAscension", 'd' },
+            { "siteelevation",            "SiteElevation",           'd' },
+            { "sitelatitude",             "SiteLatitude",            'd' },
+            { "sitelongitude",            "SiteLongitude",           'd' },
+            { "slewsettletime",           "SlewSettleTime",          'i' },
+            { "sideofpier",               "SideOfPier",              'i' },
+            { "trackingrate",             "TrackingRate",            'i' },
+            { "targetrightascension",     "TargetRightAscension",    'd' },
+            { "targetdeclination",        "TargetDeclination",       'd' },
+            { "utcdate",                  "UTCDate",                 's' },
+            { NULL, NULL, 0 }
+        };
+        int i;
+        for (i = 0; P[i].meth; i++) {
+            if (strcmp(m, P[i].meth)) continue;
+            {
+                const char *src = (body && *body) ? body : qs;
+                char v2[128];
+                double dv; long lv; int bv;
+                if (!param(src, P[i].param, v2, sizeof v2)) {
+                    respond_400(fd, "required parameter missing or wrongly cased");
+                    return 1;
+                }
+                switch (P[i].type) {
+                    case 'b': if (!parse_bool_strict(v2, &bv))   { respond_400(fd, "not a boolean"); return 1; } break;
+                    case 'd': if (!parse_double_strict(v2, &dv)) { respond_400(fd, "not a number");  return 1; } break;
+                    case 'i': if (!parse_long_strict(v2, &lv))   { respond_400(fd, "not an integer");return 1; } break;
+                    case 's': if (!v2[0])                        { respond_400(fd, "empty value");   return 1; } break;
+                }
+            }
+            break;
+        }
+        /* coordinate setters: both parameters, both numeric, both exact case */
+        if (!strcmp(m, "slewtocoordinates") || !strcmp(m, "slewtocoordinatesasync") ||
+            !strcmp(m, "synctocoordinates") || !strcmp(m, "slewtoaltaz") ||
+            !strcmp(m, "slewtoaltazasync")  || !strcmp(m, "synctoaltaz")) {
+            const char *src = (body && *body) ? body : qs;
+            const char *a = (strstr(m, "altaz")) ? "Azimuth"  : "RightAscension";
+            const char *b = (strstr(m, "altaz")) ? "Altitude" : "Declination";
+            char v2[128]; double dv;
+            if (!param(src, a, v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+                respond_400(fd, "bad or missing coordinate parameter"); return 1;
+            }
+            if (!param(src, b, v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+                respond_400(fd, "bad or missing coordinate parameter"); return 1;
+            }
+        }
+    } else {
+        /* GETs that take parameters must validate them too */
+        char v2[128]; long lv; double dv;
+        if (!strcmp(m, "axisrates") || !strcmp(m, "canmoveaxis")) {
+            if (!param(qs, "Axis", v2, sizeof v2) || !parse_long_strict(v2, &lv) ||
+                lv < 0 || lv > 2) { respond_400(fd, "bad Axis"); return 1; }
+        }
+        if (!strcmp(m, "destinationsideofpier")) {
+            if (!param(qs, "RightAscension", v2, sizeof v2) || !parse_double_strict(v2, &dv) ||
+                !param(qs, "Declination",    v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+                respond_400(fd, "bad coordinate parameter"); return 1;
+            }
+        }
+    }
+
     /* --- capability / static properties --- */
     if (!strcmp(m, "interfaceversion")) { alpaca_value(fd, qs, "3");     return 1; }
     if (!strcmp(m, "name"))        { alpaca_value(fd, qs, "\"Benro Polaris\""); return 1; }
@@ -450,17 +588,70 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "sideofpier")) { alpaca_value(fd, qs, "-1"); return 1; }
 
     if (!strcmp(m, "connected")) {
-        if (!strcmp(method, "PUT")) { alpaca_value(fd, qs, "null"); return 1; }
-        alpaca_value(fd, qs, "true"); return 1;
+        if (!strcmp(method, "PUT")) {
+            const char *src = (body && *body) ? body : qs;
+            char v2[32]; int bv;
+            if (!param(src, "Connected", v2, sizeof v2) || !parse_bool_strict(v2, &bv)) {
+                respond_400(fd, "bad Connected value"); return 1;
+            }
+            g_connected = bv;          /* must actually stick: Conform sets it False and reads back */
+            alpaca_value(fd, qs, "null"); return 1;
+        }
+        alpaca_value(fd, qs, g_connected ? "true" : "false"); return 1;
     }
-    if (!strcmp(m, "sitelatitude"))  { char b[64]; snprintf(b,sizeof b,"%.6f",g_lat); alpaca_value(fd, qs, b); return 1; }
-    if (!strcmp(m, "sitelongitude")) { char b[64]; snprintf(b,sizeof b,"%.6f",g_lon); alpaca_value(fd, qs, b); return 1; }
-    if (!strcmp(m, "siteelevation")) { alpaca_value(fd, qs, "0"); return 1; }
-    if (!strcmp(m, "slewsettletime")) { alpaca_value(fd, qs, "0"); return 1; }
+    /* Site properties must range-check AND round-trip. We were ignoring writes
+     * and returning the configured value, which ConformU catches twice: no
+     * error on an out-of-range value, and the test value not coming back. */
+    if (!strcmp(m, "sitelatitude") || !strcmp(m, "sitelongitude") ||
+        !strcmp(m, "siteelevation")) {
+        double lo = -90, hi = 90, *slot = &g_lat;
+        const char *pn = "SiteLatitude";
+        char b[64];
+        if (!strcmp(m, "sitelongitude")) { lo=-180; hi=180; slot=&g_lon; pn="SiteLongitude"; }
+        if (!strcmp(m, "siteelevation")) { lo=-300; hi=10000; slot=&g_site_elev; pn="SiteElevation"; }
+        if (!strcmp(method, "PUT")) {
+            const char *src = (body && *body) ? body : qs;
+            char v2[64]; double dv;
+            if (!param(src, pn, v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+                respond_400(fd, "bad value"); return 1;
+            }
+            if (dv < lo || dv > hi) { alpaca_error(fd, qs, 1025, "value out of range"); return 1; }
+            *slot = dv;
+            alpaca_value(fd, qs, "null"); return 1;
+        }
+        snprintf(b, sizeof b, "%.6f", *slot);
+        alpaca_value(fd, qs, b); return 1;
+    }
+    if (!strcmp(m, "slewsettletime")) {
+        if (!strcmp(method, "PUT")) {
+            const char *src = (body && *body) ? body : qs;
+            char v2[64]; long lv;
+            if (!param(src, "SlewSettleTime", v2, sizeof v2) || !parse_long_strict(v2, &lv)) {
+                respond_400(fd, "bad value"); return 1;
+            }
+            if (lv < 0) { alpaca_error(fd, qs, 1025, "SlewSettleTime cannot be negative"); return 1; }
+            alpaca_value(fd, qs, "null"); return 1;
+        }
+        alpaca_value(fd, qs, "0"); return 1;
+    }
     if (!strcmp(m, "doesrefraction")) { alpaca_value(fd, qs, "false"); return 1; }
     if (!strcmp(m, "focallength")) {
         char b[64]; snprintf(b, sizeof b, "%.4f", g_focal / 1000.0);   /* metres */
         alpaca_value(fd, qs, b); return 1;
+    }
+    /* Writing a property whose corresponding Can* is False must raise
+     * NotImplemented, not silently succeed -- ConformU flags each one. */
+    if (!strcmp(method, "PUT") &&
+        (!strcmp(m, "declinationrate") || !strcmp(m, "rightascensionrate") ||
+         !strcmp(m, "guideratedeclination") || !strcmp(m, "guideraterightascension") ||
+         !strcmp(m, "sideofpier") || !strcmp(m, "trackingrate") ||
+         !strcmp(m, "tracking"))) {
+        alpaca_error(fd, qs, 1024, "not implemented: the matching Can property is False");
+        return 1;
+    }
+    if (!strcmp(m, "ispulseguiding")) {
+        alpaca_error(fd, qs, 1024, "not implemented: CanPulseGuide is False");
+        return 1;
     }
     if (!strcmp(m, "trackingrate"))  { alpaca_value(fd, qs, "0"); return 1; }   /* sidereal */
     if (!strcmp(m, "trackingrates")) { alpaca_value(fd, qs, "[0]"); return 1; }
@@ -483,10 +674,16 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "siderealtime")) {
         char cmd[512], out[512], b[64];
         double lst = 0;
-        snprintf(cmd, sizeof cmd,
+        {   /* corrected UTC, for the same reason as UTCDate above */
+            char ub[64]; struct tm g; time_t t = utc_now();
+            gmtime_r(&t, &g);
+            snprintf(ub, sizeof ub, "%04d-%02d-%02dT%02d:%02d:%02d",
+                     g.tm_year+1900, g.tm_mon+1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
+            snprintf(cmd, sizeof cmd,
                  /* radec2altaz reports lst_deg; altaz2radec does NOT. */
-                 "%s/polaris-mount --lat %.6f --lon %.6f radec2altaz --ra 0 --dec 0 2>/dev/null",
-                 g_astro, g_lat, g_lon);
+                 "%s/polaris-mount --lat %.6f --lon %.6f --utc %s radec2altaz --ra 0 --dec 0 2>/dev/null",
+                 g_astro, g_lat, g_lon, ub);
+        }
         if (run_capture(cmd, out, sizeof out) == 0) {
             const char *p2 = strstr(out, "\"lst_deg\":");
             if (p2) lst = atof(p2 + 10);
@@ -503,13 +700,25 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             char v2[64];
             const char *want = !strcmp(m, "targetrightascension")
                              ? "TargetRightAscension" : "TargetDeclination";
-            if (param(src, want, v2, sizeof v2)) {
-                if (!strcmp(m, "targetrightascension")) g_target_ra = atof(v2) * 15.0;
-                else                                    g_target_dec = atof(v2);
-                g_target_set = 1;
-                alpaca_value(fd, qs, "null"); return 1;
+            double dv;
+            if (!param(src, want, v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+                respond_400(fd, "bad target value"); return 1;
             }
-            alpaca_error(fd, qs, 1025, "value required"); return 1;
+            if (!strcmp(m, "targetrightascension")) {
+                if (dv < 0.0 || dv >= 24.0) {         /* HOURS */
+                    alpaca_error(fd, qs, 1025, "TargetRightAscension must be 0..24 hours");
+                    return 1;
+                }
+                g_target_ra = dv * 15.0;
+            } else {
+                if (dv < -90.0 || dv > 90.0) {
+                    alpaca_error(fd, qs, 1025, "TargetDeclination must be -90..90 degrees");
+                    return 1;
+                }
+                g_target_dec = dv;
+            }
+            g_target_set = 1;
+            alpaca_value(fd, qs, "null"); return 1;
         }
         if (!strcmp(m, "targetrightascension")) {
             if (!g_target_set) { alpaca_error(fd, qs, 1026, "target not set"); return 1; }
@@ -554,7 +763,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     }
     if (!strcmp(m, "tracking")) { alpaca_value(fd, qs, "true"); return 1; }
     if (!strcmp(m, "utcdate")) {
-        char b[64]; time_t t = time(NULL); struct tm g;
+        char b[64]; time_t t = utc_now(); struct tm g;
         gmtime_r(&t, &g);
         snprintf(b, sizeof b, "\"%04d-%02d-%02dT%02d:%02d:%02dZ\"",
                  g.tm_year+1900, g.tm_mon+1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
@@ -593,6 +802,30 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
         alpaca_value(fd, qs, "null");
         return 1;
     }
+    /* Mandatory whenever CanSlew / CanSync report True. Returning
+     * NotImplemented for these while advertising the capability is a spec
+     * violation, and ConformU flags every variant. They act on the stored
+     * target, which is why TargetRA/Dec must be settable. */
+    if (!strcmp(m, "slewtotarget") || !strcmp(m, "slewtotargetasync") ||
+        !strcmp(m, "synctotarget")) {
+        char cmd[512], out[1024];
+        if (!g_target_set) {
+            alpaca_error(fd, qs, 1026, "target not set");   /* ValueNotSet */
+            return 1;
+        }
+        if (!strcmp(m, "synctotarget"))
+            snprintf(cmd, sizeof cmd,
+                     "%s/polaris-mount --lat %.6f --lon %.6f align --solved-ra %.6f --solved-dec %.6f 2>&1",
+                     g_astro, g_lat, g_lon, g_target_ra, g_target_dec);
+        else
+            snprintf(cmd, sizeof cmd,
+                     "%s/polaris-mount --lat %.6f --lon %.6f goto-radec --ra %.6f --dec %.6f 2>&1",
+                     g_astro, g_lat, g_lon, g_target_ra, g_target_dec);
+        run_capture(cmd, out, sizeof out);
+        alpaca_value(fd, qs, "null");
+        return 1;
+    }
+
     if (!strcmp(m, "abortslew")) {
         char cmd[256], out[512];
         snprintf(cmd, sizeof cmd, "%s/polaris-mount --host 127.0.0.1 abort 2>&1", g_astro);
@@ -602,7 +835,11 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     }
 
     (void)v;
-    alpaca_error(fd, qs, 1024, "not implemented");
+    /* An unrecognised method NAME is a malformed URL, not an unimplemented
+     * feature -- ConformU probes with a truncated name ("descrip") and requires
+     * an HTTP error. Genuinely unimplemented-but-valid members are handled
+     * above and answer 200 with ErrorNumber 1024. */
+    respond_400(fd, "unknown method name");
     return 1;
 }
 
