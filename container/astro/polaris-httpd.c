@@ -607,20 +607,19 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
         { alpaca_value(fd, qs, "false"); return 1; }
     if (!strcmp(m, "canslew") || !strcmp(m, "canslewasync"))
         { alpaca_value(fd, qs, "true"); return 1; }
-    /* CanSync is FALSE, deliberately.
+    /* CanSync is TRUE. A real two-axis sync IS possible: the 530 sequence
+     * (star-align) declares the mount is looking at a given alt/az in BOTH
+     * axes, which is exactly ASCOM's contract. An earlier version reported
+     * false because I looked at `align` (compass/527, azimuth-only) and never
+     * checked `star-align`.
      *
-     * ASCOM Sync means "the scope is really HERE -- correct your pointing model
-     * in BOTH axes". All we can do is correct the compass heading, which is an
-     * AZIMUTH-only correction; declination cannot be synced at all. Conform
-     * measured the consequence: Dec off by ~3600 arcsec after every sync.
-     *
-     * Advertising a capability we cannot honour is worse than not having it: a
-     * client would sync, believe its model was corrected, and point wrong for
-     * the rest of the session. Our own plate-solve alignment still uses the
-     * compass correction internally -- that is a different contract, made
-     * against a measured sky position rather than a client's assertion. */
-    if (!strcmp(m, "cansync"))
-        { alpaca_value(fd, qs, "false"); return 1; }
+     * HAZARD, honoured with a cooldown: repeated 530s are documented to wedge
+     * the motors ("send it ONCE" -- field traces from the Aperion work), and
+     * the first ConformU run left polestar_app alive but no longer listening.
+     * So syncs are rate-limited below. A refused sync returns a clear error
+     * rather than silently doing nothing. */
+    if (!strcmp(m, "cansync")) { alpaca_value(fd, qs, "true"); return 1; }
+
     if (!strcmp(m, "atpark") || !strcmp(m, "athome"))
         { alpaca_value(fd, qs, "false"); return 1; }
     /* NOT ispulseguiding: CanPulseGuide is False, so it must raise
@@ -804,9 +803,59 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
 
     /* --- slew / sync --- */
     if (!strcmp(m, "synctocoordinates") || !strcmp(m, "synctotarget")) {
-        alpaca_error(fd, qs, 1024,
-            "not implemented: this mount can only correct azimuth (compass "
-            "heading), so a two-axis sync cannot be honoured");
+        static time_t last_sync = 0;
+        const char *src = (body && *body) ? body : qs;
+        char v2[64], cmd[640], out[1024], ua[64];
+        double sra, sdec, alt = 0, az = 0;
+        time_t now = time(NULL);
+        int cooldown = 30;
+        { const char *e = getenv("SYNC_COOLDOWN_SEC"); if (e && *e) cooldown = atoi(e); }
+
+        if (!strcmp(m, "synctotarget")) {
+            if (!g_target_set) { alpaca_error(fd, qs, 1026, "target not set"); return 1; }
+            sra = g_target_ra; sdec = g_target_dec;
+        } else {
+            double dv;
+            if (!param(src, "RightAscension", v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+                respond_400(fd, "bad RightAscension"); return 1;
+            }
+            if (dv < 0 || dv >= 24) { alpaca_error(fd, qs, 1025, "RA must be 0..24 h"); return 1; }
+            sra = dv * 15.0;
+            if (!param(src, "Declination", v2, sizeof v2) || !parse_double_strict(v2, &dv)) {
+                respond_400(fd, "bad Declination"); return 1;
+            }
+            if (dv < -90 || dv > 90) { alpaca_error(fd, qs, 1025, "Dec must be -90..90"); return 1; }
+            sdec = dv;
+        }
+
+        /* Repeated 530s wedge the motors. Refuse rather than risk the mount. */
+        if (last_sync && (now - last_sync) < cooldown) {
+            alpaca_error(fd, qs, 1025,
+                "sync refused: repeated 530 alignment commands can wedge this "
+                "mount's motors, so syncs are rate limited");
+            return 1;
+        }
+
+        /* RA/Dec -> alt/az, then the 530 pair, which syncs BOTH axes. */
+        utc_arg(ua, sizeof ua);
+        snprintf(cmd, sizeof cmd,
+            "%s/polaris-mount --lat %.6f --lon %.6f %s radec2altaz --ra %.6f --dec %.6f 2>/dev/null",
+            g_astro, g_lat, g_lon, ua, sra, sdec);
+        if (run_capture(cmd, out, sizeof out) == 0) {
+            const char *q2 = strstr(out, "\"alt_deg\":");
+            if (q2) alt = atof(q2 + 10);
+            q2 = strstr(out, "\"az_deg\":");
+            if (q2) az = atof(q2 + 9);
+        }
+        if (alt <= 0) { alpaca_error(fd, qs, 1025, "target is below the horizon"); return 1; }
+
+        snprintf(cmd, sizeof cmd,
+            "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s star-align --alt %.6f --az %.6f 2>&1",
+            g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, alt, az);
+        run_capture(cmd, out, sizeof out);
+        last_sync = now;
+        g_target_ra = sra; g_target_dec = sdec; g_target_set = 1;
+        alpaca_value(fd, qs, "null");
         return 1;
     }
     if (!strcmp(m, "slewtocoordinates") || !strcmp(m, "slewtocoordinatesasync")) {
