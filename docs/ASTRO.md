@@ -230,23 +230,32 @@ SSID disappears; ssh, this web page, Alpaca and LX200 all go with it. There is
 no setting for it — `/app/wifi/` holds only start/stop scripts, and the timer
 lives inside the `polaris_wifi_bt` binary.
 
-### Keep Awake
+### Holding a connection open does NOT prevent it — tested, it does not work
 
-The trigger is the client count reaching **zero**, so the workaround is to stay
-connected: the **Wi-Fi** card on the web page holds one idle TCP connection to
-the control port, and the timer never fires. The setting is stored on the
-microSD (`keep-wifi-awake`) and survives a reboot.
+The obvious workaround is to keep a client connected so the count never reaches
+zero. It does not work, and the reason is worth recording so nobody spends the
+evening on it twice.
 
-It is **off by default**, for two honest reasons:
+A plain TCP connection to the control port is **never entered into the client
+table**. It raises `SP_EVENT_APP_CONNECT`, and it is even given an id — but no
+`SP_ClientCtxAdd` follows, and closing it produces:
 
-- **It costs battery.** The radio stays powered for as long as it is on.
-- **The device counts our connection as an app connecting.** While the mount is
-  unaligned that is exactly what makes the Benro app demand a compass
-  calibration, so the helper *waits for alignment* before it connects. Until
-  then the page shows it as armed rather than active.
+```
+SP_ClientCtxDel: not find this is id[13]
+```
 
-Turning it off releases the connection immediately, and the normal 60 s timer
-applies again from the next disconnect.
+Tested from loopback *and* from the Wi-Fi address, and with a valid protocol
+message sent after connecting (`1&284&2&-1#`, the same mode query the app
+sends). Same result each time: the connection is not a counted client, so
+`WifiCount` never moves and the timer fires regardless.
+
+What the app does to register itself is not yet known; whatever it is, it is not
+"open a socket and send a message". A **Keep Awake** toggle was built on this
+assumption and removed once it was measured, rather than left in place looking
+like it worked.
+
+A session that must survive the app disconnecting therefore needs the app kept
+connected — or the work finished before it is closed.
 
 ---
 
