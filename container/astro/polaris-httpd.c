@@ -260,6 +260,8 @@ static int param(const char *qs, const char *name, char *out, size_t cap) {
     return 0;
 }
 
+static int param(const char *qs, const char *name, char *out, size_t cap);
+
 /* ----------------------------------------------------------------- Alpaca */
 /*
  * ASCOM Alpaca telescope device. Enough for Stellarium / NINA / SkySafari to
@@ -271,10 +273,25 @@ static int param(const char *qs, const char *name, char *out, size_t cap) {
  *   - Errors go in ErrorNumber/ErrorMessage with HTTP 200, not an HTTP error.
  */
 static unsigned long g_server_txn = 0;
+/* Alpaca PUTs carry their parameters -- ClientTransactionID included -- in the
+ * request BODY, not the query string. handle_alpaca() parks it here so the
+ * envelope builders can find it without threading it through every call. */
+static const char *g_req_body = NULL;
+
+/* ClientTransactionID from query string, falling back to the PUT body. */
+static long client_txn(const char *qs) {
+    char cid[32];
+    if (param(qs, "ClientTransactionID", cid, sizeof cid)) return atol(cid);
+    if (g_req_body && param(g_req_body, "ClientTransactionID", cid, sizeof cid))
+        return atol(cid);
+    return 0;
+}
+static double g_target_ra = 0.0, g_target_dec = 0.0;
+static int    g_target_set = 0;
 
 static void alpaca_value(int fd, const char *qs, const char *value_json) {
-    char cid[32], out[1024];
-    long c = param(qs, "ClientTransactionID", cid, sizeof cid) ? atol(cid) : 0;
+    char out[1024];
+    long c = client_txn(qs);
     snprintf(out, sizeof out,
              "{\"Value\":%s,\"ClientTransactionID\":%ld,\"ServerTransactionID\":%lu,"
              "\"ErrorNumber\":0,\"ErrorMessage\":\"\"}",
@@ -283,8 +300,8 @@ static void alpaca_value(int fd, const char *qs, const char *value_json) {
 }
 
 static void alpaca_error(int fd, const char *qs, int num, const char *msg) {
-    char cid[32], out[1024], esc[512];
-    long c = param(qs, "ClientTransactionID", cid, sizeof cid) ? atol(cid) : 0;
+    char out[1024], esc[512];
+    long c = client_txn(qs);
     json_escape(msg, esc, sizeof esc);
     snprintf(out, sizeof out,
              "{\"Value\":0,\"ClientTransactionID\":%ld,\"ServerTransactionID\":%lu,"
@@ -309,6 +326,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
                          const char *body) {
     const char *m;
     char v[128];
+    g_req_body = body;
 
     if (strncmp(path, "/management/", 12) == 0) {
         if (strstr(path, "apiversions"))
@@ -361,6 +379,72 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     }
     if (!strcmp(m, "sitelatitude"))  { char b[64]; snprintf(b,sizeof b,"%.6f",g_lat); alpaca_value(fd, qs, b); return 1; }
     if (!strcmp(m, "sitelongitude")) { char b[64]; snprintf(b,sizeof b,"%.6f",g_lon); alpaca_value(fd, qs, b); return 1; }
+    if (!strcmp(m, "siteelevation")) { alpaca_value(fd, qs, "0"); return 1; }
+    if (!strcmp(m, "slewsettletime")) { alpaca_value(fd, qs, "0"); return 1; }
+    if (!strcmp(m, "doesrefraction")) { alpaca_value(fd, qs, "false"); return 1; }
+    if (!strcmp(m, "focallength")) {
+        char b[64]; snprintf(b, sizeof b, "%.4f", g_focal / 1000.0);   /* metres */
+        alpaca_value(fd, qs, b); return 1;
+    }
+    if (!strcmp(m, "trackingrate"))  { alpaca_value(fd, qs, "0"); return 1; }   /* sidereal */
+    if (!strcmp(m, "trackingrates")) { alpaca_value(fd, qs, "[0]"); return 1; }
+    if (!strcmp(m, "axisrates"))     { alpaca_value(fd, qs, "[]"); return 1; }
+    if (!strcmp(m, "declinationrate") || !strcmp(m, "rightascensionrate") ||
+        !strcmp(m, "guideratedeclination") || !strcmp(m, "guideraterightascension"))
+        { alpaca_value(fd, qs, "0"); return 1; }
+    if (!strcmp(m, "aperturearea") || !strcmp(m, "aperturediameter"))
+        { alpaca_value(fd, qs, "0"); return 1; }
+
+    /* Altitude/Azimuth: we genuinely have these from the mount. */
+    if (!strcmp(m, "altitude") || !strcmp(m, "azimuth")) {
+        double alt = 0, az = 0; char raw[512], b[64];
+        mount_pose(&alt, &az, raw, sizeof raw);
+        snprintf(b, sizeof b, "%.6f", !strcmp(m, "altitude") ? alt : az);
+        alpaca_value(fd, qs, b); return 1;
+    }
+
+    /* SiderealTime: polaris-mount reports lst_deg; Alpaca wants HOURS. */
+    if (!strcmp(m, "siderealtime")) {
+        char cmd[512], out[512], b[64];
+        double lst = 0;
+        snprintf(cmd, sizeof cmd,
+                 /* radec2altaz reports lst_deg; altaz2radec does NOT. */
+                 "%s/polaris-mount --lat %.6f --lon %.6f radec2altaz --ra 0 --dec 0 2>/dev/null",
+                 g_astro, g_lat, g_lon);
+        if (run_capture(cmd, out, sizeof out) == 0) {
+            const char *p2 = strstr(out, "\"lst_deg\":");
+            if (p2) lst = atof(p2 + 10);
+        }
+        snprintf(b, sizeof b, "%.6f", lst / 15.0);
+        alpaca_value(fd, qs, b); return 1;
+    }
+
+    /* Target coordinates: stored, and used by slewtotarget. */
+    if (!strcmp(m, "targetrightascension") || !strcmp(m, "targetdeclination")) {
+        char b[64];
+        if (!strcmp(method, "PUT")) {
+            const char *src = (body && *body) ? body : qs;
+            char v2[64];
+            const char *want = !strcmp(m, "targetrightascension")
+                             ? "TargetRightAscension" : "TargetDeclination";
+            if (param(src, want, v2, sizeof v2)) {
+                if (!strcmp(m, "targetrightascension")) g_target_ra = atof(v2) * 15.0;
+                else                                    g_target_dec = atof(v2);
+                g_target_set = 1;
+                alpaca_value(fd, qs, "null"); return 1;
+            }
+            alpaca_error(fd, qs, 1025, "value required"); return 1;
+        }
+        if (!strcmp(m, "targetrightascension")) {
+            if (!g_target_set) { alpaca_error(fd, qs, 1026, "target not set"); return 1; }
+            snprintf(b, sizeof b, "%.6f", g_target_ra / 15.0);
+        } else {
+            if (!g_target_set) { alpaca_error(fd, qs, 1026, "target not set"); return 1; }
+            snprintf(b, sizeof b, "%.6f", g_target_dec);
+        }
+        alpaca_value(fd, qs, b); return 1;
+    }
+    if (!strcmp(m, "destinationsideofpier")) { alpaca_value(fd, qs, "-1"); return 1; }
 
     /* --- where are we pointing? --- */
     if (!strcmp(m, "rightascension") || !strcmp(m, "declination")) {
@@ -410,8 +494,16 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             alpaca_error(fd, qs, 1025, "RightAscension/Declination required");
             return 1;
         }
-        double ra_deg = atof(ra_s) * 15.0;            /* hours -> degrees */
-        double dec_deg = atof(dec_s);
+        double ra_deg, dec_deg;
+        char *endp = NULL;
+        ra_deg = strtod(ra_s, &endp) * 15.0;          /* hours -> degrees */
+        if (endp == ra_s) { alpaca_error(fd, qs, 1025, "RightAscension is not a number"); return 1; }
+        endp = NULL;
+        dec_deg = strtod(dec_s, &endp);
+        if (endp == dec_s) { alpaca_error(fd, qs, 1025, "Declination is not a number"); return 1; }
+        if (ra_deg < 0 || ra_deg >= 360 || dec_deg < -90 || dec_deg > 90) {
+            alpaca_error(fd, qs, 1025, "coordinates out of range"); return 1;
+        }
         if (!strcmp(m, "synctocoordinates"))
             snprintf(cmd, sizeof cmd,
                      "%s/polaris-mount --lat %.6f --lon %.6f align --solved-ra %.6f --solved-dec %.6f 2>&1",
@@ -506,10 +598,44 @@ static void handle(int fd) {
     ssize_t n;
     char method[16] = {0}, target[1024] = {0}, path[1024], *qs;
 
-    n = read(fd, req, sizeof req - 1);
-    if (n <= 0) return;
-    req[n] = 0;
-    { char *e = strstr(req, "\r\n\r\n"); if (e) body = e + 4; }
+    /* Read headers, then DRAIN Content-Length bytes of body.
+     *
+     * A single read() is not enough: a PUT's body often arrives in a second TCP
+     * segment, and closing the socket with unread data in flight makes the
+     * kernel send RST -- the client sees "connection reset by peer" even though
+     * we answered. Alpaca PUTs carry their parameters in the body, so this also
+     * fixes reading them at all. */
+    {
+        size_t have = 0;
+        char *hdr_end = NULL;
+        long clen = 0;
+        while (have < sizeof req - 1) {
+            n = read(fd, req + have, sizeof req - 1 - have);
+            if (n <= 0) break;
+            have += (size_t)n;
+            req[have] = 0;
+            hdr_end = strstr(req, "\r\n\r\n");
+            if (hdr_end) break;
+        }
+        if (!have) return;
+        req[have] = 0;
+        if (!hdr_end) hdr_end = strstr(req, "\r\n\r\n");
+        if (hdr_end) {
+            const char *cl = strcasestr(req, "content-length:");
+            body = hdr_end + 4;
+            if (cl) clen = atol(cl + 15);
+            {
+                size_t body_have = have - (size_t)(body - req);
+                while ((long)body_have < clen && have < sizeof req - 1) {
+                    n = read(fd, req + have, sizeof req - 1 - have);
+                    if (n <= 0) break;
+                    have += (size_t)n;
+                    body_have += (size_t)n;
+                    req[have] = 0;
+                }
+            }
+        }
+    }
     if (sscanf(req, "%15s %1023s", method, target) != 2) return;
 
     if (!strcmp(method, "OPTIONS")) { respond(fd, 200, "text/plain", "", 0); return; }
