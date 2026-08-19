@@ -350,3 +350,61 @@ long subs have far more headroom. Fast shutter speeds ride the edge.
 
 Untested: whether the 6.1 s is the RAW card write. If so, JPEG-only shooting
 would cut it sharply — worth measuring before optimising anything else.
+
+## Auto-solve verification (2026-08-18), closed loop, no sky required
+
+Two stages, both on hardware, both with known answers.
+
+### Stage 1 -- render then solve, no mount, no camera
+
+`polaris-skysim` renders a real star field from the index files; the solver must
+recover the position it was given. At **960x640, the live-view resolution**:
+
+| rendered | solved | error | time |
+|---|---|---|---|
+| 83.8, -5.2 | 83.800489, -5.206315 | 22.8" | 4 s |
+| 202.5, 47.2 | 202.498551, 47.194369 | 20.6" | 3 s |
+| 10.7, 41.3 | 10.697905, 41.293083 | 25.5" | 1 s |
+| 279.2, 38.8 | 279.204279, 38.789531 | 39.6" | 2 s |
+
+So solver, index selection and scale math are sound at live-view scale. What is
+still unproven is only whether REAL stars register brightly enough in a ~1/30 s
+live-view frame -- that is a photometry question, not a geometry one.
+
+### Stage 2 -- inject a known pointing error, check it comes back
+
+With the mount aligned: read its physical pose, render the sky at *pose + 5 deg
+azimuth*, solve that, and ask `align` for the correction.
+
+```
+injected                5.000000 deg azimuth
+az_error_deg            5.007804        <- 0.008 deg (28") from truth
+alt_error_deg          -0.009018        <- ~0, correct: azimuth only was injected
+solved   RA 110.980766  Dec -20.019396
+rendered RA 110.980493  Dec -20.014260  <- agree to ~3.6"
+```
+
+That validates the whole chain end to end: pose -> error -> render -> extract ->
+solve -> coordinate conversion -> correction.
+
+### Known gap: 518 is silent at track:3
+
+`align` derives the correction from the mount's pose (518). At **track:3**, the
+never-aligned state after a cold boot, 518 does not answer:
+
+```
+$ polaris-mount pose        # track:3
+no 518 pose message arrived
+```
+
+Once an alignment has completed it answers normally (verified above). So
+auto-solve works for a RE-alignment but not for the first alignment after
+power-on -- which is exactly when people calibrate.
+
+Fix direction: fall back to **517** (raw motor angles), which always answers.
+517 is ground truth and absolute; 518 is frame-relative and gated. Do not
+confuse them -- an earlier session drew a wrong conclusion by reading 518 across
+a frame change.
+
+An earlier note in this session called this "blocked". That was an
+overgeneralisation from a single failed command in a single mount state.
