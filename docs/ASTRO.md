@@ -230,32 +230,42 @@ SSID disappears; ssh, this web page, Alpaca and LX200 all go with it. There is
 no setting for it — `/app/wifi/` holds only start/stop scripts, and the timer
 lives inside the `polaris_wifi_bt` binary.
 
-### Holding a connection open does NOT prevent it — tested, it does not work
+### Keep Awake — opcode 808 is what registers a client
 
-The obvious workaround is to keep a client connected so the count never reaches
-zero. It does not work, and the reason is worth recording so nobody spends the
-evening on it twice.
+Simply holding a connection open does **not** work, and understanding why took a
+protocol capture. A plain TCP connection is never entered into the client table:
+it raises `SP_EVENT_APP_CONNECT` and is even given an id, but no
+`SP_ClientCtxAdd` follows, and closing it gives `SP_ClientCtxDel: not find this
+is id[N]`. Sending ordinary protocol messages on it changes nothing.
 
-A plain TCP connection to the control port is **never entered into the client
-table**. It raises `SP_EVENT_APP_CONNECT`, and it is even given an id — but no
-`SP_ClientCtxAdd` follows, and closing it produces:
+Capturing a **real app connecting, from the first byte**, showed what does:
 
 ```
-SP_ClientCtxDel: not find this is id[13]
+rcv msg from App[5]: type:2; code:808; val:type:0;
+SP_MsgSysFromAppProc: client type[0]; id[5];
+SP_ClientCtxAdd: id[5]; type[wifi]; WifiCount[1], CellCount[0];
+SP_SendMsgToApp: code[808], val[ret:0;]
 ```
 
-Tested from loopback *and* from the Wi-Fi address, and with a valid protocol
-message sent after connecting (`1&284&2&-1#`, the same mode query the app
-sends). Same result each time: the connection is not a counted client, so
-`WifiCount` never moves and the timer fires regardless.
+The app announces itself with **opcode 808, `type:0`** after its initial
+property sweep. The device maps client type 0 to `type[wifi]`, increments
+`WifiCount`, and acks `ret:0`. Sending exactly that from our own connection
+produces the same three lines and takes `WifiCount` from 1 to 2 — and closing it
+now gives a *found* `SP_ClientCtxDel`, not "not find".
 
-What the app does to register itself is not yet known; whatever it is, it is not
-"open a socket and send a message". A **Keep Awake** toggle was built on this
-assumption and removed once it was measured, rather than left in place looking
-like it worked.
+So **Keep Awake** connects, sends `1&808&2&type:0;#`, and holds the socket. It
+re-registers on reconnect. Stored on the microSD, restored at boot, and **off by
+default**:
 
-A session that must survive the app disconnecting therefore needs the app kept
-connected — or the work finished before it is closed.
+- **It costs battery** — the radio stays powered.
+- **It waits for alignment before connecting.** Registering while the mount is
+  unaligned is what makes the Benro app demand a compass calibration, so until
+  the mount is aligned the page shows it as *armed* rather than active.
+
+> **The capture log contains credentials.** Opcode 790 returns the device's Wi-Fi
+> password and security answer (base64). `/app/sd/app-connect-capture.log` and
+> anything derived from it should be treated as sensitive — delete it when done,
+> and do not attach it to a bug report unedited.
 
 ---
 

@@ -16,7 +16,9 @@
 #  there is no setting for it.
 #
 #  The trigger is WifiCount reaching ZERO, so we keep one client connected: a
-#  single idle TCP connection to the control port, reopened if it ever drops.
+#  single TCP connection to the control port that REGISTERS ITSELF the way the
+#  app does (opcode 808, type:0), reopened if it ever drops. An unregistered
+#  connection does not count -- see below.
 #
 #  THE COST, WHICH IS REAL:
 #    * The device counts this as an app connecting (SP_EVENT_APP_CONNECT). While
@@ -70,9 +72,21 @@ while :; do
         while [ "${KEEPALIVE_REQUIRE_ALIGNED:-1}" = "1" ] && ! aligned; do sleep 20; done
         say "mount is aligned -- connecting"
     fi
-    # Hold one idle connection. `sleep` keeps nc's stdin open so it does not
-    # close the socket; nc exits when the peer closes, and we reconnect.
-    sleep 86400 2>/dev/null | nc "$HOST" "$PORT" >/dev/null 2>&1
+    # REGISTER, then hold. An idle connection is NOT a counted client: the
+    # device assigns it an id but never adds it to the context table, and
+    # closing it gives "SP_ClientCtxDel: not find this is id[N]". Captured from
+    # a real app connecting, the registration is opcode 808 with type:0 --
+    #
+    #     rcv msg from App[5]: type:2; code:808; val:type:0;
+    #     SP_MsgSysFromAppProc: client type[0]; id[5];
+    #     SP_ClientCtxAdd: id[5]; type[wifi]; WifiCount[1];
+    #     SP_SendMsgToApp: code[808], val[ret:0;]
+    #
+    # -- and sending exactly that from here produces the same three lines and
+    # increments WifiCount, which is what keeps the auto-off timer from firing.
+    # `sleep` holds nc's stdin open so the socket stays up; nc exits when the
+    # peer closes, and we re-register on reconnect.
+    { printf '1&808&2&type:0;#'; sleep 86400 2>/dev/null; } | nc "$HOST" "$PORT" >/dev/null 2>&1
     say "connection closed -- reconnecting in 5s"
     sleep 5
 done

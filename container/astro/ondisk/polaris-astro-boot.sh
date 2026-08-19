@@ -176,6 +176,14 @@ SITE=/app/sd/polaris-astro/site.conf
         fi
     fi
 
+    # Protocol capture of a fresh app connection. CAPTURE_APP_CONNECT=1 in
+    # site.conf. Survives a power cycle, which matters because the fault being
+    # investigated (wifi auto-off) ends in one.
+    if [ "${CAPTURE_APP_CONNECT:-0}" = "1" ] && [ -x "$ASTRO/capture-app-connect.sh" ]; then
+        echo "starting app-connect capture"
+        setsid "$ASTRO/capture-app-connect.sh" </dev/null >/dev/null 2>&1 &
+    fi
+
     # Auto-solve during the app's calibration. Set AUTOSOLVE=1 in site.conf.
     #
     # AUTOSOLVE_DRY_RUN defaults to 1 ON PURPOSE: armed, this writes a heading
