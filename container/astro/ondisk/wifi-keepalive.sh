@@ -34,11 +34,24 @@ MLOG=/app/Mlog.txt
 
 say() { echo "$(date '+%m-%d %H:%M:%S') $*" >> "$LOG"; }
 
-# Refuse while unaligned -- see above. Read passively from the device's own log,
-# exactly like the web server does; this opens no connection to decide.
+# Refuse while unaligned -- see above. Decided passively; this opens no
+# connection.
+#
+# THE LOG IS NOT ENOUGH ON ITS OWN. The device truncates /app/Mlog.txt, and it
+# has been observed holding no 284 lines at all minutes after an alignment. A
+# grep of the log therefore reports "not aligned" for a mount that is aligned
+# and tracking -- which is exactly what kept this helper parked. So prefer the
+# state file that polaris-httpd maintains (it records every track value it ever
+# learns, from the log or from a real read), and fall back to the log only if
+# the file is missing.
+TRACKF=${TRACK_FILE:-/tmp/polaris-track}
 aligned() {
-    _t=$(grep -a "code.284." "$MLOG" 2>/dev/null \
-         | sed -n 's/.*track:\([0-9-][0-9]*\).*/\1/p' | tail -1)
+    _t=""
+    [ -r "$TRACKF" ] && _t=$(sed -n 's/^\([0-9-][0-9]*\)$/\1/p' "$TRACKF" | head -1)
+    if [ -z "$_t" ]; then
+        _t=$(grep -a "code.284." "$MLOG" 2>/dev/null \
+             | sed -n 's/.*track:\([0-9-][0-9]*\).*/\1/p' | tail -1)
+    fi
     [ -n "$_t" ] && [ "$_t" != "3" ] && [ "$_t" != "-1" ]
 }
 

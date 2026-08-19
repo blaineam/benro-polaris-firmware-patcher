@@ -589,6 +589,20 @@ int main(int argc, char** argv) {
         }
         if (!arg_get(args, "mode", v, sizeof(v)))  mode = atoi(v);
         if (!arg_get(args, "track", v, sizeof(v))) track = atoi(v);
+        /* RECORD IT. The mount's alignment is otherwise only discoverable by
+         * grepping /app/Mlog.txt, which the device truncates -- it has been
+         * found holding no 284 lines at all minutes after an alignment. Every
+         * component then independently concludes "not aligned" for a mount that
+         * is aligned and tracking, and the ones that gate on it (the wifi
+         * keepalive, the web server's mount reads) stay parked forever.
+         *
+         * This is the honest place to write it down: we have just asked the
+         * mount and it has just answered. Anything that needs to know can read
+         * the file without opening a connection of its own. */
+        if (track >= 0) {
+            FILE *tf = fopen("/tmp/polaris-track", "w");
+            if (tf) { fprintf(tf, "%d\n", track); fclose(tf); }
+        }
         printf("{\"mode\":%d,\"track\":%d,\"aligned\":%s,\"astro\":%s}\n",
                mode, track, (track >= 0 && track != 3) ? "true" : "false",
                (mode == 8) ? "true" : "false");

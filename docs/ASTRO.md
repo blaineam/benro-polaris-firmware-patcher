@@ -262,6 +262,18 @@ default**:
   unaligned is what makes the Benro app demand a compass calibration, so until
   the mount is aligned the page shows it as *armed* rather than active.
 
+**How alignment is known, and why it used to be missed.** It cannot be
+rediscovered by grepping `/app/Mlog.txt`: the device truncates that file, and it
+has been observed holding *no* `284` lines minutes after an alignment, with the
+mount reporting `{"mode":8,"track":1,"aligned":true}`. Every component that
+re-derived alignment from the log therefore concluded "not aligned" for a mount
+that was aligned and tracking, and the keepalive sat parked. So the state is
+written down when it is legitimately learned: `polaris-mount state` records the
+track value to `/tmp/polaris-track`, and the web server both records and reloads
+it. Anything that needs to know reads the file, without opening a connection of
+its own. It is in `/tmp` deliberately — alignment does not survive a power cycle
+either.
+
 > **The capture log contains credentials.** Opcode 790 returns the device's Wi-Fi
 > password and security answer (base64). `/app/sd/app-connect-capture.log` and
 > anything derived from it should be treated as sensitive — delete it when done,

@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <time.h>
 #include <math.h>
 #include <sys/types.h>
@@ -40,6 +41,40 @@
 #define JOB_PID        "/tmp/polaris-job.pid"      /* pid of the running job */
 #define KEEPWIFI_FLAG  "/app/sd/polaris-astro/keep-wifi-awake"
 #define KEEPWIFI_PID   "/tmp/wifi-keepalive.pid"
+
+/* Find the keepalive by scanning /proc, not by trusting the pidfile and not
+ * with `ps | grep`.
+ *
+ * The pidfile is a hint, not the truth: a duplicate instance that starts, sees
+ * the first one and exits can take the file with it, after which the page
+ * reported "not running" while the helper was connected and registered. And a
+ * shell `ps | grep wifi-keepalive` run from here matches the very command line
+ * doing the matching -- that mistake has already killed this session's ssh
+ * twice and silently disabled a start guard. /proc has neither problem. */
+static pid_t find_keepalive(void) {
+    DIR *d = opendir("/proc");
+    struct dirent *e;
+    pid_t found = 0;
+    if (!d) return 0;
+    while ((e = readdir(d)) != NULL) {
+        char path[64], buf[256];
+        int fd, n; long pid;
+        char *end;
+        pid = strtol(e->d_name, &end, 10);
+        if (*end || pid <= 0) continue;
+        snprintf(path, sizeof path, "/proc/%ld/cmdline", pid);
+        fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        n = (int)read(fd, buf, sizeof buf - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = 0;
+        { int i; for (i = 0; i < n - 1; i++) if (!buf[i]) buf[i] = ' '; }
+        if (strstr(buf, "wifi-keepalive.sh")) { found = (pid_t)pid; break; }
+    }
+    closedir(d);
+    return found;
+}
 #define JOB_START      "/tmp/polaris-job.start"    /* unix time it began */
 #define ASTRO_DIR      "/app/astro"
 
@@ -179,9 +214,32 @@ static int log_state(int *mode, int *track) {
  * right now" is the common case and does NOT mean "unaligned" -- it means we
  * do not know yet. Remembering the last value makes the decision stable. */
 static int g_last_track = -1;
+#define TRACK_FILE "/tmp/polaris-track"
 
+/* PERSIST WHAT WE LEARN. The mount's state is read out of /app/Mlog.txt, and
+ * the device TRUNCATES that file -- it has been found at 0 bytes, with no 284
+ * lines at all, minutes after an alignment. Anything that re-derives alignment
+ * by grepping the log therefore forgets it, which is how the wifi keepalive
+ * sat "waiting for the mount to be aligned" while the mount was aligned and
+ * tracking. Recording it in /tmp means every component agrees, and it survives
+ * a restart of this server (but not a reboot, which is correct -- alignment
+ * does not survive a power cycle either). */
 static void note_track(int track) {
-    if (track >= 0) g_last_track = track;
+    if (track < 0) return;
+    if (track != g_last_track) {
+        FILE *f = fopen(TRACK_FILE, "w");
+        if (f) { fprintf(f, "%d\n", track); fclose(f); }
+    }
+    g_last_track = track;
+}
+
+/* read back what a previous run (or another component) recorded */
+static void load_track(void) {
+    FILE *f = fopen(TRACK_FILE, "r");
+    int t;
+    if (!f) return;
+    if (fscanf(f, "%d", &t) == 1 && t >= 0) g_last_track = t;
+    fclose(f);
 }
 
 /* Tri-state: 1 aligned, 0 known-unaligned, -1 unknown. */
@@ -1646,6 +1704,7 @@ static void handle(int fd) {
                 unlink(KEEPWIFI_FLAG);
                 read_file(KEEPWIFI_PID, pb, sizeof pb);
                 kp = atol(pb);
+                if (kp <= 0 || kill((pid_t)kp, 0) != 0) kp = (long)find_keepalive();
                 if (kp > 0) {
                     int w;
                     /* it is a session leader, so signal the group -- killing
@@ -1663,13 +1722,19 @@ static void handle(int fd) {
                         kill((pid_t)kp, SIGKILL);
                         for (w = 0; w < 10 && kill((pid_t)kp, 0) == 0; w++) usleep(100000);
                     }
+                    /* duplicates can exist -- earlier races left two running */
+                    { pid_t o; int guard = 0;
+                      while ((o = find_keepalive()) > 0 && guard++ < 8) {
+                          kill(-o, SIGTERM); kill(o, SIGTERM);
+                          usleep(300000);
+                          if (kill(o, 0) == 0) { kill(-o, SIGKILL); kill(o, SIGKILL); usleep(200000); }
+                      } }
                 }
                 unlink(KEEPWIFI_PID);
             }
         }
         { FILE *f = fopen(KEEPWIFI_FLAG, "r"); if (f) { on = 1; fclose(f); } }
-        { char pb[32]; long kp; read_file(KEEPWIFI_PID, pb, sizeof pb); kp = atol(pb);
-          running = (kp > 0 && kill((pid_t)kp, 0) == 0); }
+        running = (find_keepalive() > 0);
         snprintf(out, sizeof out,
                  "{\"ok\":true,\"enabled\":%s,\"running\":%s,\"aligned\":%s}",
                  on ? "true" : "false", running ? "true" : "false",
@@ -1841,6 +1906,7 @@ int main(int argc, char **argv) {
     }
 
     if (access(JOB_STATUS, F_OK) != 0) set_status("idle");
+    load_track();
     fprintf(stderr, "polaris-httpd on :%d  (lat %.5f lon %.5f focal %.0fmm, mount %s:%d)\n",
             port, g_lat, g_lon, g_focal, g_mount_host, g_mount_port);
     if (lxfd >= 0) fprintf(stderr, "LX200 on :%d\n", lx_port);
