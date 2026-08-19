@@ -21,6 +21,8 @@ FOCAL=400; APPLY=0; FRAME=""; WAIT=${CAPTURE_WAIT:-25}
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) APPLY=1; shift;;
+    --latest) FRAME="LATEST"; shift;;
+    --wait) FRAME="WAIT"; shift;;
     --frame) FRAME="$2"; shift 2;;
     --focal) FOCAL="$2"; shift 2;;
     -h|--help) sed -n '2,17p' "$0"; exit 0;;
@@ -41,7 +43,32 @@ newest_frame() {
     done | sort -rn | head -1 | cut -d" " -f2-
 }
 
-if [ -z "$FRAME" ]; then
+# --latest: solve the newest frame already on disk. --wait: sit until a NEW one
+# appears, so YOU trigger the shot in the Benro app and we solve it.
+#
+# Both exist because astro mode will not accept an externally-initiated capture:
+# opcode 264 is ignored outright, and the 272 lapse sequence worked once and was
+# then refused while tracking was running. Rather than keep guessing at the
+# astro-mode capture opcode, let the app do what it is good at and have the
+# solver follow.
+if [ "$FRAME" = "LATEST" ]; then
+    FRAME=$(newest_frame)
+    [ -n "$FRAME" ] || { echo "[solve-now] no frames found" >&2; exit 1; }
+    echo "[solve-now] newest frame: $FRAME" >&2
+elif [ "$FRAME" = "WAIT" ]; then
+    before=$(newest_frame)
+    echo "[solve-now] waiting for a new frame -- take a shot in the Benro app" >&2
+    i=0
+    while [ $i -lt "${WAIT_FOR_FRAME:-300}" ]; do
+        sleep 1; i=$((i+1))
+        FRAME=$(newest_frame)
+        [ -n "$FRAME" ] && [ "$FRAME" != "$before" ] && break
+        FRAME=""
+    done
+    [ -n "$FRAME" ] || { echo "[solve-now] no new frame appeared" >&2; exit 1; }
+    sleep 2                      # let the write finish
+    echo "[solve-now] got: $FRAME" >&2
+elif [ -z "$FRAME" ]; then
     before=$(newest_frame)
     echo "[solve-now] firing one frame..." >&2
     "$ASTRO/polaris-mount" --host 127.0.0.1 send --msg '1&264&2&state:1;bulb:0;c:-1#' >/dev/null 2>&1

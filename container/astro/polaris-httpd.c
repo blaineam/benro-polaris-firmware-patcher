@@ -138,7 +138,12 @@ static int mount_pose(double *alt, double *az, char *raw, size_t rawcap) {
 /* ------------------------------------------------------------------- jobs */
 
 /* Fork a solve job. Parent returns immediately so the UI can poll. */
-static void start_solve(int apply) {
+/* mode: 0 = fire our own capture, 1 = solve newest frame, 2 = wait for a new one.
+ *
+ * Modes 1/2 exist because astro mode refuses externally-initiated captures --
+ * opcode 264 is ignored and the 272 lapse sequence is refused while tracking.
+ * In astro mode the user triggers the shot in the Benro app and we follow. */
+static void start_solve(int apply, int mode) {
     pid_t pid;
     char status[32];
     read_file(JOB_STATUS, status, sizeof status);
@@ -160,9 +165,10 @@ static void start_solve(int apply) {
         char cmd[1024];
         int fd = open(JOB_LOG, O_WRONLY|O_CREAT|O_TRUNC, 0644);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
+        const char *mflag = (mode == 1) ? "--latest" : (mode == 2 ? "--wait" : "");
         snprintf(cmd, sizeof cmd,
-                 "LAT=%.6f LON=%.6f sh %s/solve-now.sh --focal %.0f %s > %s 2>>%s",
-                 g_lat, g_lon, g_astro, g_focal,
+                 "LAT=%.6f LON=%.6f WAIT_FOR_FRAME=300 sh %s/solve-now.sh --focal %.0f %s %s > %s 2>>%s",
+                 g_lat, g_lon, g_astro, g_focal, mflag,
                  apply ? "--apply" : "", JOB_RESULT, JOB_LOG);
         int rc = system(cmd);
         set_status(rc == 0 ? "done" : "failed");
@@ -425,8 +431,11 @@ static const char PAGE[] =
 "</style></head><body>"
 "<h1>Benro Polaris &mdash; Plate Solver</h1>"
 "<div class=card><h2>Solve</h2>"
-"<button id=b1 onclick=go(0)>Capture &amp; Solve</button>"
-"<button id=b2 class=alt onclick=go(1)>Solve &amp; Apply to Mount</button>"
+"<button id=b1 onclick=go(0,'latest')>Solve Latest Frame</button>"
+"<button id=b2 onclick=go(0,'wait')>Wait for Next Shot</button>"
+"<button id=b3 class=alt onclick=go(1,'latest')>Solve Latest &amp; Apply</button>"
+"<div style='color:var(--dim);font-size:12.5px;margin-top:8px'>In astro mode the app "
+"owns the shutter &mdash; trigger the shot in the Benro app, then solve it here.</div>"
 "<div class=row style='margin-top:10px'><span>status</span>"
 "<span><span id=st class='s idle'>idle</span></span></div></div>"
 "<div class=card><h2>Last solution</h2><div id=sol></div></div>"
@@ -440,12 +449,12 @@ static const char PAGE[] =
 "var D=Math.floor(deg),m=(deg-D)*60,M=Math.floor(m),S=(m-M)*60;"
 "return s+D+'\\u00b0 '+M+'\\u2032 '+S.toFixed(1)+'\\u2033'}\n"
 "function row(k,v){return '<div class=row><span>'+k+'</span><span>'+v+'</span></div>'}\n"
-"function go(a){document.getElementById('b1').disabled=true;document.getElementById('b2').disabled=true;\n"
-"  fetch('/api/solve'+(a?'?apply=1':''),{method:'POST'}).then(tick)}\n"
+"function go(a,m){['b1','b2','b3'].forEach(i=>document.getElementById(i).disabled=true);\n"
+"  fetch('/api/solve?mode='+m+(a?'&apply=1':''),{method:'POST'}).then(tick)}\n"
 "function tick(){fetch('/api/state').then(r=>r.json()).then(s=>{\n"
 "  var st=document.getElementById('st');st.textContent=s.status;st.className='s '+s.status;\n"
 "  var busy=s.status==='running';\n"
-"  document.getElementById('b1').disabled=busy;document.getElementById('b2').disabled=busy;\n"
+"  ['b1','b2','b3'].forEach(i=>document.getElementById(i).disabled=busy);\n"
 "  var o=s.solution;\n"
 "  document.getElementById('sol').innerHTML = (o&&o.solved)\n"
 "    ? row('RA',hms(o.ra_deg))+row('Dec',dms(o.dec_deg))+row('roll',f(o.roll_deg,2)+'\\u00b0')\n"
@@ -512,9 +521,14 @@ static void handle(int fd) {
     }
 
     if (!strcmp(path, "/api/solve")) {
-        char a[16];
+        char a[16], m[16];
         int apply = param(qs, "apply", a, sizeof a) && a[0] == '1';
-        start_solve(apply);
+        int mode = 0;
+        if (param(qs, "mode", m, sizeof m)) {
+            if (!strcmp(m, "latest")) mode = 1;
+            else if (!strcmp(m, "wait")) mode = 2;
+        }
+        start_solve(apply, mode);
         respond_json(fd, "{\"started\":true}");
         return;
     }
