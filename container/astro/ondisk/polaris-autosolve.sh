@@ -70,26 +70,64 @@ STUB_UTC=${STUB_UTC:-}
 # the app tells the device its timezone every time it connects.
 TZ_OFFSET_SEC=${TZ_OFFSET_SEC:-auto}
 
+# Persisted because the 782 is TRANSIENT. The app sends it once on connect and
+# Mlog.txt truncates within seconds (observed: 2395 bytes, zero 782 lines
+# minutes after a calibration). Grepping the log for it works exactly once, if
+# you happen to look in time -- so we catch it live in the watcher loop below
+# and cache it here, where it survives truncation and restarts.
+TZ_CACHE=${TZ_CACHE:-/app/sd/polaris-astro/tz.cache}
+
 detect_tz_offset() {
     # 782 looks like: val:date:2026-08-18;time:18:09:50;zone:--25200;
-    # The zone field is seconds EAST of UTC (so -25200 for PDT). Note the app
-    # writes a stray extra '-'; tolerate one or two.
+    # zone is seconds EAST of UTC (-25200 for PDT); the app writes a stray extra
+    # '-', so tolerate one or two. We return the amount to ADD to reach UTC.
     _z=$(grep -a "code:782" /app/Mlog.txt 2>/dev/null \
          | sed -n 's/.*zone:-\{1,2\}\([0-9][0-9]*\).*/\1/p' | tail -1)
-    if [ -n "$_z" ]; then
-        echo $(( _z ))          # zone is negative -> add |zone| to reach UTC
-        return 0
+    if [ -n "$_z" ]; then echo $(( _z )); return 0; fi
+    if [ -s "$TZ_CACHE" ]; then
+        _z=$(cat "$TZ_CACHE" 2>/dev/null)
+        case "$_z" in ''|*[!0-9-]*) return 1;; esac
+        echo "$_z"; return 0
     fi
     return 1
 }
 
-if [ "$TZ_OFFSET_SEC" = "auto" ]; then
-    if TZ_OFFSET_SEC=$(detect_tz_offset); then
-        :
-    else
-        TZ_OFFSET_SEC=0
+# called from the watcher loop the moment a 782 goes past
+note_tz_from_line() {
+    _z=$(echo "$1" | sed -n 's/.*zone:-\{1,2\}\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_z" ] || return 0
+    mkdir -p "$(dirname "$TZ_CACHE")" 2>/dev/null
+    if [ "$_z" != "$(cat "$TZ_CACHE" 2>/dev/null)" ]; then
+        echo "$_z" > "$TZ_CACHE"
+        log "clock: app reported its timezone (zone -$_z) -> cached in $TZ_CACHE"
     fi
+    if [ "$TZ_AUTO" = "1" ] && [ "$_z" != "$TZ_OFFSET_SEC" ]; then
+        log "clock: TZ_OFFSET_SEC $TZ_OFFSET_SEC -> $_z (UTC now $(TZ_OFFSET_SEC=$_z; utc_now))"
+        TZ_OFFSET_SEC=$_z
+    fi
+}
+
+# Auto-detect is RE-TRIED at every arm, not just at startup.
+#
+# The daemon starts at boot, before the app has connected, so at startup there
+# is no 782 in the log and detection yields nothing. Latching 0 there would mean
+# running all night on a clock seven hours wrong -- ~105 deg of hour angle --
+# while looking perfectly healthy. TZ_AUTO records that we should keep trying.
+TZ_AUTO=0
+if [ "$TZ_OFFSET_SEC" = "auto" ]; then
+    TZ_AUTO=1
+    TZ_OFFSET_SEC=$(detect_tz_offset) || TZ_OFFSET_SEC=0
 fi
+
+refresh_tz() {
+    [ "$TZ_AUTO" = "1" ] || return 0
+    _new=$(detect_tz_offset) || return 0
+    [ -n "$_new" ] || return 0
+    if [ "$_new" != "$TZ_OFFSET_SEC" ]; then
+        log "clock: picked up the app's timezone -- TZ_OFFSET_SEC $TZ_OFFSET_SEC -> $_new"
+        TZ_OFFSET_SEC=$_new
+    fi
+}
 
 # UTC as a string polaris-mount accepts, corrected for the device clock.
 utc_now() {
@@ -229,7 +267,47 @@ SIM_STATUS=${SIM_STATUS:-}                 # host:port of the sim's status port
 RENDER_W=${RENDER_W:-960}
 RENDER_H=${RENDER_H:-640}
 
+# Set by handle_arm from the app's 519 so the render camera knows where the
+# mount was actually sent.
+ARM_ALT=""; ARM_AZ=""
+
 grab_frame() {
+    # SIMULATED SKY ON A REAL MOUNT.
+    #
+    # No SIM_STATUS, but CAPTURE_MODE=render: draw the sky at the position the
+    # app just slewed to (its 519 target), offset by RENDER_AZ_OFFSET /
+    # RENDER_ALT_OFFSET. That fakes a compass error of exactly that size, so a
+    # REAL calibration -- real 519, real 530 step:1 from the app -- can be run
+    # end to end against a known answer, in daylight, without waiting for stars.
+    #
+    # It deliberately does NOT read 518: during a first calibration the mount is
+    # at track:3 and 518 is silent. The 519 target is always available.
+    if [ "${CAPTURE_MODE:-liveview}" = "render" ] && [ -z "$SIM_STATUS" ]; then
+        [ -n "$ARM_AZ" ] || { log "render-from-target needs an armed 519 first"; return 1; }
+        _raz=$(awk -v a="$ARM_AZ" -v o="${RENDER_AZ_OFFSET:-0}" \
+                 'BEGIN{v=a+o; while(v<0)v+=360; while(v>=360)v-=360; printf "%.6f", v}')
+        _ralt=$(awk -v a="$ARM_ALT" -v o="${RENDER_ALT_OFFSET:-0}" 'BEGIN{printf "%.6f", a+o}')
+        [ -n "$STUB_UTC" ] || [ "${TZ_OFFSET_SEC:-0}" -eq 0 ] 2>/dev/null || UTCARG="--utc $(utc_now)"
+        _rj=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
+                altaz2radec --alt "$_ralt" --az "$_raz" 2>/dev/null)
+        _rra=$(echo  "$_rj" | sed -n 's/.*"ra_deg":\([-0-9.]*\).*/\1/p')
+        _rdec=$(echo "$_rj" | sed -n 's/.*"dec_deg":\([-0-9.]*\).*/\1/p')
+        [ -n "$_rra" ] || { log "could not convert the render position"; return 1; }
+        _idx=""
+        for f in "${INDEXES:-/app/sd/astrometry}"/index-*.fits; do
+            [ -f "$f" ] && _idx="$_idx --index $f"
+        done
+        rm -f /tmp/autosolve-lv.jpg
+        "$ASTRO/polaris-skysim" $_idx --ra "$_rra" --dec "$_rdec" \
+            --focal-mm "$FOCAL" --sensor-mm 36 \
+            --width "${RENDER_W:-960}" --height "${RENDER_H:-640}" \
+            --out /tmp/autosolve-lv.jpg >/dev/null 2>&1
+        [ -s /tmp/autosolve-lv.jpg ] || { log "render failed"; return 1; }
+        log "  [simulated sky] target alt=$ARM_ALT az=$ARM_AZ, offset by ${RENDER_AZ_OFFSET:-0} deg az"
+        log "  [simulated sky] rendered alt=$_ralt az=$_raz -> ra=$_rra dec=$_rdec"
+        echo /tmp/autosolve-lv.jpg
+        return 0
+    fi
     if [ "${CAPTURE_MODE:-liveview}" = "render" ]; then
         [ -n "$SIM_STATUS" ] || { log "CAPTURE_MODE=render needs SIM_STATUS=host:port"; return 1; }
         _sh=$(echo "$SIM_STATUS" | cut -d: -f1)
@@ -276,7 +354,9 @@ wire_to_az() {
 
 handle_arm() {
     _yaw=$1; _pitch=$2
+    refresh_tz          # the app is connected now, so 782 is in the log
     _az=$(wire_to_az "$_yaw")
+    ARM_AZ="$_az"; ARM_ALT="$_pitch"
     log "ARMED: app target yaw=$_yaw (az=$_az) pitch=$_pitch -- solving"
 
     # the app's target, as a search hint
@@ -463,11 +543,17 @@ apply_correction() {
 }
 
 log "clock: device is $(date "+%H:%M:%S"), TZ_OFFSET_SEC=$TZ_OFFSET_SEC -> UTC $(utc_now)"
+[ "$TZ_AUTO" = "1" ] && [ "$TZ_OFFSET_SEC" = "0" ] && \
+    log "  (no 782 seen yet -- will re-read the app's timezone when it connects)"
 log "autosolve watching (dry_run=$DRY_RUN focal=${FOCAL}mm gates: logodds>=$MIN_LOGODDS matches>=$MIN_MATCHES)"
 
 LAST_YAW=""; LAST_PITCH=""
-"$ASTRO/polaris-logwatch" --match "code:519" --match "code:530" | while read -r line; do
+"$ASTRO/polaris-logwatch" --match "code:519" --match "code:530" --match "code:782" \
+  | while read -r line; do
     case "$line" in
+      *"code:782"*)
+        note_tz_from_line "$line"
+        ;;
       *"code:519"*)
         LAST_YAW=$(echo   "$line" | sed -n 's/.*yaw:\([-0-9.]*\).*/\1/p')
         LAST_PITCH=$(echo "$line" | sed -n 's/.*pitch:\([-0-9.]*\).*/\1/p')
