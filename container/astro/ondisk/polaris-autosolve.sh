@@ -247,6 +247,25 @@ handle_arm() {
     return $?
 }
 
+# Hand off to the guider once the target is centred and confirmed.
+#
+# GUIDE=1 in site.conf enables it. It runs as its own process so a guiding
+# failure can never wedge the alignment path, and only ONE runs at a time --
+# a second guider would fight the first for the mount.
+start_guiding() {
+    [ "${GUIDE:-0}" = "1" ] || return 0
+    if ps 2>/dev/null | grep -q "[p]olaris-guide"; then
+        log "guider already running -- not starting a second"
+        return 0
+    fi
+    log "starting the guider on ra=$1 dec=$2 (dry_run=${GUIDE_DRY_RUN:-$DRY_RUN})"
+    LAT="$LAT" LON="$LON" FOCAL_MM="$FOCAL" \
+    DRY_RUN="${GUIDE_DRY_RUN:-$DRY_RUN}" \
+    INTERVAL="${GUIDE_INTERVAL:-30}" THRESH_ARCSEC="${GUIDE_THRESH:-60}" \
+        setsid sh "$ASTRO/polaris-guide.sh" --ra "$1" --dec "$2" \
+        </dev/null >/tmp/guide.out 2>&1 &
+}
+
 # CORRECT -> CENTRE -> VERIFY -> CONFIRM
 #
 # The app has already slewed to the target's alt/az. Those coordinates are
@@ -316,6 +335,7 @@ apply_correction() {
             log "centred -- confirming (530 step:2)"
             mount_send "1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
             log "done -- dialog should be dismissed"
+            start_guiding "$_vra" "$_vdec"
             return 0
         fi
         # still off: refine the heading from this newer solve and try again
