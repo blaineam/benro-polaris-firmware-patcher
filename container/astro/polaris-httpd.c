@@ -55,6 +55,11 @@ static double g_lat = 0.0, g_lon = 0.0;
 static int    g_have_pos = 0;
 static double g_focal = 400.0;
 
+/* Manual focal override, set from the web UI and shared with the solve scripts
+ * through a file so the autosolve daemon honours it too. Empty file / absent =
+ * automatic (EXIF, then the cached focal, then a range search). */
+#define FOCAL_OVERRIDE_FILE "/app/sd/polaris-astro/focal-override"
+
 /* ---------------------------------------------------------------- helpers */
 
 static double stage2_now_ms(void) {
@@ -296,9 +301,13 @@ static void start_solve(int apply, int mode) {
         int fd = open(JOB_LOG, O_WRONLY|O_CREAT|O_TRUNC, 0644);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
         const char *mflag = (mode == 1) ? "--latest" : (mode == 2 ? "--wait" : "");
+        /* --focal auto: let polaris-align.sh resolve it (manual override file,
+         * then EXIF, then the cached focal, then a range search). Forcing
+         * g_focal here would reintroduce the bug that cost a whole night --
+         * a stale command-line focal overriding what the frame itself says. */
         snprintf(cmd, sizeof cmd,
-                 "LAT=%.6f LON=%.6f WAIT_FOR_FRAME=300 sh %s/solve-now.sh --focal %.0f %s %s > %s 2>>%s",
-                 g_lat, g_lon, g_astro, g_focal, mflag,
+                 "LAT=%.6f LON=%.6f WAIT_FOR_FRAME=300 sh %s/solve-now.sh --focal auto %s %s > %s 2>>%s",
+                 g_lat, g_lon, g_astro, mflag,
                  apply ? "--apply" : "", JOB_RESULT, JOB_LOG);
         int rc = system(cmd);
         set_status(rc == 0 ? "done" : "failed");
@@ -791,9 +800,26 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "aperturearea") || !strcmp(m, "aperturediameter"))
         { alpaca_value(fd, qs, "0"); return 1; }
 
-    /* Altitude/Azimuth: we genuinely have these from the mount. */
+    /* Altitude/Azimuth: we genuinely have these from the mount.
+     *
+     * GATED, and this one was the hole. RightAscension/Declination check
+     * may_read_mount(); these two did not, so ANY Alpaca client that polls
+     * position -- which is the first thing they all do on connect -- opened a
+     * connection to the control port per request while the mount was
+     * unaligned, and that is precisely what makes the Benro app demand a
+     * compass calibration. It needs no action from us at all: discovery
+     * advertises the device on UDP 32227, a running ConformU/NINA/Stellarium
+     * finds it by itself and starts polling. A compass prompt appearing in
+     * single-photo mode, with nobody touching this box, is explained by
+     * exactly this path. */
     if (!strcmp(m, "altitude") || !strcmp(m, "azimuth")) {
         double alt = 0, az = 0; char raw[512], b[64];
+        if (!may_read_mount()) {
+            alpaca_error(fd, qs, 1024,
+                         "mount is not aligned: reading it now would make the "
+                         "Benro app demand a compass calibration");
+            return 1;
+        }
         mount_pose(&alt, &az, raw, sizeof raw);
         snprintf(b, sizeof b, "%.6f", !strcmp(m, "altitude") ? alt : az);
         alpaca_value(fd, qs, b); return 1;
@@ -862,7 +888,16 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "rightascension") || !strcmp(m, "declination")) {
         double ra = 0, dec = 0;
         char b[64];
-        current_radec(&ra, &dec);
+        /* current_radec falls back to the last solve when the mount cannot be
+         * read. With no solve yet it has NOTHING, and answering 0/0 would put
+         * the telescope at the vernal equinox in every planetarium app -- the
+         * exact bug the LX200 side was fixed for. Say so instead. */
+        if (!current_radec(&ra, &dec)) {
+            alpaca_error(fd, qs, 1024,
+                         "position unknown: mount is not aligned and nothing "
+                         "has been plate-solved yet");
+            return 1;
+        }
         if (!strcmp(m, "rightascension")) snprintf(b, sizeof b, "%.6f", ra / 15.0); /* HOURS */
         else                              snprintf(b, sizeof b, "%.6f", dec);
         alpaca_value(fd, qs, b);
@@ -1302,6 +1337,17 @@ static const char PAGE[] =
 "<div class=row style='margin-top:10px'><span>status</span>"
 "<span><span id=st class='s idle'>idle</span></span></div></div>"
 "<div class=card><h2>Last solution</h2><div id=sol></div></div>"
+"<div class=card><h2>Focal length</h2>"
+"<div id=fcs style='margin-bottom:8px'></div>"
+"<input id=fin type=number min=1 max=100000 step=any placeholder='e.g. 400' "
+  "style='background:#0a0d13;color:var(--fg);border:1px solid #2c3444;border-radius:8px;"
+  "padding:10px;font-size:15px;width:130px;margin-right:6px'>"
+"<button style='padding:9px 14px;font-size:14px' onclick=setf()>Set</button>"
+"<button class=alt style='padding:9px 14px;font-size:14px' onclick=setf('auto')>Auto</button>"
+"<div id=ferr style='color:var(--err);font-size:12.5px;margin-top:6px'></div>"
+"<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Auto reads the focal from each "
+"frame&rsquo;s EXIF. Set it manually for a telescope or a manual lens, which report none &mdash; "
+"a wrong focal makes solving impossible, not just slow.</div></div>"
 "<div class=card><h2>Mount</h2><div id=mnt></div>"
 "<button class=alt style='margin-top:8px;padding:7px 12px;font-size:13px' onclick=mnow()>Read Mount</button>"
 "<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Read on demand only &mdash; polling the mount "
@@ -1335,6 +1381,19 @@ static const char PAGE[] =
 "    +row('aligned',s.aligned?'yes':'no')+row('tracking',s.tracking?'yes':'no')}\n"
 "  document.getElementById('log').textContent=s.log||'(empty)';\n"
 "})}\n"
+"function fshow(d){var t;\n"
+"  if(d.override) t='<b>'+d.override+' mm</b> &mdash; manual override';\n"
+"  else if(d.exif_cache) t='auto &mdash; last frame reported <b>'+d.exif_cache+' mm</b>';\n"
+"  else t='auto &mdash; no focal seen yet; will search a range';\n"
+"  document.getElementById('fcs').innerHTML=t}\n"
+"function fload(){fetch('/api/focal').then(r=>r.json()).then(fshow)}\n"
+"function setf(v){var e=document.getElementById('ferr');e.textContent='';\n"
+"  var val=(v==='auto')?'auto':document.getElementById('fin').value;\n"
+"  if(v!=='auto'&&!val){e.textContent='enter a focal length in mm';return}\n"
+"  fetch('/api/focal?focal='+encodeURIComponent(val),{method:'POST'})\n"
+"   .then(r=>r.json()).then(d=>{if(d.ok){if(v==='auto')document.getElementById('fin').value='';fshow(d)}\n"
+"     else e.textContent=d.error||'failed'})}\n"
+"fload();\n"
 "tick();var iv=setInterval(tick,4000);\n// poll fast only while a job is actually running\nfunction rate(busy){clearInterval(iv);iv=setInterval(tick,busy?1500:4000)}\n\n"
 "</script></body></html>";
 
@@ -1454,6 +1513,50 @@ static void handle(int fd) {
             "\"aligned\":%s,\"tracking\":%s,\"solution\":%s,\"log\":\"%s\"}",
             status, want_mount?"true":"false", mount_blocked?"true":"false", alt, az,
             aligned?"true":"false", tracking?"true":"false", result, logesc);
+        respond_json(fd, out);
+        return;
+    }
+
+    /* Focal length. GET reports what the solver will use and where it came
+     * from; POST sets or clears the manual override.
+     *
+     * The override exists because a telescope or an adapted manual lens has no
+     * electrical contacts and reports NO focal length, and a body will stamp a
+     * stale value into EXIF for one. A typed-in number is better information
+     * than anything we can infer, so it outranks EXIF. "auto" deletes it. */
+    if (!strcmp(path, "/api/focal")) {
+        char ovr[64] = "", cache[64] = "", out[512];
+        if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
+            char v[64] = "";
+            /* accept ?focal=... or a form body */
+            if (!param(qs, "focal", v, sizeof v) && body)
+                param(body, "focal", v, sizeof v);
+            if (!v[0] || !strcmp(v, "auto") || !strcmp(v, "0")) {
+                unlink(FOCAL_OVERRIDE_FILE);
+            } else {
+                double d = atof(v);
+                /* Reject nonsense rather than storing it: a bad focal does not
+                 * make solving slow, it makes it IMPOSSIBLE, and a silently
+                 * accepted "0" or "abc" would look like the feature is on
+                 * while every solve fails. */
+                if (d < 1.0 || d > 100000.0) {
+                    respond_json(fd, "{\"ok\":false,\"error\":\"focal must be 1-100000 mm, or auto\"}");
+                    return;
+                }
+                { FILE *f = fopen(FOCAL_OVERRIDE_FILE, "w");
+                  if (!f) { respond_json(fd, "{\"ok\":false,\"error\":\"cannot write override file\"}"); return; }
+                  fprintf(f, "%.4f\n", d); fclose(f); }
+            }
+        }
+        read_file(FOCAL_OVERRIDE_FILE, ovr, sizeof ovr);
+        read_file("/app/sd/polaris-astro/last-focal", cache, sizeof cache);
+        { char *e; for (e = ovr;   *e; e++) if (*e=='\n'||*e=='\r') { *e = 0; break; }
+                   for (e = cache; *e; e++) if (*e=='\n'||*e=='\r') { *e = 0; break; } }
+        snprintf(out, sizeof out,
+                 "{\"ok\":true,\"override\":%s%s%s,\"exif_cache\":%s%s%s,\"config\":%.1f}",
+                 ovr[0]?"\"":"",   ovr[0]?ovr:"null",     ovr[0]?"\"":"",
+                 cache[0]?"\"":"", cache[0]?cache:"null", cache[0]?"\"":"",
+                 g_focal);
         respond_json(fd, out);
         return;
     }

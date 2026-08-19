@@ -90,8 +90,13 @@ SITE=/app/sd/polaris-astro/site.conf
     # (mode/track), so this loop opens no connections at all. track:3 is the
     # never-aligned state; anything else means an alignment has completed.
     #
-    # HTTPD_WAIT_ALIGNED=0 in site.conf starts it immediately instead.
-    if [ "${HTTPD_WAIT_ALIGNED:-1}" = "1" ]; then
+    # DEFAULT IS NOW 0: start immediately, so the page is there when you open
+    # it. Safety comes from the server refusing to READ the mount until it is
+    # aligned, not from the server being absent -- every endpoint that opens a
+    # connection to the control port is gated on may_read_mount(), including
+    # the Alpaca Altitude/Azimuth pair that used to slip through. Set
+    # HTTPD_WAIT_ALIGNED=1 to go back to not running it at all until aligned.
+    if [ "${HTTPD_WAIT_ALIGNED:-0}" = "1" ]; then
         echo "waiting for the mount to be aligned before starting polaris-httpd"
         (
             while :; do

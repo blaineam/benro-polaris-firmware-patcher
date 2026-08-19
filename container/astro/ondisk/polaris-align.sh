@@ -114,6 +114,17 @@ CACHED_FOCAL=""
 [ -z "$EXIF_FOCAL" ] && [ -r "$FOCAL_CACHE" ] && \
     CACHED_FOCAL=$(sed -n 's/^\([0-9][0-9.]*\)$/\1/p' "$FOCAL_CACHE" | head -1)
 
+# MANUAL OVERRIDE, set from the web UI, beats everything including EXIF.
+# The case that needs it: a telescope or an adapted manual lens reports NO
+# focal length at all (no electrical contacts), and a camera body will happily
+# stamp a stale or nonsense value into EXIF for one. When somebody has taken
+# the trouble to type in a number, that number is better information than
+# anything we can infer, so it goes first. Delete the file to return to auto.
+FOCAL_OVERRIDE_FILE=${FOCAL_OVERRIDE_FILE:-/app/sd/polaris-astro/focal-override}
+[ -z "${FOCAL_OVERRIDE:-}" ] && [ -r "$FOCAL_OVERRIDE_FILE" ] && \
+    FOCAL_OVERRIDE=$(sed -n 's/^\([0-9][0-9.]*\)$/\1/p' "$FOCAL_OVERRIDE_FILE" | head -1)
+FOCAL_OVERRIDE=${FOCAL_OVERRIDE:-}
+
 solve_with() {
     _scale=$1
     set -- $IDXARGS --stars "$STARS" --width "$W" --height "$H" --cpulimit "$SOLVE_TIMEOUT"
@@ -133,7 +144,16 @@ range_args() {
 }
 
 TRIED=""
-if [ -n "$EXIF_FOCAL" ]; then
+if [ -n "$FOCAL_OVERRIDE" ]; then
+    if [ -n "$EXIF_FOCAL" ] && [ "$EXIF_FOCAL" != "$FOCAL_OVERRIDE" ]; then
+        echo "[polaris-align] focal: MANUAL OVERRIDE ${FOCAL_OVERRIDE}mm (EXIF says ${EXIF_FOCAL}mm)" >&2
+    else
+        echo "[polaris-align] focal: MANUAL OVERRIDE ${FOCAL_OVERRIDE}mm" >&2
+    fi
+    TRIED="${FOCAL_OVERRIDE}mm (manual)"
+    OUT=$(solve_with "--focal-mm $FOCAL_OVERRIDE --sensor-mm $SENSOR_MM")
+    case "$OUT" in *'"solved":true'*) echo "$OUT"; exit 0;; esac
+elif [ -n "$EXIF_FOCAL" ]; then
     if [ -n "$FOCAL" ] && [ "$FOCAL" != "$EXIF_FOCAL" ]; then
         echo "[polaris-align] focal: EXIF says ${EXIF_FOCAL}mm, config says ${FOCAL}mm -- trusting EXIF" >&2
     else

@@ -16,7 +16,9 @@
 # ============================================================================
 set -u
 ASTRO=${ASTRO:-/app/astro}
-FOCAL=400; APPLY=0; FRAME=""; WAIT=${CAPTURE_WAIT:-25}
+# "auto" (the default) means: let polaris-align.sh work the focal out from the
+# frame's EXIF, the cached focal, or the range search. A number forces it.
+FOCAL=auto; APPLY=0; FRAME=""; WAIT=${CAPTURE_WAIT:-25}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -85,6 +87,7 @@ elif [ -z "$FRAME" ]; then
 fi
 
 echo "[solve-now] solving (hint comes from the mount)..." >&2
+[ "$FOCAL" = "auto" ] && FOCAL=""
 SOL=$(FOCAL_MM="$FOCAL" sh "$ASTRO/polaris-align.sh" "$FRAME" "$FOCAL") || {
     echo "[solve-now] solver failed" >&2; exit 1; }
 echo "$SOL"

@@ -33,12 +33,13 @@ RANGE_TIMEOUT=240
 # 8080 is pgphoto's own MJPG stream; 80, 8081, 9090 and 22 are also taken.
 POLARIS_HTTPD_PORT=8090
 
-# Start the web server only AFTER the mount has been aligned. Connecting to an
-# unaligned mount makes the Benro app demand a compass calibration, so the
-# server simply does not run until there is something safe to talk to.
-# Detected passively from the device's own log -- no connections are made while
-# waiting. Set 0 to start it immediately regardless.
-HTTPD_WAIT_ALIGNED=1
+# The web server starts at boot so the page is there when you open it. It does
+# not read the mount until the mount is aligned: connecting to an unaligned one
+# makes the Benro app demand a compass calibration, so every endpoint that
+# would open a connection refuses until then and the page shows what it knows
+# passively from the device's own log.
+# Set 1 to not start the server at all until an alignment has completed.
+HTTPD_WAIT_ALIGNED=0
 
 # ---- auto-solve during the app's calibration -------------------------------
 AUTOSOLVE=1
