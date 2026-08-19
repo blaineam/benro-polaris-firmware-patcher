@@ -103,6 +103,44 @@ good_solve() {
     [ "${_lo%%.*}" -ge "$MIN_LOGODDS" ] && [ "$_nm" -ge "$MIN_MATCHES" ]
 }
 
+
+# ---- correction, computed WITHOUT needing the mount's pose -------------------
+#
+# polaris-mount's `align` derives its 527 from the solved position alone:
+#     compass = (sky_az - 180) mod 360
+# Verified against align's own output at five widely separated positions,
+# agreeing to 0.0001 deg. It reads 518 only for the error DIAGNOSTICS and its
+# zenith rail, not to build the command.
+#
+# That matters because 518 is silent at track:3 -- the never-aligned state after
+# a cold boot, which is exactly when a first calibration happens. Computing the
+# correction ourselves means auto-solve works there too, instead of aborting
+# with "no 518 pose message arrived".
+#
+# The zenith rail is kept, because it is a real hazard and not a diagnostic:
+# azimuth is degenerate near the zenith and a heading derived there is amplified
+# by 1/cos(alt).
+MAX_ALIGN_ALT=${MAX_ALIGN_ALT:-65}
+
+# echo the compass value to send, or nothing if the geometry is unsafe
+compass_for_solve() {
+    _sra=$1; _sdec=$2
+    _j=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
+            radec2altaz --ra "$_sra" --dec "$_sdec" 2>/dev/null)
+    _salt=$(echo "$_j" | sed -n 's/.*"alt_deg":\([-0-9.]*\).*/\1/p')
+    _saz=$(echo  "$_j" | sed -n 's/.*"az_deg":\([-0-9.]*\).*/\1/p')
+    [ -n "$_saz" ] || { log "could not convert the solve to alt/az"; return 1; }
+    log "solved sky position: alt=$_salt az=$_saz"
+    _too_high=$(awk -v a="$_salt" -v m="$MAX_ALIGN_ALT" 'BEGIN{print (a>m)?1:0}')
+    if [ "$_too_high" = "1" ]; then
+        log "REFUSING: solved altitude ${_salt} is above ${MAX_ALIGN_ALT} deg."
+        log "  azimuth is degenerate near the zenith (error amplified by 1/cos(alt));"
+        log "  a heading derived here would be worse than no correction."
+        return 1
+    fi
+    awk -v a="$_saz" 'BEGIN{c=a-180; while(c<0)c+=360; while(c>=360)c-=360; printf "%.5f", c}'
+}
+
 # --- the whole reaction to one armed alignment --------------------------------
 # The protocol's yaw is a WIRE azimuth, not a compass azimuth:
 #   az > 180  ->  wire =  360 - az        az <= 180  ->  wire = -az
@@ -145,18 +183,8 @@ handle_arm() {
         _ra=$(echo  "$_sol" | sed -n "s/.*\"ra_deg\":\([-0-9.]*\).*/\1/p")
         _dec=$(echo "$_sol" | sed -n "s/.*\"dec_deg\":\([-0-9.]*\).*/\1/p")
         log "SOLVED ra=$_ra dec=$_dec"
-        if [ "$DRY_RUN" = "1" ]; then
-            log "DRY RUN -- would correct heading then confirm:"
-            "$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG --dry-run \
-                align --solved-ra "$_ra" --solved-dec "$_dec" 2>&1 | sed "s/^/    /" >> "$LOG"
-            log "    ->> 1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
-            return 0
-        fi
-        "$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
-            align --solved-ra "$_ra" --solved-dec "$_dec" >>"$LOG" 2>&1
-        mount_send "1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
-        log "done"
-        return 0
+        apply_correction "$_ra" "$_dec" "$_yaw" "$_pitch"
+        return $?
     fi
 
     # 1. LIVE VIEW first -- no shutter, and during the armed state the app will
@@ -209,23 +237,26 @@ handle_arm() {
     _dec=$(echo "$_sol" | sed -n 's/.*"dec_deg":\([-0-9.]*\).*/\1/p')
     log "SOLVED ra=$_ra dec=$_dec"
 
+    apply_correction "$_ra" "$_dec" "$_yaw" "$_pitch"
+    return $?
+}
+
+# correct the heading, then confirm the dialog
+apply_correction() {
+    _ra=$1; _dec=$2; _yaw=$3; _pitch=$4
+    _compass=$(compass_for_solve "$_ra" "$_dec") || return 1
+    log "heading correction: compass=$_compass"
     if [ "$DRY_RUN" = "1" ]; then
-        log "DRY RUN -- would correct heading then confirm:"
-        "$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG --dry-run \
-            align --solved-ra "$_ra" --solved-dec "$_dec" 2>&1 | sed "s/^/    /" >> "$LOG"
+        log "DRY RUN -- would send:"
+        log "    ->> 1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#"
         log "    ->> 1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
         return 0
     fi
-
-    # 4. correct the heading (527)
-    log "correcting heading"
-    "$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
-        align --solved-ra "$_ra" --solved-dec "$_dec" >>"$LOG" 2>&1
-
-    # 5. confirm for the user -- same form the app itself sends
+    mount_send "1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#"
     log "confirming (530 step:2)"
     mount_send "1&530&3&step:2;yaw:$_yaw;pitch:$_pitch;lat:$LAT;num:1;lng:$LON;#"
     log "done -- dialog should be dismissed"
+    return 0
 }
 
 log "autosolve watching (dry_run=$DRY_RUN focal=${FOCAL}mm gates: logodds>=$MIN_LOGODDS matches>=$MIN_MATCHES)"
