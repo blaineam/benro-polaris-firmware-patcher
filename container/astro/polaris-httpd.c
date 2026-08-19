@@ -371,6 +371,7 @@ static int param(const char *qs, const char *name, char *out, size_t cap) {
 }
 
 static int param(const char *qs, const char *name, char *out, size_t cap);
+static int current_radec(double *ra, double *dec);
 
 /* ----------------------------------------------------------------- Alpaca */
 /*
@@ -407,6 +408,10 @@ static long client_txn(const char *qs) {
 static double g_target_ra = 0.0, g_target_dec = 0.0;
 static int    g_target_set = 0;
 static int    g_connected = 1;
+/* Slewing must read True while an async slew is in flight -- Conform checks it
+ * immediately after SlewToCoordinatesAsync returns. We fork the slew and treat
+ * "child still alive" as slewing, which is honest: the goto really is running. */
+static pid_t  g_slew_pid = -1;
 static double g_site_elev = 0.0;
 
 /* THE DEVICE CLOCK IS NOT UTC. It runs local time while reporting itself as
@@ -735,30 +740,21 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "rightascension") || !strcmp(m, "declination")) {
         double ra = 0, dec = 0;
         char b[64];
-        if (!last_solution(&ra, &dec) && may_read_mount()) {
-            /* No solve yet: fall back to the mount's own idea via altaz->radec.
-             * Skipped while unaligned -- connecting then nags the app. */
-            char cmd[512], out[512], raw[512];
-            double alt = 0, az = 0;
-            mount_pose(&alt, &az, raw, sizeof raw);
-            snprintf(cmd, sizeof cmd,
-                     "%s/polaris-mount --lat %.6f --lon %.6f altaz2radec --alt %.6f --az %.6f 2>/dev/null",
-                     g_astro, g_lat, g_lon, alt, az);
-            if (run_capture(cmd, out, sizeof out) == 0) {
-                const char *p = strstr(out, "\"ra_deg\":");
-                if (p) ra = atof(p + 9);
-                p = strstr(out, "\"dec_deg\":");
-                if (p) dec = atof(p + 10);
-            }
-        }
+        current_radec(&ra, &dec);
         if (!strcmp(m, "rightascension")) snprintf(b, sizeof b, "%.6f", ra / 15.0); /* HOURS */
         else                              snprintf(b, sizeof b, "%.6f", dec);
         alpaca_value(fd, qs, b);
         return 1;
     }
     if (!strcmp(m, "slewing")) {
-        char st[32]; read_file(JOB_STATUS, st, sizeof st);
-        alpaca_value(fd, qs, strncmp(st, "running", 7) == 0 ? "true" : "false");
+        int slewing = 0;
+        if (g_slew_pid > 0) {
+            int st2;
+            pid_t r = waitpid(g_slew_pid, &st2, WNOHANG);
+            if (r == 0) slewing = 1;            /* still running */
+            else g_slew_pid = -1;
+        }
+        alpaca_value(fd, qs, slewing ? "true" : "false");
         return 1;
     }
     if (!strcmp(m, "tracking")) { alpaca_value(fd, qs, "true"); return 1; }
@@ -841,6 +837,212 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
      * above and answer 200 with ErrorNumber 1024. */
     respond_400(fd, "unknown method name");
     return 1;
+}
+
+
+/* Where is the mount pointing, right now?
+ *
+ * ONE implementation, shared by Alpaca and LX200. The first LX200 cut read only
+ * the last plate-solve and reported RA 0 / Dec 0 until something solved, which
+ * would draw the telescope at the vernal equinox in any planetarium app. Two
+ * protocols answering the same question must not have two answers.
+ *
+ * Mount first (that is where it IS), last solve as a fallback. */
+static int current_radec(double *ra, double *dec) {
+    char cmd[512], out[512], raw[512], ub[64];
+    double alt = 0, az = 0;
+    struct tm g;
+    time_t t = utc_now();
+    *ra = 0; *dec = 0;
+    gmtime_r(&t, &g);
+    snprintf(ub, sizeof ub, "%04d-%02d-%02dT%02d:%02d:%02d",
+             g.tm_year+1900, g.tm_mon+1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
+    if (mount_pose(&alt, &az, raw, sizeof raw)) {
+        snprintf(cmd, sizeof cmd,
+            "%s/polaris-mount --lat %.6f --lon %.6f --utc %s altaz2radec --alt %.6f --az %.6f 2>/dev/null",
+            g_astro, g_lat, g_lon, ub, alt, az);
+        if (run_capture(cmd, out, sizeof out) == 0) {
+            const char *q2 = strstr(out, "\"ra_deg\":");
+            if (q2) {
+                *ra = atof(q2 + 9);
+                q2 = strstr(out, "\"dec_deg\":");
+                if (q2) *dec = atof(q2 + 10);
+                return 1;
+            }
+        }
+    }
+    return last_solution(ra, dec);
+}
+
+/* ===========================================================================
+ * LX200 over TCP
+ *
+ * WHY: Alpaca is not universally supported. Stellarium on macOS has NO Alpaca
+ * support at all (verified: zero matches in the 26.2.0 binary) -- it speaks
+ * INDI, RTS2, LX200 or its own protocol. LX200 is the smallest thing that
+ * reaches Stellarium, SkySafari, KStars and most planetarium apps, and it is a
+ * plain ASCII protocol, so it costs far less than an INDI driver.
+ *
+ * Implemented subset -- what those clients actually send:
+ *     :GR#   get RA            -> "HH:MM:SS#"
+ *     :GD#   get Dec           -> "sDD*MM:SS#"
+ *     :Sr..# set target RA     -> "1" ok, "0" bad
+ *     :Sd..# set target Dec    -> "1" ok, "0" bad
+ *     :MS#   slew to target    -> "0" ok, "1<reason>#" refused
+ *     :CM#   sync to target    -> "<text>#"
+ *     :Q#    abort slew        -> (no reply)
+ *     :GVP# :GVN# :GVD# :GVT#  product / firmware identification
+ *     :Gt# :Gg#                site latitude / longitude
+ *     :U#                      toggle precision (accepted, ignored)
+ *
+ * Each connection is handled in a forked child: LX200 clients hold the socket
+ * open and poll once a second, which would otherwise block the HTTP server for
+ * the entire session.
+ * =========================================================================== */
+
+static void lx_send(int fd, const char *s2) { send_all(fd, s2, strlen(s2)); }
+
+/* degrees -> "HH:MM:SS" (RA) */
+static void fmt_ra(double deg, char *out, size_t cap) {
+    double h = deg / 15.0;
+    int hh, mm, ss;
+    while (h < 0) h += 24.0;
+    while (h >= 24.0) h -= 24.0;
+    hh = (int)h;
+    mm = (int)((h - hh) * 60.0);
+    ss = (int)(((h - hh) * 60.0 - mm) * 60.0 + 0.5);
+    if (ss >= 60) { ss -= 60; mm++; }
+    if (mm >= 60) { mm -= 60; hh = (hh + 1) % 24; }
+    snprintf(out, cap, "%02d:%02d:%02d", hh, mm, ss);
+}
+
+/* degrees -> "sDD*MM:SS" (Dec) */
+static void fmt_dec(double deg, char *out, size_t cap) {
+    char sign = deg < 0 ? '-' : '+';
+    int dd, mm, ss;
+    double a = deg < 0 ? -deg : deg;
+    dd = (int)a;
+    mm = (int)((a - dd) * 60.0);
+    ss = (int)(((a - dd) * 60.0 - mm) * 60.0 + 0.5);
+    if (ss >= 60) { ss -= 60; mm++; }
+    if (mm >= 60) { mm -= 60; dd++; }
+    snprintf(out, cap, "%c%02d*%02d:%02d", sign, dd, mm, ss);
+}
+
+/* "HH:MM:SS" or "HH:MM.T" -> degrees; -1 on parse failure */
+static double parse_ra(const char *s2) {
+    int hh = 0, mm = 0; double ss = 0;
+    if (sscanf(s2, "%d:%d:%lf", &hh, &mm, &ss) >= 2)
+        return (hh + mm / 60.0 + ss / 3600.0) * 15.0;
+    return -1.0;
+}
+
+/* "sDD*MM:SS" / "sDD:MM:SS" -> degrees; -999 on failure */
+static double parse_dec(const char *s2) {
+    int sign = 1, dd = 0, mm = 0; double ss = 0;
+    const char *p2 = s2;
+    if (*p2 == '+') p2++;
+    else if (*p2 == '-') { sign = -1; p2++; }
+    if (sscanf(p2, "%d%*[*:\xdf]%d:%lf", &dd, &mm, &ss) >= 2)
+        return sign * (dd + mm / 60.0 + ss / 3600.0);
+    if (sscanf(p2, "%d%*[*:\xdf]%d", &dd, &mm) == 2)
+        return sign * (dd + mm / 60.0);
+    return -999.0;
+}
+
+static void lx200_session(int fd) {
+    char buf[512];
+    double tgt_ra = 0, tgt_dec = 0;
+    int have_ra = 0, have_dec = 0;
+    size_t used = 0;
+
+    for (;;) {
+        ssize_t n = read(fd, buf + used, sizeof buf - 1 - used);
+        char *p2;
+        if (n <= 0) return;
+        used += (size_t)n;
+        buf[used] = 0;
+
+        /* commands are ":CMD#"; process each complete one */
+        while ((p2 = memchr(buf, '#', used)) != NULL) {
+            char cmd[128];
+            size_t len = (size_t)(p2 - buf);
+            if (len >= sizeof cmd) len = sizeof cmd - 1;
+            memcpy(cmd, buf, len); cmd[len] = 0;
+            /* consume through the '#' */
+            memmove(buf, p2 + 1, used - (size_t)(p2 - buf) - 1);
+            used -= (size_t)(p2 - buf) + 1;
+            buf[used] = 0;
+
+            {
+                const char *c = cmd;
+                char out[128];
+                while (*c == ':' || *c == ' ') c++;
+
+                if (!strncmp(c, "GR", 2)) {
+                    double ra = 0, dec = 0;
+                    current_radec(&ra, &dec);
+                    fmt_ra(ra, out, sizeof out);
+                    strcat(out, "#"); lx_send(fd, out);
+                } else if (!strncmp(c, "GD", 2)) {
+                    double ra = 0, dec = 0;
+                    current_radec(&ra, &dec);
+                    fmt_dec(dec, out, sizeof out);
+                    strcat(out, "#"); lx_send(fd, out);
+                } else if (!strncmp(c, "Sr", 2)) {
+                    double v = parse_ra(c + 2);
+                    if (v >= 0) { tgt_ra = v; have_ra = 1; lx_send(fd, "1"); }
+                    else lx_send(fd, "0");
+                } else if (!strncmp(c, "Sd", 2)) {
+                    double v = parse_dec(c + 2);
+                    if (v > -999.0) { tgt_dec = v; have_dec = 1; lx_send(fd, "1"); }
+                    else lx_send(fd, "0");
+                } else if (!strncmp(c, "MS", 2)) {
+                    if (!have_ra || !have_dec) {
+                        lx_send(fd, "1target not set#");
+                    } else {
+                        char cm[512], o2[512];
+                        snprintf(cm, sizeof cm,
+                          "%s/polaris-mount --lat %.6f --lon %.6f goto-radec --ra %.6f --dec %.6f 2>&1",
+                          g_astro, g_lat, g_lon, tgt_ra, tgt_dec);
+                        run_capture(cm, o2, sizeof o2);
+                        lx_send(fd, "0");          /* 0 = slew started */
+                    }
+                } else if (!strncmp(c, "CM", 2)) {
+                    if (have_ra && have_dec) {
+                        char cm[512], o2[512];
+                        snprintf(cm, sizeof cm,
+                          "%s/polaris-mount --lat %.6f --lon %.6f align --solved-ra %.6f --solved-dec %.6f 2>&1",
+                          g_astro, g_lat, g_lon, tgt_ra, tgt_dec);
+                        run_capture(cm, o2, sizeof o2);
+                    }
+                    lx_send(fd, "Aligned#");
+                } else if (!strncmp(c, "Q", 1)) {
+                    char cm[256], o2[256];
+                    snprintf(cm, sizeof cm, "%s/polaris-mount --host 127.0.0.1 abort 2>&1", g_astro);
+                    run_capture(cm, o2, sizeof o2);
+                    /* :Q# has no reply */
+                } else if (!strncmp(c, "GVP", 3)) { lx_send(fd, "Benro Polaris#");
+                } else if (!strncmp(c, "GVN", 3)) { lx_send(fd, "1.0#");
+                } else if (!strncmp(c, "GVD", 3)) { lx_send(fd, "polaris-httpd#");
+                } else if (!strncmp(c, "GVT", 3)) { lx_send(fd, "00:00:00#");
+                } else if (!strncmp(c, "Gt", 2)) {
+                    fmt_dec(g_lat, out, sizeof out); strcat(out, "#"); lx_send(fd, out);
+                } else if (!strncmp(c, "Gg", 2)) {
+                    /* LX200 reports longitude POSITIVE WEST -- the opposite of
+                     * the usual convention. Getting this backwards puts a
+                     * client's horizon on the wrong side of the sky. */
+                    fmt_dec(-g_lon, out, sizeof out); strcat(out, "#"); lx_send(fd, out);
+                } else if (!strncmp(c, "U", 1)) {
+                    /* precision toggle: accepted, we always send high precision */
+                } else {
+                    /* Unknown commands get no reply, which is what a real LX200
+                     * does; clients probe with commands the mount may not have. */
+                }
+            }
+        }
+        if (used >= sizeof buf - 1) used = 0;      /* garbage; resync */
+    }
 }
 
 /* --------------------------------------------------------------- web page */
@@ -1049,8 +1251,58 @@ static void handle(int fd) {
     respond(fd, 404, "text/plain", "not found\n", 10);
 }
 
+/* ALPACA DISCOVERY (UDP 32227).
+ *
+ * Clients broadcast the ASCII string "alpacadiscovery1" and expect
+ * {"AlpacaPort":<n>} back. Without it every client has to be told our address
+ * by hand, which is most of the friction in setting one up. */
+#define ALPACA_DISCOVERY_PORT 32227
+
+static int make_discovery_socket(void) {
+    int fd, one = 1;
+    struct sockaddr_in a;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    a.sin_port = htons(ALPACA_DISCOVERY_PORT);
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+static void handle_discovery(int fd, int http_port) {
+    char buf[256], reply[64];
+    struct sockaddr_in from;
+    socklen_t fl = sizeof from;
+    ssize_t n = recvfrom(fd, buf, sizeof buf - 1, 0, (struct sockaddr *)&from, &fl);
+    if (n <= 0) return;
+    buf[n] = 0;
+    if (!strstr(buf, "alpacadiscovery")) return;
+    n = snprintf(reply, sizeof reply, "{\"AlpacaPort\":%d}", http_port);
+    sendto(fd, reply, (size_t)n, 0, (struct sockaddr *)&from, fl);
+}
+
+static int make_listener(int port) {
+    int fd, one = 1;
+    struct sockaddr_in a;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    a.sin_port = htons((unsigned short)port);
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { close(fd); return -1; }
+    if (listen(fd, 8) < 0) { close(fd); return -1; }
+    return fd;
+}
+
 int main(int argc, char **argv) {
-    int port = PORT_DEFAULT, sfd, one = 1, i;
+    int port = PORT_DEFAULT, sfd, i;
+    int lx_port = 10001, lxfd = -1, dfd = -1, discovery = 1;
     struct sockaddr_in a;
 
     for (i = 1; i < argc; i++) {
@@ -1059,6 +1311,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--lon") && i+1 < argc) { g_lon = atof(argv[++i]); g_have_pos = 1; }
         else if (!strcmp(argv[i], "--focal") && i+1 < argc) g_focal = atof(argv[++i]);
         else if (!strcmp(argv[i], "--astro") && i+1 < argc) g_astro = argv[++i];
+        else if (!strcmp(argv[i], "--lx200-port") && i+1 < argc) lx_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--no-discovery")) discovery = 0;
         else {
             fprintf(stderr,
                 "usage: %s [--port N] --lat DEG --lon DEG [--focal MM] [--astro DIR]\n", argv[0]);
@@ -1073,25 +1327,59 @@ int main(int argc, char **argv) {
      * would look like it failed. start_solve() double-forks instead, which
      * orphans the job to init and leaves no zombie to reap. */
 
-    sfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sfd < 0) { perror("socket"); return 1; }
-    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_ANY);
-    a.sin_port = htons((unsigned short)port);
-    if (bind(sfd, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
-    if (listen(sfd, 16) < 0) { perror("listen"); return 1; }
+    (void)a;
+    sfd = make_listener(port);
+    if (sfd < 0) { perror("bind http"); return 1; }
+    if (lx_port > 0) {
+        lxfd = make_listener(lx_port);
+        if (lxfd < 0) fprintf(stderr, "could not bind LX200 port %d (continuing)\n", lx_port);
+    }
+    if (discovery) {
+        dfd = make_discovery_socket();
+        if (dfd < 0) fprintf(stderr, "could not bind Alpaca discovery :%d (continuing)\n",
+                             ALPACA_DISCOVERY_PORT);
+    }
 
     if (access(JOB_STATUS, F_OK) != 0) set_status("idle");
     fprintf(stderr, "polaris-httpd on :%d  (lat %.5f lon %.5f focal %.0fmm)\n",
             port, g_lat, g_lon, g_focal);
+    if (lxfd >= 0) fprintf(stderr, "LX200 on :%d\n", lx_port);
+    if (dfd  >= 0) fprintf(stderr, "Alpaca discovery on udp:%d\n", ALPACA_DISCOVERY_PORT);
 
     for (;;) {
-        int c = accept(sfd, NULL, NULL);
-        if (c < 0) { if (errno == EINTR) continue; break; }
-        handle(c);
-        close(c);
+        fd_set rf;
+        int mx = sfd;
+        FD_ZERO(&rf);
+        FD_SET(sfd, &rf);
+        if (lxfd >= 0) { FD_SET(lxfd, &rf); if (lxfd > mx) mx = lxfd; }
+        if (dfd  >= 0) { FD_SET(dfd,  &rf); if (dfd  > mx) mx = dfd;  }
+        if (select(mx + 1, &rf, NULL, NULL, NULL) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (FD_ISSET(sfd, &rf)) {
+            int c = accept(sfd, NULL, NULL);
+            if (c >= 0) { handle(c); close(c); }
+        }
+        if (lxfd >= 0 && FD_ISSET(lxfd, &rf)) {
+            int c = accept(lxfd, NULL, NULL);
+            if (c >= 0) {
+                /* LX200 clients hold the socket open and poll once a second, so
+                 * the session runs in a child; handling it inline would block
+                 * the HTTP server for as long as the planetarium app is open. */
+                pid_t pid = fork();
+                if (pid == 0) {
+                    close(sfd);
+                    lx200_session(c);
+                    close(c);
+                    _exit(0);
+                }
+                close(c);
+                if (pid > 0) { int st; waitpid(pid, &st, WNOHANG); }
+            }
+        }
+        if (dfd >= 0 && FD_ISSET(dfd, &rf)) handle_discovery(dfd, port);
+        { int st; while (waitpid(-1, &st, WNOHANG) > 0) { } }   /* reap finished sessions */
     }
     return 0;
 }
