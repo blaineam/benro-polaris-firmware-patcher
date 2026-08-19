@@ -69,6 +69,9 @@ FOCAL=400
 # 9090 and 22 are also taken.)
 POLARIS_HTTPD_PORT=8090
 
+# Start the web server only AFTER the mount has been aligned (see below).
+HTTPD_WAIT_ALIGNED=1
+
 # Auto-solve during the app's calibration.
 AUTOSOLVE=1
 AUTOSOLVE_DRY_RUN=1      # 1 = log what it WOULD do, touch nothing. Start here.
@@ -121,6 +124,26 @@ by the device as an app connecting, and polling made the Benro app re-prompt for
 compass calibration continuously. Mount state is read passively from the
 device's own log; an active read happens only when you press **Read Mount**, and
 only when the mount is already aligned.
+
+**The server does not even start until the mount is aligned**
+(`HTTPD_WAIT_ALIGNED=1`, the default). It answers Alpaca and LX200 position
+queries, which means reading the mount — and connecting to an *unaligned* mount
+is precisely what makes the Benro app demand a compass calibration. Rather than
+rely on the server declining, the boot hook simply does not run it yet: a small
+waiter watches the device's own log (no connections) and launches the server
+once an alignment has completed.
+
+Consequences, so they are not a surprise:
+
+- After a reboot, `:8090` refuses connections until you align. Stellarium/NINA
+  will not find the mount before then. This is intended.
+- The waiter learns alignment from the app's `284` traffic, so it needs the app
+  to have connected at least once — which is what aligning means anyway.
+- If you would rather have the server up immediately and accept the compass
+  prompt risk, set `HTTPD_WAIT_ALIGNED=0`.
+
+If the mount was never aligned, the server never starts, and nothing on this
+box ever touches the control port. That is the whole point.
 
 ---
 
