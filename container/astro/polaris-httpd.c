@@ -43,6 +43,11 @@ static const char *g_astro = ASTRO_DIR;
  * polaris-sim to run a conformance suite without commanding real motors --
  * ConformU fires dozens of slews and syncs and wedged polestar_app when aimed
  * at the hardware. */
+/* goto-radec only nudges after arrival if the sky moved more than
+ * --refine-arcmin, default 2 arcmin = 120 arcsec. A slew takes ~10 s, during
+ * which the sky moves ~150 arcsec, so most arrivals landed just under the
+ * threshold and were never corrected -- Conform measured 80-150 arcsec of RA
+ * error against a 10 arcsec tolerance. We ask for 0.1 arcmin (6 arcsec). */
 static const char *g_mount_host = "127.0.0.1";
 static int         g_mount_port = 9090;
 static double g_lat = 0.0, g_lon = 0.0;
@@ -634,6 +639,11 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             if (!param(src, "Connected", v2, sizeof v2) || !parse_bool_strict(v2, &bv)) {
                 respond_400(fd, "bad Connected value"); return 1;
             }
+            /* A fresh connection is a fresh session: the target must be unset
+             * again, or "read before write" wrongly succeeds with a stale value
+             * left by the previous client. g_target_set otherwise lives for the
+             * life of the process. */
+            if (bv && !g_connected) g_target_set = 0;
             g_connected = bv;          /* must actually stick: Conform sets it False and reads back */
             alpaca_value(fd, qs, "null"); return 1;
         }
@@ -884,7 +894,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
                      g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, ra_deg, dec_deg);
         else
             snprintf(cmd, sizeof cmd,
-                     "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s goto-radec --ra %.6f --dec %.6f 2>&1",
+                     "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s goto-radec --refine-arcmin 0.1 --ra %.6f --dec %.6f 2>&1",
                      g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, ra_deg, dec_deg);
         /* The spec REQUIRES these to set the target properties; Conform reads
          * them back and got ValueNotSet. (My earlier edit for this silently
@@ -917,7 +927,7 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             return 1;
         }
         snprintf(cmd, sizeof cmd,
-                     "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s goto-radec --ra %.6f --dec %.6f 2>&1",
+                     "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s goto-radec --refine-arcmin 0.1 --ra %.6f --dec %.6f 2>&1",
                      g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, g_target_ra, g_target_dec);
         if (!strcmp(m, "slewtotargetasync")) {
             pid_t pid = fork();
@@ -1128,7 +1138,7 @@ static void lx200_session(int fd) {
                     } else {
                         char cm[512], o2[512];
                         snprintf(cm, sizeof cm,
-                          "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f goto-radec --ra %.6f --dec %.6f 2>&1",
+                          "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f goto-radec --refine-arcmin 0.1 --ra %.6f --dec %.6f 2>&1",
                           g_astro, g_mount_host, g_mount_port, g_lat, g_lon, tgt_ra, tgt_dec);
                         run_capture(cm, o2, sizeof o2);
                         lx_send(fd, "0");          /* 0 = slew started */
