@@ -63,14 +63,21 @@ binaries to `/app/astro` and starts whatever you enabled.
 # site. Decimal degrees, east/north positive.
 LAT=35.35199
 LON=-119.17208
-FOCAL=400
+
+# FOCAL IS ONLY A FALLBACK -- the solver reads it from each frame's EXIF, which
+# is the only thing that follows a zoom lens. See "Focal length" below.
+FOCAL=70
+FOCAL_MIN=8            # range searched when no focal is known at all
+FOCAL_MAX=3000
+RANGE_TIMEOUT=240      # that search needs ~148 s; the normal path is ~5 s
 
 # Web UI + Alpaca on :8090.  (8080 is pgphoto's own MJPG stream; 80, 8081,
 # 9090 and 22 are also taken.)
 POLARIS_HTTPD_PORT=8090
 
-# Start the web server only AFTER the mount has been aligned (see below).
-HTTPD_WAIT_ALIGNED=1
+# The web server starts at boot; it refuses to READ the mount until aligned.
+# Set 1 to not start it at all until an alignment has completed.
+HTTPD_WAIT_ALIGNED=0
 
 # Auto-solve during the app's calibration.
 AUTOSOLVE=1
@@ -100,6 +107,43 @@ correction and an alignment confirm to a live mount. Run it dry once, read
 
 ---
 
+## How the focal length is resolved
+
+A wrong focal length is the single most effective way to make plate solving fail
+completely, so this is worth understanding. The pixel-scale search is derived
+from it: search 400 mm on a 70 mm frame and the solver looks for 2.3″/px when
+the truth is 13.4″/px, so **no quad can match, at any pointing, under any sky**.
+This is not hypothetical — an entire night of frames failed exactly this way,
+with `FOCAL=400` in the config and a 24–70 zoom sitting at 70 mm. The same
+frames solved in ~5 s once the focal was right.
+
+In order, each falling through to the next:
+
+| # | source | when it applies | cost |
+|---|---|---|---|
+| 1 | manual override (web UI) | you set one; for scopes/manual lenses | ~5 s |
+| 2 | the frame's own **EXIF** | any real capture | ~5 s |
+| 3 | the focal cached from the last EXIF frame | live view, which carries no EXIF | ~8 s |
+| 4 | `FOCAL` in `site.conf` | nothing above is available | ~5 s |
+| 5 | search `FOCAL_MIN`–`FOCAL_MAX` | nothing is known, **or** the focal tried above failed | **~148 s** |
+
+EXIF beats the config file deliberately: a config value cannot follow a zoom
+ring, and the config is what was wrong. The manual override beats EXIF because a
+telescope or adapted lens has no electrical contacts and reports nothing, and a
+body will stamp a stale value in for one — a number you typed is better
+information than anything we can infer.
+
+Measured on the device, same frame each time: EXIF 8 s, cached focal 8 s, full
+range search 148 s. The range search is the safety net, not the normal path, so
+it gets its own `RANGE_TIMEOUT` (240 s) — with the caller's 45 s budget it
+always timed out and never actually caught anything.
+
+**Index coverage limits this.** The shipped indexes (4110–4119) cover roughly
+14–400 mm on full frame. Widening `FOCAL_MAX` does not by itself make a 3000 mm
+lens solvable; that needs finer indexes — see `fetch-indexes.sh`.
+
+---
+
 ## Capture: images land on BOTH cards
 
 The patcher configures capture so a frame is written to the **camera's own
@@ -125,25 +169,44 @@ compass calibration continuously. Mount state is read passively from the
 device's own log; an active read happens only when you press **Read Mount**, and
 only when the mount is already aligned.
 
-**The server does not even start until the mount is aligned**
-(`HTTPD_WAIT_ALIGNED=1`, the default). It answers Alpaca and LX200 position
-queries, which means reading the mount — and connecting to an *unaligned* mount
-is precisely what makes the Benro app demand a compass calibration. Rather than
-rely on the server declining, the boot hook simply does not run it yet: a small
-waiter watches the device's own log (no connections) and launches the server
-once an alignment has completed.
+### Focal length
 
-Consequences, so they are not a surprise:
+The **Focal length** card shows what the solver will use and where it came from,
+and lets you override it. Auto is the normal mode; type a number and press
+**Set** for a telescope or a manual/adapted lens, which report no focal length
+at all. **Auto** returns to detection.
 
-- After a reboot, `:8090` refuses connections until you align. Stellarium/NINA
-  will not find the mount before then. This is intended.
-- The waiter learns alignment from the app's `284` traffic, so it needs the app
-  to have connected at least once — which is what aligning means anyway.
-- If you would rather have the server up immediately and accept the compass
-  prompt risk, set `HTTPD_WAIT_ALIGNED=0`.
+A wrong focal does not make solving slow, it makes it **impossible** — the
+pixel-scale search is derived from it, so a 70 mm frame searched at 400 mm hunts
+2.3″/px when the truth is 13.4″/px and no quad can ever match. Values outside
+1–100000 mm are rejected rather than stored.
 
-If the mount was never aligned, the server never starts, and nothing on this
-box ever touches the control port. That is the whole point.
+### The server starts at boot, and reads nothing until you align
+
+`HTTPD_WAIT_ALIGNED=0` is the default: the page is there when you open it. The
+protection is in the endpoints, not in the server's absence — **every** path
+that would open a connection to the control port refuses while the mount is
+unaligned, because connecting to an unaligned mount is what makes the Benro app
+demand a compass calibration.
+
+That gate covers `/api/state?mount=1` (reports `mount_blocked`), the LX200
+position replies, and the Alpaca `Altitude`, `Azimuth`, `RightAscension` and
+`Declination` properties. Everything else on the page — alignment state, the
+last solution, the log — comes from the device's own log and files, which cost
+nothing.
+
+Two things worth knowing:
+
+- **Alpaca clients find this box by themselves.** Discovery advertises it on UDP
+  32227, so a running ConformU, NINA or Stellarium will connect and start
+  polling position with no action from you. That is fine now, but it is the
+  first thing to suspect if a compass prompt ever appears unexplained. Start
+  with `--no-discovery` to disable it.
+- **The gate only covers the unaligned window.** Once aligned, a polling client
+  opens a connection per position read, as it must.
+
+Set `HTTPD_WAIT_ALIGNED=1` to go back to not starting the server at all until an
+alignment has completed.
 
 ---
 
@@ -200,6 +263,7 @@ Note it is *our reading* of the spec -- it reported 35/35 while ConformU found
 | Capture to camera card **and** Polaris | JPEG ~9.4 MB, ~0.94 s announce |
 | Solver at live-view resolution (960×640) | 20–40″ over four fields, 1–4 s |
 | Real R5 II frame solved on device | 6.4″ vs upstream, 9.3 s |
+| **Real night sky solved on device** | 2 frames, log-odds 132 / 243, 27 / 48 matches, ~5 s |
 | Alpaca conformance | 35/35 |
 | Boot autostart | across real reboots |
 | Mount untouched while unaligned | 0 connections measured |
@@ -231,13 +295,28 @@ error. A clock fault would show as ~105° of RA, not fractions of a degree.
 
 ### NOT verified
 
-- **Real stars.** Everything above used rendered fields or daylight frames. The
-  geometry is proven at live-view resolution; whether your sky gives enough
-  signal in a short live-view frame is not something this repo can answer.
+- **Real stars in a LIVE-VIEW frame.** Full-resolution night frames from a
+  light-polluted backyard (background 111/255) now solve on the device in ~5 s,
+  so the sky is no longer the open question it was. But every real-sky solve so
+  far has been a full capture; whether a 960×640 live-view frame carries enough
+  signal under *your* sky is still unanswered, and it is the frame the
+  calibration path actually uses.
 - **A confirmed alignment on real sky.** The armed path has been driven for real
   in dry run; nothing has yet written a heading correction to a live mount
   outside the simulator.
+- **An end-to-end calibration since the focal and capture fixes.** Those were
+  verified against saved frames and per-endpoint, not by running the app through
+  a real alignment. That run has not happened yet.
 - **Any camera other than the R5 Mark II**, and any firmware other than 4.0.0.32.
+
+### Failed solves keep their evidence
+
+A solve that fails writes the frame to `/app/sd/polaris-astro/failed/` along with
+the star count extracted at the same downsample and cap the solve used, bounded
+to `KEEP_FAILED` (20) frames. That count is what separates "the sky did not give
+us enough stars" from "plenty of stars, so the scale or the solver is wrong" —
+a distinction that is pure guesswork after the fact otherwise, and guesswork is
+what previously sent a night's debugging in the wrong direction.
 
 ### Known limitations
 
@@ -258,6 +337,24 @@ error. A clock fault would show as ~105° of RA, not fractions of a degree.
 Something is connecting to the control port while the mount is unaligned. Check
 nothing is polling it: `ps | grep polaris-`. The shipped code only reads the
 mount on an explicit request and only when aligned.
+
+**Nothing solves, from anywhere in the sky.**
+Check the focal length first — it is the most likely cause by a wide margin, and
+it fails *completely* rather than intermittently. The solver logs what it used
+and where it came from (`[polaris-align] focal from EXIF: 70.0000mm`). Compare
+the reported `pixscale_arcsec` against what your lens should give: 206265 ×
+(sensor_mm / image_width_px) / focal_mm. Failed frames are kept under
+`/app/sd/polaris-astro/failed/` with the star count, which separates "not enough
+stars" from "plenty of stars, wrong scale".
+
+**"Shot failed", and then the camera will not capture until it is power-cycled
+and the USB replugged.**
+Something fired a capture at the device during astro mode. It does not accept an
+externally-initiated capture there: opcode 264 is ignored, and the 272 lapse
+sequence is refused *while still establishing a lapse task that nothing aborts*
+— that is the wedge, and why only a USB re-enumeration clears it. The autosolve
+daemon issues no capture commands at all for this reason. To solve a full frame,
+take the shot in the Benro app and run `solve-now.sh --latest`.
 
 **Solves fail with a hint but succeed blind.**
 The hint is wrong by more than the search radius. `HINT_RADIUS` defaults to 60°

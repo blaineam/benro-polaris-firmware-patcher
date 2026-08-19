@@ -2,6 +2,44 @@
 
 ## Unreleased (branch `astro-plate-solving`) — solver built, motors untouched
 
+### Fixed — real-sky session, 2026-08-19
+
+- **Plate solving failed on every real frame because the focal length was
+  wrong.** `site.conf` said `FOCAL=400` while the lens was a 24–70 zoom at
+  70 mm. The pixel-scale search is derived from the focal, so the solver hunted
+  2.3″/px when the truth was 13.4″/px and no quad could match — at any pointing,
+  under any sky. The same frames solve in ~5 s at the right focal (log-odds 132
+  and 243 against a threshold of 100). It looked like a direction-dependent sky
+  problem and was neither.
+- **The solver now works the focal out for itself**: manual override (new web UI
+  control) → the frame's EXIF → the focal cached from the last EXIF frame →
+  `FOCAL` → a search across `FOCAL_MIN`–`FOCAL_MAX` (8–3000 mm). EXIF beats the
+  config because a config value cannot follow a zoom ring. `polaris-extract`
+  parses EXIF `FocalLength` from APP1 while it is already decoding the JPEG.
+- **The autosolve capture fallback wedged the camera** and is removed. On a
+  failed live-view solve it fired the `272` lapse sequence; astro mode refuses
+  that but still leaves a lapse task established that nothing aborts, producing
+  "shot failed" and a camera that will not capture again until it is
+  power-cycled *and* the USB replugged. The daemon now issues no capture
+  commands at all. The reason this cannot work was already recorded in
+  `solve-now.sh` and `polaris-autoalign.sh` before it shipped here.
+- **Alpaca `Altitude`/`Azimuth` read the mount with no alignment gate.**
+  Position is the first thing every Alpaca client polls on connect, and
+  discovery advertises this box on UDP 32227, so a running ConformU/NINA/
+  Stellarium would find it and open a connection to the control port per poll
+  while unaligned — which is what makes the Benro app demand a compass
+  calibration, with no action from the user. Now gated like the rest.
+- **`RightAscension`/`Declination` answered 0/0 when they knew nothing**, which
+  draws the telescope at the vernal equinox in any planetarium app. They now
+  report the position as unknown.
+- **Failed solves keep the frame** under `/app/sd/polaris-astro/failed/` with the
+  extracted star count, so a repeatable failure can be diagnosed instead of
+  guessed at.
+- The web server starts at boot again (`HTTPD_WAIT_ALIGNED=0`); the protection
+  is in the endpoints, which refuse every mount read until the mount is aligned.
+  Measured: zero connections to the control port from a full sweep of the page,
+  all four Alpaca position properties, and the focal endpoint.
+
 ### Added
 - **`./build-astro.sh`** — one command that cross-builds the plate solver for the
   device, downloads the index files a given focal range needs, and assembles

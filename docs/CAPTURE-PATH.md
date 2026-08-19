@@ -408,3 +408,25 @@ a frame change.
 
 An earlier note in this session called this "blocked". That was an
 overgeneralisation from a single failed command in a single mount state.
+
+---
+
+## Astro mode will not accept an externally-initiated capture
+
+Worth stating plainly, because it has now cost two rounds of debugging:
+
+- **Opcode 264** (single shot) is **ignored** in astro mode.
+- **The 272 step:1/2/3 lapse sequence** worked exactly once and was refused
+  afterwards while tracking was running — but a refused 272 **still establishes a
+  lapse task** that nothing ever aborts. That is the wedge: the app reports
+  "shot failed", live view keeps streaming (separate path, which is what makes
+  it look survivable), and the camera will not capture again until it is
+  power-cycled *and* the USB replugged, because only a USB re-enumeration clears
+  it.
+- With `photoCnt:-1` that lapse is **unbounded** — it fired 28 unwanted shutter
+  actuations during development.
+
+So the solver never fires the shutter during calibration. Live view is the only
+frame source there. For a full-frame solve, take the shot in the Benro app and
+run `solve-now.sh --latest`, which is what the `--latest` and `--wait` modes
+exist for.
