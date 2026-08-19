@@ -327,6 +327,32 @@ if one ever fires.
 
 ---
 
+## Guiding from the web page
+
+The **Guiding** card starts and stops the guider and plots what it measures.
+The chart is drift in arcseconds against time: a blue line per check, yellow
+dots where drift exceeded the threshold and a correction was made, and a dashed
+red line at the threshold itself. Below it: how many checks, how many
+corrections, and the peak drift.
+
+The points come from parsing the guider's own log rather than from a second
+tally kept alongside it, so the chart cannot disagree with what the guider
+actually did.
+
+It refuses to start in two cases, both deliberate:
+
+- **Nothing has been solved yet** — there is no anchor to guide on, so it would
+  start and immediately give up.
+- **The mount is not aligned** — guiding issues slews, and slewing against an
+  unknown pointing is worse than drifting.
+
+Corrections are small slews rather than rate adjustments, because the mount
+exposes no axis-rate primitive. `GUIDE=1` in `site.conf` additionally lets
+autosolve start the guider by itself after a successful alignment; left at 0,
+guiding only happens when you press the button.
+
+---
+
 ## ASCOM Alpaca
 
 Point Stellarium, NINA or SkySafari at `<polaris ip>:8090`, device 0.

@@ -51,7 +51,7 @@
  * shell `ps | grep wifi-keepalive` run from here matches the very command line
  * doing the matching -- that mistake has already killed this session's ssh
  * twice and silently disabled a start guard. /proc has neither problem. */
-static pid_t find_keepalive(void) {
+static pid_t find_proc(const char *needle) {
     DIR *d = opendir("/proc");
     struct dirent *e;
     pid_t found = 0;
@@ -70,7 +70,7 @@ static pid_t find_keepalive(void) {
         if (n <= 0) continue;
         buf[n] = 0;
         { int i; for (i = 0; i < n - 1; i++) if (!buf[i]) buf[i] = ' '; }
-        if (strstr(buf, "wifi-keepalive.sh")) { found = (pid_t)pid; break; }
+        if (strstr(buf, needle)) { found = (pid_t)pid; break; }
     }
     closedir(d);
     return found;
@@ -1452,6 +1452,18 @@ static const char PAGE[] =
 "connection that registers itself as a client the way the app does, so the timer never "
 "starts. It uses battery, and it waits until the mount is aligned before connecting, "
 "because connecting earlier makes the Benro app ask for a compass calibration.</div></div>"
+"<div class=card><h2>Guiding</h2>"
+"<div id=gst style='margin-bottom:8px'></div>"
+"<svg id=gchart viewBox='0 0 640 180' preserveAspectRatio='none' "
+  "style='width:100%;height:180px;background:#0a0d13;border-radius:8px;display:block'></svg>"
+"<div id=glegend style='color:var(--dim);font-size:12px;margin-top:6px'></div>"
+"<button id=g1 style='padding:9px 14px;font-size:14px;margin-top:8px' onclick=guide(1)>Start Guiding</button>"
+"<button id=g0 class=alt style='padding:9px 14px;font-size:14px;margin-top:8px' onclick=guide(0)>Stop</button>"
+"<div id=gerr style='color:var(--err);font-size:12.5px;margin-top:6px'></div>"
+"<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Guiding measures drift against an "
+"anchor frame and re-centres when it exceeds the threshold. It needs a solved position to anchor "
+"on, and an aligned mount &mdash; it will refuse without both. Corrections are small slews, not "
+"rate adjustments: the mount exposes no axis-rate primitive.</div></div>"
 "<div class=card><h2>Log</h2><pre id=log>&hellip;</pre></div>"
 "<script>\n"
 "function f(n,d){return (n===undefined||n===null||isNaN(n))?'--':Number(n).toFixed(d)}\n"
@@ -1514,6 +1526,40 @@ static const char PAGE[] =
 "  document.getElementById('kws').innerHTML=t}\n"
 "function kwload(){fetch('/api/keepwifi').then(r=>r.json()).then(kwshow)}\n"
 "function kw(v){fetch('/api/keepwifi?on='+v,{method:'POST'}).then(r=>r.json()).then(kwshow)}\n"
+"function gchart(d){var s=document.getElementById('gchart'),p=d.points||[],W=640,H=180,pad=24;\n"
+"  if(!p.length){s.innerHTML='<text x=\"320\" y=\"95\" fill=\"#8b93a7\" font-size=\"13\" "
+"text-anchor=\"middle\">no drift measurements yet</text>';return}\n"
+"  var th=parseFloat(d.threshold)||60;\n"
+"  var mx=Math.max(th*1.3,Math.max.apply(null,p.map(function(q){return q.d})) *1.15);\n"
+"  var n=p.length,dx=(W-pad*2)/Math.max(n-1,1);\n"
+"  function X(i){return pad+i*dx}\n"
+"  function Y(v){return H-pad-(v/mx)*(H-pad*2)}\n"
+"  var o='';\n"
+"  o+='<line x1=\"'+pad+'\" y1=\"'+Y(th)+'\" x2=\"'+(W-pad)+'\" y2=\"'+Y(th)+'\" "
+"stroke=\"#e05252\" stroke-width=\"1\" stroke-dasharray=\"4 3\"/>';\n"
+"  o+='<text x=\"'+(W-pad)+'\" y=\"'+(Y(th)-4)+'\" fill=\"#e05252\" font-size=\"11\" "
+"text-anchor=\"end\">threshold '+th+'\u2033</text>';\n"
+"  o+='<line x1=\"'+pad+'\" y1=\"'+(H-pad)+'\" x2=\"'+(W-pad)+'\" y2=\"'+(H-pad)+'\" stroke=\"#2c3444\"/>';\n"
+"  var dpath='';\n"
+"  for(var i=0;i<n;i++){dpath+=(i?' L':'M')+X(i).toFixed(1)+' '+Y(p[i].d).toFixed(1)}\n"
+"  o+='<path d=\"'+dpath+'\" fill=\"none\" stroke=\"#5aa9e6\" stroke-width=\"1.6\"/>';\n"
+"  for(var i=0;i<n;i++){var c=p[i].c;\n"
+"    o+='<circle cx=\"'+X(i).toFixed(1)+'\" cy=\"'+Y(p[i].d).toFixed(1)+'\" r=\"'+(c?3.2:2)+'\" fill=\"'+(c?'#e8c547':'#5aa9e6')+'\"><title>'+p[i].t+'  '+p[i].d+'\u2033'+(c?' (corrected)':'')+'</title></circle>'}\n"
+"  o+='<text x=\"'+pad+'\" y=\"14\" fill=\"#8b93a7\" font-size=\"11\">arcsec</text>';\n"
+"  o+='<text x=\"'+pad+'\" y=\"'+(H-6)+'\" fill=\"#8b93a7\" font-size=\"11\">'+p[0].t+'</text>';\n"
+"  o+='<text x=\"'+(W-pad)+'\" y=\"'+(H-6)+'\" fill=\"#8b93a7\" font-size=\"11\" text-anchor=\"end\">'+p[n-1].t+'</text>';\n"
+"  s.innerHTML=o;\n"
+"  var corr=p.filter(function(q){return q.c}).length;\n"
+"  document.getElementById('glegend').innerHTML='last '+n+' checks \u00b7 '+corr+' correction'+(corr==1?'':'s')+' \u00b7 peak '+Math.max.apply(null,p.map(function(q){return q.d})).toFixed(1)+'\u2033'}\n"
+"function gshow(d){document.getElementById('gst').innerHTML=d.running?'<b>guiding</b> \u00b7 every '+d.interval+'s, threshold '+d.threshold+'\u2033':'not guiding';\n"
+"  document.getElementById('g1').disabled=!!d.running;document.getElementById('g0').disabled=!d.running;\n"
+"  gchart(d)}\n"
+"function gload(){fetch('/api/guide').then(r=>r.json()).then(gshow)}\n"
+"function guide(v){document.getElementById('gerr').textContent='';\n"
+"  fetch('/api/guide?on='+v,{method:'POST'}).then(r=>r.json()).then(function(d){\n"
+"    if(d.ok===false)document.getElementById('gerr').textContent=d.error||'failed';\n"
+"    else gshow(d)})}\n"
+"gload();setInterval(gload,10000);\n"
 "kwload();\n"
 "fload();\n"
 "tick();var iv=setInterval(tick,4000);\n// poll fast only while a job is actually running\nfunction rate(busy){clearInterval(iv);iv=setInterval(tick,busy?1500:4000)}\n\n"
@@ -1704,7 +1750,7 @@ static void handle(int fd) {
                 unlink(KEEPWIFI_FLAG);
                 read_file(KEEPWIFI_PID, pb, sizeof pb);
                 kp = atol(pb);
-                if (kp <= 0 || kill((pid_t)kp, 0) != 0) kp = (long)find_keepalive();
+                if (kp <= 0 || kill((pid_t)kp, 0) != 0) kp = (long)find_proc("wifi-keepalive.sh");
                 if (kp > 0) {
                     int w;
                     /* it is a session leader, so signal the group -- killing
@@ -1724,7 +1770,7 @@ static void handle(int fd) {
                     }
                     /* duplicates can exist -- earlier races left two running */
                     { pid_t o; int guard = 0;
-                      while ((o = find_keepalive()) > 0 && guard++ < 8) {
+                      while ((o = find_proc("wifi-keepalive.sh")) > 0 && guard++ < 8) {
                           kill(-o, SIGTERM); kill(o, SIGTERM);
                           usleep(300000);
                           if (kill(o, 0) == 0) { kill(-o, SIGKILL); kill(o, SIGKILL); usleep(200000); }
@@ -1734,11 +1780,113 @@ static void handle(int fd) {
             }
         }
         { FILE *f = fopen(KEEPWIFI_FLAG, "r"); if (f) { on = 1; fclose(f); } }
-        running = (find_keepalive() > 0);
+        running = (find_proc("wifi-keepalive.sh") > 0);
         snprintf(out, sizeof out,
                  "{\"ok\":true,\"enabled\":%s,\"running\":%s,\"aligned\":%s}",
                  on ? "true" : "false", running ? "true" : "false",
                  may_read_mount() ? "true" : "false");
+        respond_json(fd, out);
+        return;
+    }
+
+    /* Guiding: status, drift history, and start/stop.
+     *
+     * The drift history is parsed out of the guider's own log rather than kept
+     * in a second place that could disagree with it. Lines look like
+     *     14:02:11 drift 61.2" (dx=1.2 dy=3.4 px) exceeds 60"
+     *     14:02:41 drift 12.3" (dx=0.2 dy=0.7 px) -- within tolerance
+     * and a correction is logged separately as "correcting: goto-radec ...".
+     */
+    if (!strcmp(path, "/api/guide")) {
+        char out[16384], pts[12288], tail[3072], tailesc[6144];
+        int running = 0, npt = 0;
+        double last = -1;
+        pts[0] = 0;
+
+        if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
+            char v[16] = "";
+            if (!param(qs, "on", v, sizeof v) && body) param(body, "on", v, sizeof v);
+            if (v[0] == '1' || !strcmp(v, "true")) {
+                /* Guiding needs something to guide ON. Without a solved
+                 * position there is no anchor, so refuse rather than start a
+                 * process that will immediately give up. */
+                double ra, dec;
+                if (!last_solution(&ra, &dec)) {
+                    respond_json(fd, "{\"ok\":false,\"error\":"
+                        "\"nothing solved yet -- solve a frame first so there is a target to guide on\"}");
+                    return;
+                }
+                if (!may_read_mount()) {
+                    respond_json(fd, "{\"ok\":false,\"error\":"
+                        "\"mount is not aligned -- guiding would move it against an unknown pointing\"}");
+                    return;
+                }
+                { char cmd[640];
+                  snprintf(cmd, sizeof cmd,
+                     "LAT=%.6f LON=%.6f FOCAL_MM=%.0f DRY_RUN=%s INTERVAL=%s THRESH_ARCSEC=%s "
+                     "setsid sh %s/polaris-guide.sh --ra %.6f --dec %.6f "
+                     "</dev/null >/tmp/guide.out 2>&1 &",
+                     g_lat, g_lon, g_focal,
+                     getenv("GUIDE_DRY_RUN") ? getenv("GUIDE_DRY_RUN") : "0",
+                     getenv("GUIDE_INTERVAL") ? getenv("GUIDE_INTERVAL") : "30",
+                     getenv("GUIDE_THRESH") ? getenv("GUIDE_THRESH") : "60",
+                     g_astro, ra, dec);
+                  if (system(cmd) == -1) {} }
+            } else {
+                pid_t g; int guard = 0;
+                while ((g = find_proc("polaris-guide.sh")) > 0 && guard++ < 8) {
+                    kill(-g, SIGTERM); kill(g, SIGTERM);
+                    usleep(300000);
+                    if (kill(g, 0) == 0) { kill(-g, SIGKILL); kill(g, SIGKILL); usleep(200000); }
+                }
+            }
+        }
+
+        running = (find_proc("polaris-guide.sh") > 0);
+
+        /* drift points, oldest first, from the guider's log */
+        {
+            FILE *f = fopen("/app/sd/polaris-guide.log", "r");
+            if (f) {
+                char line[512];
+                char stack[64][64];
+                int nst = 0;
+                while (fgets(line, sizeof line, f)) {
+                    const char *d = strstr(line, "drift ");
+                    if (!d) continue;
+                    { double val = atof(d + 6);
+                      int corrected = (strstr(line, "exceeds") != NULL);
+                      char hhmm[16] = "";
+                      /* leading "HH:MM:SS " timestamp written by log() */
+                      if (strlen(line) > 8 && line[2] == ':' && line[5] == ':') {
+                          memcpy(hhmm, line, 8); hhmm[8] = 0;
+                      }
+                      snprintf(stack[nst % 64], 64, "{\"t\":\"%s\",\"d\":%.2f,\"c\":%s}",
+                               hhmm, val, corrected ? "true" : "false");
+                      nst++;
+                      last = val; }
+                }
+                fclose(f);
+                { int start = nst > 64 ? nst - 64 : 0, i;
+                  for (i = start; i < nst; i++) {
+                      size_t used = strlen(pts);
+                      const char *one = stack[i % 64];
+                      if (used + strlen(one) + 2 >= sizeof pts) break;
+                      if (npt) strcat(pts, ",");
+                      strcat(pts, one);
+                      npt++;
+                  } }
+            }
+        }
+        read_tail("/app/sd/polaris-guide.log", tail, sizeof tail);
+        json_escape(tail, tailesc, sizeof tailesc);
+        snprintf(out, sizeof out,
+            "{\"ok\":true,\"running\":%s,\"threshold\":%s,\"interval\":%s,"
+            "\"last_drift\":%.2f,\"points\":[%s],\"log\":\"%s\"}",
+            running ? "true" : "false",
+            getenv("GUIDE_THRESH") ? getenv("GUIDE_THRESH") : "60",
+            getenv("GUIDE_INTERVAL") ? getenv("GUIDE_INTERVAL") : "30",
+            last, pts, tailesc);
         respond_json(fd, out);
         return;
     }

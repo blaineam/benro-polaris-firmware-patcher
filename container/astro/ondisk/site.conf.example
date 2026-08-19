@@ -58,7 +58,9 @@ CENTRE_TOL_DEG=0.15
 
 # Refuse to derive a heading above this altitude: azimuth is degenerate near the
 # zenith and the error is amplified by 1/cos(alt).
-MAX_ALIGN_ALT=65
+MAX_ALIGN_ALT=85         # hard stop near the zenith; the real check is MAX_UNCERT_FRAC
+SOLVE_ARCSEC=60          # assumed solve accuracy (measured 20-40")
+MAX_UNCERT_FRAC=0.25     # refuse if uncertainty exceeds this fraction of the correction
 
 # Seconds to wait before attempting another alignment. The app re-sends its
 # 519/530 while the dialog is open, and without this the daemon re-arms on every
