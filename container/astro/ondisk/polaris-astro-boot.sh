@@ -140,7 +140,11 @@ SITE=/app/sd/polaris-astro/site.conf
             echo "autosolve already running -- not starting a second"
             exit 0
         fi
-        echo "starting autosolve (dry_run=${AUTOSOLVE_DRY_RUN:-1})"
+        # NAME TRANSLATION, do not "simplify" this: site.conf says FOCAL and
+        # AUTOSOLVE_DRY_RUN, the daemon reads FOCAL_MM and DRY_RUN. Launching it
+        # without this mapping silently gives focal=400mm and dry_run=1 -- it
+        # looks like it started fine and then solves nothing and touches nothing.
+        echo "starting autosolve (dry_run=${AUTOSOLVE_DRY_RUN:-1} focal=${FOCAL}mm)"
         LAT="$LAT" LON="$LON" FOCAL_MM="$FOCAL" \
         DRY_RUN="${AUTOSOLVE_DRY_RUN:-1}" \
         STUB_FRAME="${STUB_FRAME:-}" STUB_UTC="${STUB_UTC:-}" \
@@ -148,6 +152,8 @@ SITE=/app/sd/polaris-astro/site.conf
         GUIDE_INTERVAL="${GUIDE_INTERVAL:-30}" GUIDE_THRESH="${GUIDE_THRESH:-60}" \
         CENTRE_TOL_DEG="${CENTRE_TOL_DEG:-0.15}" MAX_ALIGN_ALT="${MAX_ALIGN_ALT:-65}" \
         MIN_LOGODDS="${MIN_LOGODDS:-100}" MIN_MATCHES="${MIN_MATCHES:-12}" \
+        FOCAL_MIN="${FOCAL_MIN:-8}" FOCAL_MAX="${FOCAL_MAX:-3000}" \
+        RANGE_TIMEOUT="${RANGE_TIMEOUT:-240}" KEEP_FAILED="${KEEP_FAILED:-20}" \
         setsid sh "$ASTRO/polaris-autosolve.sh" </dev/null >/tmp/autosolve.out 2>&1 &
     fi
 } >> "$LOG" 2>&1 &
