@@ -649,7 +649,11 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
              * again, or "read before write" wrongly succeeds with a stale value
              * left by the previous client. g_target_set otherwise lives for the
              * life of the process. */
-            if (bv && !g_connected) g_target_set = 0;
+            /* Reset on ANY Connected=True, not only a false->true edge.
+             * Conform connects while g_connected is already 1 (it survives from
+             * a previous client), so the edge never fired and "read before
+             * write" kept succeeding with a stale target. */
+            if (bv) g_target_set = 0;
             g_connected = bv;          /* must actually stick: Conform sets it False and reads back */
             alpaca_value(fd, qs, "null"); return 1;
         }
@@ -866,6 +870,17 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
             "%s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s star-align --alt %.6f --az %.6f 2>&1",
             g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ua, alt, az);
         run_capture(cmd, out, sizeof out);
+        /* Let the mount apply the new model before we answer.
+         *
+         * A sync IS applied correctly -- told it it was 1.0 deg away, its
+         * reported azimuth shifted +0.9983 deg -- but not instantly. Clients
+         * read the position immediately after the call returns, and Conform saw
+         * "synced to a position 3618 arcsec away" purely because it looked
+         * before the mount had updated. Returning early is lying about when the
+         * work finished. */
+        { const char *e = getenv("SYNC_SETTLE_MS");
+          long ms = (e && *e) ? atol(e) : 1500;
+          if (ms > 0) usleep((useconds_t)(ms * 1000)); }
         last_sync = now;
         g_target_ra = sra; g_target_dec = sdec; g_target_set = 1;
         alpaca_value(fd, qs, "null");
