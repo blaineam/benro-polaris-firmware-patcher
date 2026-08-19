@@ -372,6 +372,10 @@ static void usage(const char* me) {
 "                         after the slew, recomputes the target for the time it\n"
 "                         actually arrived and nudges once if the sky has moved\n"
 "                         more than --refine-arcmin (default 2)\n"
+"  --clock-offset SEC     seconds to ADD to the system clock to get true UTC.\n"
+"                         Use this when the clock is WRONG (the Polaris runs\n"
+"                         local time). NOT --utc, which freezes an instant for\n"
+"                         replay and disables refinement.\n"
 "  track on|off [--hold S]                 MOVES MOTORS\n"
 "                         --hold keeps the connection OPEN for S seconds and\n"
 "                         prints the pose as it goes. The mount appears to tie\n"
@@ -412,8 +416,21 @@ int main(int argc, char** argv) {
     int track = 1, refine = 1;
     double hold_s = 0;
     double refine_arcmin = 2.0;
+    int refine_max = 4;      /* bounded refinement passes */
     const char* utc = NULL;
     int utc_fixed = 0;
+    /* --clock-offset SEC: seconds to ADD to the system clock to get true UTC.
+     *
+     * This is NOT --utc. --utc freezes a specific instant, for replaying a past
+     * capture, and deliberately disables arrival refinement (refining towards
+     * where the target is TODAY would be meaningless for a replay).
+     *
+     * The Polaris' clock runs LOCAL time while reporting itself as UTC, so
+     * callers were passing --utc on every command just to correct it -- which
+     * silently disabled refinement everywhere and left ~100 arcsec of RA error
+     * after every goto. This flag corrects the clock while letting time keep
+     * advancing, which is what a wrong clock actually needs. */
+    double clock_offset = 0.0;
     const char* cmd = NULL;
     const char* cmd_arg = NULL;
     int raw_n = 0;
@@ -446,6 +463,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--no-refine")) refine = 0;
         else if (!strcmp(a, "--hold"))     hold_s = atof(NEXT());
         else if (!strcmp(a, "--refine-arcmin")) refine_arcmin = atof(NEXT());
+        else if (!strcmp(a, "--clock-offset")) clock_offset = atof(NEXT());
+        else if (!strcmp(a, "--refine-max")) refine_max = atoi(NEXT());
         else if (!strcmp(a, "--min-alt"))  g_min_alt = atof(NEXT());
         else if (!strcmp(a, "--max-alt"))  g_max_alt = atof(NEXT());
         else if (!strcmp(a, "--max-slew")) g_max_slew = atof(NEXT());
@@ -473,7 +492,7 @@ int main(int argc, char** argv) {
         utc_fixed = 1;      /* replaying a past capture: freeze the clock */
     } else {
         struct timeval tv; gettimeofday(&tv, NULL);
-        jd = jd_from_unix(tv.tv_sec + tv.tv_usec * 1e-6);
+        jd = jd_from_unix(tv.tv_sec + tv.tv_usec * 1e-6 + clock_offset);
     }
 
     /* pure-maths commands need no mount */
@@ -738,27 +757,61 @@ int main(int argc, char** argv) {
             int refined = 0;
             double ralt = alt, raz = az;
             if (refine && !g_dry && !strcmp(cmd, "goto-radec")) {
-                struct timeval tv2; double jd2, sep;
-                if (utc_fixed) {
-                    /* An explicit --utc means we are replaying a specific
-                     * moment (an offline test against a past capture). Using
-                     * the wall clock here would refine towards where the
-                     * target is TODAY, which is meaningless for that replay. */
-                    jd2 = jd;
-                } else {
+                /* ITERATE. One nudge is not enough: the corrective move itself
+                 * takes ~6 s, during which the sky moves again, so a single
+                 * pass left ~90 arcsec of RA error (measured). Each pass is
+                 * shorter than the last, so this converges quickly -- and it is
+                 * bounded, because a mount that cannot settle must not spin
+                 * here forever. */
+                int pass;
+                double prev_sep = 1e9;
+                double lead_s = 0.0;                    /* how long a move takes */
+                for (pass = 0; pass < refine_max; pass++) {
+                    struct timeval tv2, tvA, tvB; double jd2, sep;
+                    double calt = ralt, caz = raz;      /* where we are now */
+                    if (utc_fixed) {
+                        /* An explicit --utc means we are replaying a specific
+                         * moment (an offline test against a past capture).
+                         * Refining towards where the target is TODAY would be
+                         * meaningless for that replay, so do not. Use
+                         * --clock-offset instead when the CLOCK is merely
+                         * wrong; that keeps time advancing and refines. */
+                        break;
+                    }
+                    /* LEAD THE TARGET, do not chase it.
+                     *
+                     * The sky moves 15 arcsec/s in RA and a corrective move
+                     * takes several seconds, so aiming at where the target IS
+                     * always lands that many seconds behind -- measured 99, 90,
+                     * 82 arcsec across successive chasing passes, barely
+                     * converging. Aim instead at where it WILL BE once the move
+                     * completes, using the duration the previous move actually
+                     * took (0 on the first pass, so it behaves as before and
+                     * then corrects with a real measurement). */
                     gettimeofday(&tv2, NULL);
-                    jd2 = jd_from_unix(tv2.tv_sec + tv2.tv_usec * 1e-6);
-                }
-                radec2altaz(ra, dec, lat, lon, jd2, &ralt, &raz);
-                sep = fabs(ralt - alt) + fabs(fmod(fabs(raz - az) + 180.0, 360.0) - 180.0)
-                      * cos(ralt * DEG);
-                if (sep * 60.0 > refine_arcmin && check_move(ralt, raz, alt, az) == 0) {
+                    jd2 = jd_from_unix(tv2.tv_sec + tv2.tv_usec * 1e-6 + clock_offset + lead_s);
+                    radec2altaz(ra, dec, lat, lon, jd2, &ralt, &raz);
+                    sep = fabs(ralt - calt)
+                        + fabs(fmod(fabs(raz - caz) + 180.0, 360.0) - 180.0) * cos(ralt * DEG);
+                    if (sep * 60.0 <= refine_arcmin) break;      /* close enough */
+                    /* Not converging (mount cannot keep up): stop rather than
+                     * hammer it with gotos. */
+                    if (sep >= prev_sep) break;
+                    prev_sep = sep;
+                    if (check_move(ralt, raz, calt, caz) != 0) break;
                     snprintf(msg, sizeof(msg),
                              "1&519&3&state:1;yaw:%.5f;pitch:%.5f;lat:%.5f;track:%d;speed:0;lng:%.5f;#",
                              az_to_wire(raz), ralt, lat, track, lon);
+                    gettimeofday(&tvA, NULL);
                     conn_send(&c, msg);
                     wait_for(&c, "519", args, sizeof(args), 4000);
                     wait_for(&c, "519", args, sizeof(args), 20000);
+                    gettimeofday(&tvB, NULL);
+                    /* Measured duration of THIS move becomes the lead for the
+                     * next one. Damped slightly so a single slow move does not
+                     * make the next aim wildly ahead. */
+                    lead_s = 0.9 * ((tvB.tv_sec - tvA.tv_sec)
+                                    + (tvB.tv_usec - tvA.tv_usec) * 1e-6);
                     refined = 1;
                 }
             }

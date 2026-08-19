@@ -388,13 +388,19 @@ static int current_radec(double *ra, double *dec);
  * device clock sent the mount ~105 deg (7 h) from the target while our position
  * reads were correct -- ConformU saw "Slewed 379127 arc seconds away". Third
  * place this same clock bug has surfaced. */
+/* --clock-offset, NOT --utc.
+ *
+ * --utc freezes an instant (for replaying a past capture) and deliberately
+ * disables goto arrival refinement. Passing it on every call -- which is what
+ * we did to work around the Polaris' local-time clock -- silently disabled
+ * refinement everywhere, leaving ~100 arcsec of RA error after every goto
+ * because the sky moves during the ~10 s slew and nothing corrected for it.
+ *
+ * --clock-offset corrects the clock while letting time keep advancing, which
+ * is what a wrong clock actually needs, and lets refinement work. */
 static void utc_arg(char *out, size_t cap) {
-    struct tm g; time_t t;
-    extern time_t utc_now(void);
-    t = utc_now();
-    gmtime_r(&t, &g);
-    snprintf(out, cap, "--utc %04d-%02d-%02dT%02d:%02d:%02d",
-             g.tm_year+1900, g.tm_mon+1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
+    extern long tz_offset_sec(void);
+    snprintf(out, cap, "--clock-offset %ld", tz_offset_sec());
 }
 
 /* ----------------------------------------------------------------- Alpaca */
@@ -443,7 +449,7 @@ static double g_site_elev = 0.0;
  * hour apart" -- 7 hours, i.e. the whole PDT offset. The autosolve daemon was
  * fixed for this; polaris-httpd was not, so every Alpaca client saw wrong
  * positions. Offset is the app's own value, cached by the daemon. */
-static long tz_offset_sec(void) {
+long tz_offset_sec(void) {
     static long cached = -1;
     char buf[64];
     if (cached >= 0) return cached;
@@ -724,14 +730,11 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
     if (!strcmp(m, "siderealtime")) {
         char cmd[512], out[512], b[64];
         double lst = 0;
-        {   /* corrected UTC, for the same reason as UTCDate above */
-            char ub[64]; struct tm g; time_t t = utc_now();
-            gmtime_r(&t, &g);
-            snprintf(ub, sizeof ub, "%04d-%02d-%02dT%02d:%02d:%02d",
-                     g.tm_year+1900, g.tm_mon+1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
+        {   char ub[64];
+            snprintf(ub, sizeof ub, "--clock-offset %ld", tz_offset_sec());
             snprintf(cmd, sizeof cmd,
                  /* radec2altaz reports lst_deg; altaz2radec does NOT. */
-                 "%s/polaris-mount --lat %.6f --lon %.6f --utc %s radec2altaz --ra 0 --dec 0 2>/dev/null",
+                 "%s/polaris-mount --lat %.6f --lon %.6f %s radec2altaz --ra 0 --dec 0 2>/dev/null",
                  g_astro, g_lat, g_lon, ub);
         }
         if (run_capture(cmd, out, sizeof out) == 0) {
@@ -986,15 +989,11 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
 static int current_radec(double *ra, double *dec) {
     char cmd[512], out[512], raw[512], ub[64];
     double alt = 0, az = 0;
-    struct tm g;
-    time_t t = utc_now();
     *ra = 0; *dec = 0;
-    gmtime_r(&t, &g);
-    snprintf(ub, sizeof ub, "%04d-%02d-%02dT%02d:%02d:%02d",
-             g.tm_year+1900, g.tm_mon+1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec);
+    snprintf(ub, sizeof ub, "--clock-offset %ld", tz_offset_sec());
     if (mount_pose(&alt, &az, raw, sizeof raw)) {
         snprintf(cmd, sizeof cmd,
-            "%s/polaris-mount --lat %.6f --lon %.6f --utc %s altaz2radec --alt %.6f --az %.6f 2>/dev/null",
+            "%s/polaris-mount --lat %.6f --lon %.6f %s altaz2radec --alt %.6f --az %.6f 2>/dev/null",
             g_astro, g_lat, g_lon, ub, alt, az);
         if (run_capture(cmd, out, sizeof out) == 0) {
             const char *q2 = strstr(out, "\"ra_deg\":");
