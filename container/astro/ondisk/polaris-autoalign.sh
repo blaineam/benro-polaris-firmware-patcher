@@ -54,7 +54,25 @@
 # ============================================================================
 ASTRO=${ASTRO:-/app/astro}
 INDEXES=${INDEXES:-/app/sd/astrometry}
-CAPTURE_DIR=${CAPTURE_DIR:-/app/sd/normal}
+# Where the app drops a captured frame depends on which mode it is in:
+#   /app/sd/normal          single shots
+#   /app/sd/starskyStack    star/astro stacking
+#   /app/sd/Lapse/class_NN  timelapse (a NEW class_NN per run)
+#   /app/sd/HDR, /app/sd/panorama, /app/sd/focusStack, /app/sd/sun
+# Guessing one and watching only it is how we miss the frame entirely, so scan
+# them all and take whichever jpg is genuinely newest. CAPTURE_DIR still wins
+# if set, and may be a space-separated list.
+CAPTURE_DIR=${CAPTURE_DIR:-/app/sd/normal /app/sd/starskyStack /app/sd/HDR /app/sd/panorama /app/sd/focusStack /app/sd/sun}
+CAPTURE_GLOB_EXTRA=${CAPTURE_GLOB_EXTRA:-/app/sd/Lapse/class_*}
+
+# newest jpg across every candidate directory (empty output if none)
+newest_frame() {
+    for d in $CAPTURE_DIR $CAPTURE_GLOB_EXTRA; do
+        [ -d "$d" ] && ls -t "$d"/*.jpg "$d"/*.JPG 2>/dev/null | head -1
+    done | while read -r f; do
+        [ -n "$f" ] && printf "%s %s\n" "$(date -r "$f" +%s 2>/dev/null || echo 0)" "$f"
+    done | sort -rn | head -1 | cut -d" " -f2-
+}
 MOUNT_HOST=${MOUNT_HOST:-127.0.0.1}
 MOUNT_PORT=${MOUNT_PORT:-9090}
 APPLOG=${APPLOG:-/app/Mlog.txt}
@@ -115,15 +133,29 @@ capture() {
             --out "$out" >/dev/null 2>&1 || { log "render failed"; return 1; }
         echo "$out"; return 0
     fi
-    before=$(ls -t "$CAPTURE_DIR"/*.jpg 2>/dev/null | head -1)
-    "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" send \
-        --msg '1&272&2&step:1#' \
-        --msg '1&272&2&step:2;point:1;time:0;para:1,-1;bulb:0;#' \
-        --msg '1&272&2&step:3;point:1;time:-1;photoCnt:-1;#' >/dev/null 2>&1
+    before=$(newest_frame)
+    # SINGLE SHOT (opcode 264), which is what the app itself sends for one frame:
+    #   rcv msg from App: type:2;code:264;val:state:1;bulb:0;c:-1;
+    #
+    # Do NOT use the 272 step:1/2/3 sequence here. That creates a LAPSE task,
+    # and with time:-1;photoCnt:-1 it is an UNLIMITED one -- it fired 28
+    # unwanted shutter actuations during development and keeps going until
+    # something aborts it. One frame is all the solver needs.
+    if [ "${CAPTURE_OPCODE:-264}" = "264" ]; then
+        "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" send \
+            --msg '1&264&2&state:1;bulb:0;c:-1#' >/dev/null 2>&1
+    else
+        # Legacy lapse path, bounded to ONE photo. Kept only as a fallback if a
+        # firmware turns out not to honour 264; never unbounded.
+        "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" send \
+            --msg '1&272&2&step:1#' \
+            --msg '1&272&2&step:2;point:1;time:0;para:1,-1;bulb:0;#' \
+            --msg '1&272&2&step:3;point:1;time:0;photoCnt:1;#' >/dev/null 2>&1
+    fi
     i=0
     while [ $i -lt "$CAPTURE_WAIT" ]; do
         sleep 1; i=$((i + 1))
-        newest=$(ls -t "$CAPTURE_DIR"/*.jpg 2>/dev/null | head -1)
+        newest=$(newest_frame)
         if [ -n "$newest" ] && [ "$newest" != "$before" ]; then
             sleep 1                       # let the write finish
             log "shutter fired; frame landed: $newest"
