@@ -36,8 +36,28 @@ FOCAL=${FOCAL_MM:-400}
 LIVEVIEW_PORT=${LIVEVIEW_PORT:-8080}
 INDEXES=${INDEXES:-/app/sd/astrometry}
 MATCH_TOL=${MATCH_TOL:-2.5}
+MOUNT_HOST=${MOUNT_HOST:-127.0.0.1}
+MOUNT_PORT=${MOUNT_PORT:-9090}
+SIM_STATUS=${SIM_STATUS:-}
+CAPTURE_MODE=${CAPTURE_MODE:-liveview}
 : "${LAT:?set LAT}"; : "${LON:?set LON}"
 export LAT LON
+
+# The Polaris' system clock runs LOCAL time while reporting itself as UTC (see
+# polaris-autosolve.sh). goto-radec converts RA/Dec to alt/az, so an uncorrected
+# clock sends the mount to the wrong place -- 7 hours is ~105 deg of hour angle.
+TZ_OFFSET_SEC=${TZ_OFFSET_SEC:-auto}
+if [ "$TZ_OFFSET_SEC" = "auto" ]; then
+    TZ_OFFSET_SEC=$(grep -a "code:782" /app/Mlog.txt 2>/dev/null \
+        | sed -n 's/.*zone:-\{1,2\}\([0-9][0-9]*\).*/\1/p' | tail -1)
+    [ -n "$TZ_OFFSET_SEC" ] || TZ_OFFSET_SEC=0
+fi
+utc_now() {
+    _e=$(( $(date +%s) + TZ_OFFSET_SEC ))
+    date -u -d "@$_e" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null \
+      || date -u -r "$_e" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null
+}
+utcarg() { [ "${TZ_OFFSET_SEC:-0}" -eq 0 ] 2>/dev/null || printf -- "--utc %s" "$(utc_now)"; }
 
 RA=""; DEC=""
 while [ $# -gt 0 ]; do
@@ -59,7 +79,26 @@ log() { echo "$(date +%H:%M:%S) $*" >> "$LOG"; echo "$(date +%H:%M:%S) $*" >&2; 
 
 idx_args() { for f in "$INDEXES"/index-*.fits; do [ -f "$f" ] && printf ' --index %s' "$f"; done; }
 
+# CAPTURE_MODE=render is the SIMULATOR camera: ask the sim where it is REALLY
+# pointing and draw that patch of sky. Lets guiding be exercised with real motor
+# commands and no hardware.
 grab() {
+    if [ "$CAPTURE_MODE" = "render" ]; then
+        [ -n "$SIM_STATUS" ] || return 1
+        _sh=$(echo "$SIM_STATUS" | cut -d: -f1); _sp=$(echo "$SIM_STATUS" | cut -d: -f2)
+        rm -f /tmp/guide_sim.json
+        "$ASTRO/polaris-mount" fetch --host "$_sh" --port "$_sp" \
+            --url-path "/" --out /tmp/guide_sim.json >/dev/null 2>&1
+        _tra=$(sed -n 's/.*"true_ra_deg": *\([-0-9.]*\).*/\1/p'  /tmp/guide_sim.json)
+        _tdec=$(sed -n 's/.*"true_dec_deg": *\([-0-9.]*\).*/\1/p' /tmp/guide_sim.json)
+        [ -n "$_tra" ] || return 1
+        rm -f "$1"
+        "$ASTRO/polaris-skysim" $(idx_args) --ra "$_tra" --dec "$_tdec" \
+            --focal-mm "$FOCAL" --sensor-mm 36 --width 960 --height 640 \
+            --out "$1" >/dev/null 2>&1
+        [ -s "$1" ]
+        return $?
+    fi
     rm -f "$1"
     "$ASTRO/polaris-mount" fetch --host 127.0.0.1 --port "$LIVEVIEW_PORT" \
         --url-path "/?action=snapshot" --out "$1" >/dev/null 2>&1
@@ -104,12 +143,14 @@ correct() {
         return 0
     fi
     log "  correcting: goto-radec --ra $RA --dec $DEC"
-    "$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" \
+    "$ASTRO/polaris-mount" --host "$MOUNT_HOST" --port "$MOUNT_PORT" \
+        --lat "$LAT" --lon "$LON" $(utcarg) \
         goto-radec --ra "$RA" --dec "$DEC" >>"$LOG" 2>&1
     sleep 5
     anchor            # field moved; take a fresh reference
 }
 
+log "clock: TZ_OFFSET_SEC=$TZ_OFFSET_SEC -> UTC $(utc_now)"
 log "guiding target ra=$RA dec=$DEC (dry_run=$DRY_RUN interval=${INTERVAL}s threshold=${THRESH_ARCSEC}\")"
 anchor || { log "could not anchor -- nothing to guide against"; exit 1; }
 

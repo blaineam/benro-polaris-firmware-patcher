@@ -17,6 +17,21 @@ What it models, because these are the things that can break the loop:
   * 527 (set compass), which is how an alignment correction gets applied.
   * pointing jitter and a small non-repeatable settle error (--jitter), so a
     loop that only works with perfect numbers is caught here.
+  * imperfect tracking (--track-drift, arcsec/min), so a guider has something
+    real to correct. Drift restarts after each correction, because a mount
+    drifts away from wherever you just put it.
+
+KNOWN LIMITATION -- coordinates are ~0.2 deg off polaris-mount's:
+
+    same alt/az, same instant:
+        sim   -> RA 304.514182  Dec 54.543075
+        mount -> RA 304.321539  Dec 54.457980
+
+polaris-mount applies precession, nutation and aberration (validated to 8.2" vs
+astropy); this sim uses a plain conversion without them. So a test that compares
+a sim-derived RA/Dec against a mount-derived one will see a constant ~0.2 deg
+offset that is NOT a product bug. Compare sim-to-sim or mount-to-mount, or
+expect that offset.
 
 Run:  polaris-sim.py [--port 9090] [--az-error 37.5] [--lat .. --lon ..]
 Query its TRUE pointing (what the sky would show) out of band:  --status-port
@@ -72,6 +87,9 @@ class Mount:
         self.slew_rate = args.slew_rate        # deg/s
         self.jitter = args.jitter              # deg, non-repeatable settle error
         self.true_alt, self.true_az = 45.0, (0.0 + self.az_error) % 360.0
+        self.track_drift = getattr(args, "track_drift", 0.0)   # arcsec/min
+        self.track_t0 = None
+        self.drift_accum = 0.0
         self.tracking = False
         self.track_target = None               # (ra, dec) held while tracking
         self.slewing = False
@@ -87,11 +105,22 @@ class Mount:
                     self.true_alt - self.alt_error)
 
     def tick(self):
-        """Sidereal tracking: hold the sky target, which means alt/az move."""
+        """Sidereal tracking: hold the sky target, which means alt/az move.
+
+        With --track-drift the hold is imperfect, accumulating error the way a
+        real mount does. That is what a guider is for."""
         with self.lock:
             if self.tracking and self.track_target:
                 ra, dec = self.track_target
                 self.true_alt, self.true_az = radec2altaz(ra, dec, self.lat, self.lon, jd_now())
+                if self.track_drift:
+                    if self.track_t0 is None:
+                        self.track_t0 = time.time()
+                    mins = (time.time() - self.track_t0) / 60.0
+                    self.drift_accum = self.track_drift * mins / 3600.0   # deg
+                    self.true_az = (self.true_az + self.drift_accum) % 360.0
+            else:
+                self.track_t0 = None
 
     def goto(self, want_az_reported, want_alt_reported, track, done):
         """Slew to a commanded position. The command is in the mount's own
@@ -122,6 +151,13 @@ class Mount:
             if self.tracking:
                 self.track_target = altaz2radec(self.true_alt, self.true_az,
                                                 self.lat, self.lon, jd_now())
+                # Drift restarts from wherever we were just put. Without this the
+                # accumulated error is re-applied the instant a goto finishes, so
+                # no correction can ever land -- which looks like a guider bug and
+                # is really a modelling one. A real mount drifts away from its
+                # current position, it does not teleport back onto an old error.
+                self.track_t0 = time.time()
+                self.drift_accum = 0.0
         done()
 
     def set_compass(self, compass_value):
@@ -139,6 +175,7 @@ class Mount:
                     "true_ra_deg": ra, "true_dec_deg": dec,
                     "reported_alt_deg": ralt, "reported_az_deg": raz,
                     "az_error_deg": self.az_error, "tracking": self.tracking,
+                    "track_drift_deg": self.drift_accum,
                     "slewing": self.slewing, "moves": self.moves}
 
 
@@ -291,6 +328,11 @@ def main():
     ap.add_argument("--az-error", type=float, default=37.5,
                     help="how wrong the mount's heading is at startup (deg)")
     ap.add_argument("--alt-error", type=float, default=0.0)
+    # Real mounts do not track perfectly. Without this the sim holds a target
+    # forever and a guider has nothing to correct, which would "pass" a guiding
+    # test that has never actually guided anything.
+    ap.add_argument("--track-drift", type=float, default=0.0,
+                    help="tracking error in arcsec/min, applied in azimuth")
     ap.add_argument("--slew-rate", type=float, default=20.0, help="deg/s")
     ap.add_argument("--jitter", type=float, default=0.02,
                     help="non-repeatable settle error per move (deg)")
