@@ -65,6 +65,17 @@ SITE=/app/sd/polaris-astro/site.conf
         setsid "$ASTRO/polaris-trackwatch.sh" </dev/null >/dev/null 2>&1 &
     fi
 
+    # CAMERA FLIGHT RECORDER. Catches the "camera battery died and the mount
+    # drove somewhere bad" event, which cannot be reproduced on demand -- it
+    # happens when a battery happens to run out. CAMERA_WATCH=0 to skip.
+    if [ "${CAMERA_WATCH:-1}" = "1" ] && [ -x /app/sd/polaris-astro/camera-death-watch.sh ]; then
+        mkdir -p "$ASTRO"
+        cp /app/sd/polaris-astro/camera-death-watch.sh "$ASTRO"/ 2>/dev/null
+        chmod 755 "$ASTRO/camera-death-watch.sh" 2>/dev/null
+        echo "starting camera-death-watch"
+        setsid "$ASTRO/camera-death-watch.sh" </dev/null >/dev/null 2>&1 &
+    fi
+
     # WIFI WATCHDOG -- always, and first.
     #
     # The AP disappears when the phone disconnects and only a power cycle
