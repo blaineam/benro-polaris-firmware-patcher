@@ -53,6 +53,31 @@ SITE=/app/sd/polaris-astro/site.conf
         echo "no $SITE after ${i} tries -- microSD not mounted?"
     fi
 
+    # SILENCE THE KERNEL CONSOLE. FIRST, before anything else runs.
+    #
+    # The wifi driver floods the log with
+    #     dhd_tcpdata_info_get 1056: No more free tdata_psh_info!!
+    # when its TCP-flow pool is exhausted, which on this firmware is most of
+    # the time. The kernel command line is console=ttyAMA0,115200, so EVERY one
+    # of those lines is written out a 115200-baud serial port -- about 5 ms of
+    # blocked kernel time each. A few per second is invisible; under TCP load
+    # the rate explodes and the kernel spends its life in serial output.
+    #
+    # The symptom is distinctive and was observed twice: ping keeps answering
+    # (ICMP is handled in softirq) while EVERY TCP service stops -- ssh accepts
+    # the connection and never sends a banner, the web server and the Benro
+    # control port both go silent, and eventually the box reboots itself.
+    #
+    # console_loglevel 1 stops them reaching the serial port. They are still
+    # recorded in the kernel ring buffer, so dmesg still has them for
+    # diagnosis; they simply no longer block the system to print.
+    #
+    # PRINTK_QUIET=0 in site.conf leaves the console alone.
+    if [ "${PRINTK_QUIET:-1}" = "1" ]; then
+        echo 1 > /proc/sys/kernel/printk 2>/dev/null \
+            && echo "console loglevel -> 1 (driver log flood no longer blocks on the serial port)"
+    fi
+
     # TRACK WATCHER -- always. Keeps /tmp/polaris-track current by following the
     # device log continuously, because the log is truncated too fast for anyone
     # to grep it on demand. Everything that gates on "is the mount aligned"
