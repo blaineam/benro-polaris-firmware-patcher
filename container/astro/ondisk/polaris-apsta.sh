@@ -88,6 +88,15 @@ sta_down
 }
 ifconfig "$IFACE" up 2>>"$LOG"
 
+# The station interface gets its own MAC -- the radio's base address with the
+# locally-administered bit set (48:.. -> 4a:..). It is DETERMINISTIC, so once a
+# router is told to accept it, it keeps working across reboots. Log it, because
+# a router that requires device approval will show this address as an unknown
+# client and silently withhold DHCP: association succeeds, the WPA handshake
+# completes, and then no offer ever arrives -- which looks like a driver fault
+# and is not one.
+say "station MAC is $(cat /sys/class/net/$IFACE/address 2>/dev/null) (allow this on your router if it filters by MAC)"
+
 say "associating..."
 "$WDIR/wpa_supplicant" -B -i "$IFACE" -c "$CONF" -P /tmp/apsta-wpa.pid \
     -f "$WDIR/wpa_supplicant.log" 2>>"$LOG" || {
@@ -103,6 +112,16 @@ if [ -n "$IP" ]; then
     say "AP still up on $(ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\([0-9.]*\).*/\1/p')"
     say "you can now reach this device at $IP from your home network"
 else
-    say "no address -- leaving the watchdog to revert"
+    say "ASSOCIATED BUT NO DHCP LEASE."
+    say "  The WPA handshake completed, so the password is right and the router"
+    say "  accepted the association. No address means the DHCP offer never came."
+    say "  Most likely, in order:"
+    say "    1. the router filters by MAC / requires device approval -- allow"
+    say "       $(cat /sys/class/net/$IFACE/address 2>/dev/null)"
+    say "    2. its DHCP pool is full"
+    say "    3. the home network uses 192.168.0.x, which COLLIDES with this"
+    say "       device's own access point at 192.168.0.1 -- check with:"
+    say "       ifconfig wlan0 | grep inet"
+    say "  Association detail is in $WDIR/wpa_supplicant.log"
     exit 6
 fi

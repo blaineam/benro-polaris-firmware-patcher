@@ -1474,7 +1474,24 @@ static const char PAGE[] =
 "<button class=alt style='margin-top:8px;padding:7px 12px;font-size:13px' onclick=mnow()>Read Mount</button>"
 "<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Read on demand only &mdash; polling the mount "
 "makes the Benro app re-prompt for compass calibration.</div></div>"
-"<div class=card><h2>Wi-Fi</h2><div id=kws style='margin-bottom:8px'></div>"
+"<div class=card><h2>Home network</h2><div id=nws style='margin-bottom:8px'></div>"
+"<input id=nssid placeholder='Wi-Fi name (SSID)' autocapitalize=off autocorrect=off "
+  "style='background:#0a0d13;color:var(--fg);border:1px solid #2c3444;border-radius:8px;"
+  "padding:10px;font-size:15px;width:100%;margin-bottom:6px'>"
+"<input id=npsk type=password placeholder='Password' autocomplete='new-password' "
+  "style='background:#0a0d13;color:var(--fg);border:1px solid #2c3444;border-radius:8px;"
+  "padding:10px;font-size:15px;width:100%;margin-bottom:6px'>"
+"<button style='padding:9px 14px;font-size:14px' onclick=wsave()>Save</button>"
+"<button class=alt style='padding:9px 14px;font-size:14px' onclick=wact('up')>Join</button>"
+"<button class=alt style='padding:9px 14px;font-size:14px' onclick=wact('down')>Disconnect</button>"
+"<div id=nerr style='color:var(--err);font-size:12.5px;margin-top:6px'></div>"
+"<pre id=nlog style='max-height:120px;margin-top:8px;display:none'></pre>"
+"<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Joins your home network on a "
+"<b>second</b> interface &mdash; the Polaris access point keeps running, so the Benro app still "
+"reaches it at 192.168.0.1. Only the hashed key is stored, never the password. WPA2 only: "
+"a WPA3-only network will not associate. If joining fails, a watchdog removes the interface "
+"and leaves the access point untouched.</div></div>"
+"<div class=card><h2>Wi-Fi sleep</h2><div id=kws style='margin-bottom:8px'></div>"
 "<button style='padding:9px 14px;font-size:14px' onclick=kw(1)>Keep Awake</button>"
 "<button class=alt style='padding:9px 14px;font-size:14px' onclick=kw('force')>Force Awake</button>"
 "<button class=alt style='padding:9px 14px;font-size:14px' onclick=kw(0)>Allow Sleep</button>"
@@ -1601,6 +1618,30 @@ static const char PAGE[] =
 "    if(d.ok===false)document.getElementById('gerr').textContent=d.error||'failed';\n"
 "    else gshow(d)})}\n"
 "gload();setInterval(gload,10000);\n"
+"function wshow(d){var t='';\n"
+"  t+='Access point: <b>'+(d.ap_ip||'down')+'</b>';\n"
+"  t+=' &middot; home network: <b>'+(d.sta_ip||'not joined')+'</b>';\n"
+"  if(d.configured)t+='<br>configured for <b>'+(d.ssid||'(unknown)')+'</b>';\n"
+"  else t+='<br>no network configured yet';\n"
+"  document.getElementById('nws').innerHTML=t}\n"
+"function wload(){fetch('/api/wifi').then(r=>r.json()).then(wshow)}\n"
+"function wsave(){var e=document.getElementById('nerr');e.textContent='';\n"
+"  var s=document.getElementById('nssid').value,p=document.getElementById('npsk').value;\n"
+"  if(!s||p.length<8){e.textContent='enter a network name and a password of at least 8 characters';return}\n"
+"  fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
+"    body:'action=save&ssid='+encodeURIComponent(s)+'&psk='+encodeURIComponent(p)})\n"
+"   .then(r=>r.json()).then(function(d){\n"
+"     document.getElementById('npsk').value='';\n"
+"     if(d.ok)e.style.color='var(--ok)',e.textContent='saved (only the hashed key is stored)';\n"
+"     else e.style.color='var(--err)',e.textContent=d.error||'failed';\n"
+"     wload()})}\n"
+"function wact(a){var e=document.getElementById('nerr');e.style.color='var(--dim)';\n"
+"  e.textContent=(a=='up'?'joining\u2026 (up to 45s)':'disconnecting\u2026');\n"
+"  fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
+"    body:'action='+a}).then(r=>r.json()).then(function(d){\n"
+"      var L=document.getElementById('nlog');L.style.display='block';L.textContent=d.log||'';\n"
+"      e.textContent='';wload()})}\n"
+"wload();\n"
 "kwload();\n"
 "fload();\n"
 "tick();var iv=setInterval(tick,4000);\n// poll fast only while a job is actually running\nfunction rate(busy){clearInterval(iv);iv=setInterval(tick,busy?1500:4000)}\n\n"
@@ -1797,6 +1838,126 @@ static void handle(int fd) {
      * counts our connection as an app connecting, which is what makes the Benro
      * app demand a compass calibration while the mount is unaligned. The helper
      * therefore waits for alignment before it connects. */
+    /* Home-network (station) configuration and control.
+     *
+     * HOW THE PASSWORD IS HANDLED, because this is the one place the page
+     * carries a real secret:
+     *   - accepted ONLY in the request BODY, never the query string, which is
+     *     the part that ends up in browser history and proxy logs;
+     *   - never written to any log and never echoed back -- GET returns the
+     *     SSID and whether a key is configured, never the key;
+     *   - never placed on a command line, because argv is world-readable
+     *     through /proc; it goes to wpa_passphrase on stdin via a 0600 file
+     *     that is unlinked immediately;
+     *   - only the PSK HASH is stored. wpa_passphrase helpfully repeats the
+     *     plaintext back as a "#psk=" comment; that line is stripped.
+     *
+     * What this does NOT do is make the transport secure: the page is plain
+     * HTTP. The link itself is WPA2-encrypted between your device and the
+     * Polaris AP, so it is not in the clear over the air, but anything already
+     * on that AP could read it. The ssh path (setup-wifi.sh) avoids that. */
+    if (!strcmp(path, "/api/wifi")) {
+        char out[1024];
+        const char *WD = "/app/sd/polaris-wifi";
+        char action[16] = "", ssid[128] = "", psk[128] = "";
+
+        if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
+            if (body) {
+                param_body(body, "action", action, sizeof action);
+                param_body(body, "ssid", ssid, sizeof ssid);
+                param_body(body, "psk", psk, sizeof psk);
+            }
+            if (!action[0]) param(qs, "action", action, sizeof action);
+
+            if (!strcmp(action, "save")) {
+                char cmd[768], tmp[64] = "/tmp/.wpa-psk";
+                FILE *f;
+                size_t i;
+                /* An SSID goes onto wpa_passphrase's command line, so refuse
+                 * anything that could break out of the quoting. */
+                for (i = 0; ssid[i]; i++) {
+                    if (ssid[i] == '\'' || ssid[i] == '"' || ssid[i] == '\\' ||
+                        ssid[i] == '`'  || ssid[i] == '$' || ssid[i] == '\n') {
+                        respond_json(fd, "{\"ok\":false,\"error\":\"that SSID contains a "
+                            "character this cannot safely quote (quote, backslash, backtick "
+                            "or $) -- use the ssh setup script instead\"}");
+                        memset(psk, 0, sizeof psk);
+                        return;
+                    }
+                }
+                if (!ssid[0] || strlen(psk) < 8) {
+                    respond_json(fd, "{\"ok\":false,\"error\":\"need an SSID and a password "
+                        "of at least 8 characters\"}");
+                    memset(psk, 0, sizeof psk);
+                    return;
+                }
+                f = fopen(tmp, "w");
+                if (!f) { respond_json(fd, "{\"ok\":false,\"error\":\"cannot stage the key\"}");
+                          memset(psk, 0, sizeof psk); return; }
+                chmod(tmp, 0600);
+                fputs(psk, f);
+                fclose(f);
+                memset(psk, 0, sizeof psk);          /* out of our memory too */
+
+                snprintf(cmd, sizeof cmd,
+                    "cd %s && { echo ctrl_interface=/var/run/wpa_supplicant; "
+                    "echo update_config=1; "
+                    "./wpa_passphrase '%s' < %s | grep -v '^[[:space:]]*#psk='; } "
+                    "> .wpa.tmp 2>/dev/null && mv .wpa.tmp wpa.conf && chmod 600 wpa.conf",
+                    WD, ssid, tmp);
+                { int rc = system(cmd);
+                  unlink(tmp);
+                  if (rc != 0) {
+                      respond_json(fd, "{\"ok\":false,\"error\":\"wpa_passphrase failed\"}");
+                      return;
+                  } }
+                respond_json(fd, "{\"ok\":true,\"saved\":true}");
+                return;
+            }
+            if (!strcmp(action, "up") || !strcmp(action, "down")) {
+                char cmd[256], res[2048], esc[4096];
+                snprintf(cmd, sizeof cmd, "timeout -t 75 %s/polaris-apsta.sh %s 2>&1",
+                         WD, action);
+                run_capture(cmd, res, sizeof res);
+                json_escape(res, esc, sizeof esc);
+                snprintf(out, sizeof out, "{\"ok\":true,\"action\":\"%s\",\"log\":\"%s\"}",
+                         action, esc);
+                respond_json(fd, out);
+                return;
+            }
+        }
+
+        /* status: SSID yes, key never */
+        {
+            char apip[64] = "", staip[64] = "", cssid[160] = "", res[256];
+            int haskey = 0;
+            if (run_capture("ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p'",
+                            res, sizeof res) == 0) {
+                snprintf(apip, sizeof apip, "%s", res);
+                { char *e = apip; while (*e) { if (*e=='\n'||*e=='\r') { *e=0; break; } e++; } }
+            }
+            if (run_capture("ifconfig wlan1 2>/dev/null | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p'",
+                            res, sizeof res) == 0) {
+                snprintf(staip, sizeof staip, "%s", res);
+                { char *e = staip; while (*e) { if (*e=='\n'||*e=='\r') { *e=0; break; } e++; } }
+            }
+            if (run_capture("sed -n 's/^[[:space:]]*ssid=\"\\(.*\\)\"/\\1/p' "
+                            "/app/sd/polaris-wifi/wpa.conf 2>/dev/null | head -1",
+                            res, sizeof res) == 0) {
+                snprintf(cssid, sizeof cssid, "%s", res);
+                { char *e = cssid; while (*e) { if (*e=='\n'||*e=='\r') { *e=0; break; } e++; } }
+            }
+            { FILE *c = fopen("/app/sd/polaris-wifi/wpa.conf", "r");
+              if (c) { haskey = 1; fclose(c); } }
+            snprintf(out, sizeof out,
+                "{\"ok\":true,\"ap_ip\":\"%s\",\"sta_ip\":\"%s\","
+                "\"ssid\":\"%s\",\"configured\":%s}",
+                apip, staip, cssid, haskey ? "true" : "false");
+            respond_json(fd, out);
+        }
+        return;
+    }
+
     if (!strcmp(path, "/api/keepwifi")) {
         char out[320]; int on = 0, running = 0, forced = 0;
         if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
