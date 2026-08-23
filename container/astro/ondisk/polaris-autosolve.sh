@@ -155,6 +155,32 @@ refresh_tz() {
 }
 
 # UTC as a string polaris-mount accepts, corrected for the device clock.
+# THE SKY MOVES WHILE WE SOLVE.
+#
+# A plate solve gives RA/Dec, which is fixed in the sky frame. Converting that
+# to the alt/az the mount was pointing at requires the time the SHUTTER OPENED,
+# not the time the conversion happens to run. Those differ by the whole solve
+# duration, and the sky turns 15.041 arcsec of hour angle every second:
+#
+#     3 s solve   ->   45"   = 0.013 deg
+#    25 s solve   ->  376"   = 0.10  deg
+#   240 s search  -> 3610"   = 1.0   deg
+#
+# Using "now" therefore biased every correction by the solve time -- small
+# enough to look like "close but not quite right", which is exactly how it was
+# reported. Everything derived from a solve now uses that frame's timestamp.
+utc_at() {
+    _e=$(( $1 + TZ_OFFSET_SEC ))
+    date -u -d "@$_e" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null \
+      || date -u -r "$_e" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null
+}
+
+# The frame's own mtime is when it landed, which is the closest thing we have to
+# the shutter time and is immune to how long the solve then took.
+frame_epoch() {
+    date -r "$1" +%s 2>/dev/null || date +%s
+}
+
 utc_now() {
     _e=$(( $(date +%s) + TZ_OFFSET_SEC ))
     date -u -d "@$_e" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null \
@@ -359,8 +385,18 @@ MAX_UNCERT_FRAC=${MAX_UNCERT_FRAC:-0.25}
 
 # echo the compass value to send, or nothing if the geometry is unsafe
 compass_for_solve() {
-    _sra=$1; _sdec=$2
-    [ -n "$STUB_UTC" ] || [ "${TZ_OFFSET_SEC:-0}" -eq 0 ] 2>/dev/null || UTCARG="--utc $(utc_now)"
+    _sra=$1; _sdec=$2; _fepoch=${3:-}
+    # Convert at the time the FRAME was taken, not now -- see utc_at().
+    if [ -n "$STUB_UTC" ]; then
+        :
+    elif [ -n "$_fepoch" ]; then
+        UTCARG="--utc $(utc_at "$_fepoch")"
+        _lag=$(( $(date +%s) - _fepoch ))
+        [ "$_lag" -gt 2 ] && \
+            log "  solving against the frame's own time (${_lag}s ago; the sky moved $(awk -v l=$_lag 'BEGIN{printf "%.0f", l*15.041}')\" since)"
+    elif [ "${TZ_OFFSET_SEC:-0}" -ne 0 ] 2>/dev/null; then
+        UTCARG="--utc $(utc_now)"
+    fi
     _j=$("$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" $UTCARG \
             radec2altaz --ra "$_sra" --dec "$_sdec" 2>/dev/null)
     _salt=$(echo "$_j" | sed -n 's/.*"alt_deg":\([-0-9.]*\).*/\1/p')
@@ -558,6 +594,7 @@ handle_arm() {
         _ra=$(echo  "$_sol" | sed -n "s/.*\"ra_deg\":\([-0-9.]*\).*/\1/p")
         _dec=$(echo "$_sol" | sed -n "s/.*\"dec_deg\":\([-0-9.]*\).*/\1/p")
         log "SOLVED ra=$_ra dec=$_dec"
+    LAST_SOLVED_RA="$_ra"; LAST_SOLVED_DEC="$_dec"
         apply_correction "$_ra" "$_dec" "$_yaw" "$_pitch"
         return $?
     fi
@@ -567,6 +604,7 @@ handle_arm() {
     # externally-initiated capture is refused by the device and wedges the
     # camera (see below).
     _lvf=$(grab_frame)
+    _fep=$(frame_epoch "$_lvf")          # before the solve, which takes seconds
     _sol=$(solve_frame "$_lvf" "$_hra" "$_hdec")
     if good_solve "$_sol"; then
         log "live-view solve OK"
@@ -603,8 +641,9 @@ handle_arm() {
     _ra=$(echo  "$_sol" | sed -n 's/.*"ra_deg":\([-0-9.]*\).*/\1/p')
     _dec=$(echo "$_sol" | sed -n 's/.*"dec_deg":\([-0-9.]*\).*/\1/p')
     log "SOLVED ra=$_ra dec=$_dec"
+    LAST_SOLVED_RA="$_ra"; LAST_SOLVED_DEC="$_dec"
 
-    apply_correction "$_ra" "$_dec" "$_yaw" "$_pitch"
+    apply_correction "$_ra" "$_dec" "$_yaw" "$_pitch" "$_fep"
     return $?
 }
 
@@ -657,8 +696,8 @@ sep_deg() {
 }
 
 apply_correction() {
-    _ra=$1; _dec=$2; _yaw=$3; _pitch=$4
-    _compass=$(compass_for_solve "$_ra" "$_dec") || return 1
+    _ra=$1; _dec=$2; _yaw=$3; _pitch=$4; _fep=${5:-}
+    _compass=$(compass_for_solve "$_ra" "$_dec" "$_fep") || return 1
     _az=$(wire_to_az "$_yaw")
     log "heading correction: compass=$_compass"
 
@@ -689,6 +728,7 @@ apply_correction() {
         sleep "$SLEW_SETTLE"
 
         _f=$(grab_frame) || { log "no frame to verify centring"; break; }
+        _vfep=$(frame_epoch "$_f")
         _v=$(solve_frame "$_f" "" "")
         good_solve "$_v" || { log "verification solve failed"; break; }
         _vra=$(echo  "$_v" | sed -n 's/.*"ra_deg":\([-0-9.]*\).*/\1/p')
@@ -709,7 +749,7 @@ apply_correction() {
             return 0
         fi
         # still off: refine the heading from this newer solve and try again
-        _compass=$(compass_for_solve "$_vra" "$_vdec") || break
+        _compass=$(compass_for_solve "$_vra" "$_vdec" "$_vfep") || break
         log "  refining heading to compass=$_compass"
         mount_send "1&527&3&compass:$_compass;lat:$LAT;lng:$LON;#"
     done
@@ -719,6 +759,11 @@ apply_correction() {
     return 1
 }
 
+# Publish the resolved offset. The device clock runs LOCAL time while reporting
+# it as UTC, so anything converting RA/Dec without this is wrong by the whole
+# offset -- seven hours is ~105 degrees of hour angle. solve-now.sh had no clock
+# handling at all and would have applied exactly that error.
+printf '%s\n' "$TZ_OFFSET_SEC" > /tmp/polaris-tzoffset 2>/dev/null
 log "clock: device is $(date "+%H:%M:%S"), TZ_OFFSET_SEC=$TZ_OFFSET_SEC -> UTC $(utc_now)"
 [ "$TZ_AUTO" = "1" ] && [ "$TZ_OFFSET_SEC" = "0" ] && \
     log "  (no 782 seen yet -- will re-read the app's timezone when it connects)"
@@ -727,10 +772,35 @@ log "autosolve watching (dry_run=$DRY_RUN focal=${FOCAL}mm gates: logodds>=$MIN_
 LAST_YAW=""; LAST_PITCH=""
 LAST_ARM_T=0; LAST_ARM_YAW=""; LAST_ARM_PITCH=""
 "$ASTRO/polaris-logwatch" --match "code:519" --match "code:530" --match "code:782" \
+  --match "code:531" \
   | while read -r line; do
     case "$line" in
       *"code:782"*)
         note_tz_from_line "$line"
+        ;;
+      *"code:531"*)
+        # TRACKING STARTED -> start guiding, if it is wanted.
+        #
+        # Guiding is the natural companion to tracking: tracking drives the
+        # axes at the sidereal rate open-loop, and guiding measures what that
+        # leaves behind and corrects it. Starting it by hand after every goto
+        # is exactly the sort of step that gets forgotten, so tie it to the
+        # event that means "we are now trying to hold a target".
+        #
+        # GUIDE_ON_TRACK=0 to keep it manual. It still needs a solved position
+        # to anchor on, which is why it is start_guiding() that decides.
+        case "$line" in
+          *"state:1"*|*"track:1"*)
+            if [ "${GUIDE_ON_TRACK:-1}" = "1" ] && [ "${GUIDE:-0}" = "1" ]; then
+                if [ -n "${LAST_SOLVED_RA:-}" ]; then
+                    log "tracking started (531) -- starting the guider on the last solve"
+                    start_guiding "$LAST_SOLVED_RA" "$LAST_SOLVED_DEC"
+                else
+                    log "tracking started (531) but nothing has been solved yet -- not guiding"
+                fi
+            fi
+            ;;
+        esac
         ;;
       *"code:519"*)
         LAST_YAW=$(echo   "$line" | sed -n 's/.*yaw:\([-0-9.]*\).*/\1/p')

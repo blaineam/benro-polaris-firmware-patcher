@@ -388,6 +388,9 @@ static int start_solve(int apply, int mode) {
         if (fd >= 0) { dup2(fd, 0); if (fd != 0) close(fd); }
         fd = open(JOB_LOG, O_WRONLY|O_CREAT|O_TRUNC, 0644);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
+        /* mode 3 (capture) passes NO flag: solve-now.sh's default path fires a
+         * single shot with opcode 264 and waits for the frame. It never uses
+         * the 272 lapse sequence, which wedges the camera in astro mode. */
         const char *mflag = (mode == 1) ? "--latest" : (mode == 2 ? "--wait" : "");
         /* --focal auto: let polaris-align.sh resolve it (manual override file,
          * then EXIF, then the cached focal, then a range search). Forcing
@@ -1397,14 +1400,33 @@ static void lx200_session(int fd) {
 /* --------------------------------------------------------------- web page */
 static const char PAGE[] =
 "<!doctype html><html><head><meta charset=utf-8>"
-"<meta name=viewport content='width=device-width,initial-scale=1'>"
-"<title>Polaris Plate Solver</title><style>"
+"<meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'>"
+"<title>Polaris Plate Solver</title>"
+"<link rel=icon href='/icon.svg' type='image/svg+xml'>"
+"<link rel='apple-touch-icon' href='/icon.svg'>"
+"<meta name='apple-mobile-web-app-capable' content='yes'>"
+"<meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'>"
+"<meta name='apple-mobile-web-app-title' content='Polaris'>"
+"<meta name='theme-color' content='#0b0e14'>"
+"<style>"
 ":root{--bg:#0b0e14;--fg:#e6e6e6;--dim:#8b93a7;--acc:#5aa9e6;--ok:#4caf50;--err:#e05252;--card:#151a23}"
 "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);"
-"font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:16px}"
-"h1{font-size:19px;margin:0 0 14px}h2{font-size:13px;text-transform:uppercase;"
+"font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
+"padding:16px;padding:max(16px,env(safe-area-inset-top)) 16px 24px}"
+"h1{font-size:19px;margin:0 0 14px;display:flex;align-items:center;gap:10px}"
+"h1 img{width:26px;height:26px;border-radius:6px}"
+"h2{font-size:13px;text-transform:uppercase;"
 "letter-spacing:.08em;color:var(--dim);margin:0 0 8px}"
-".card{background:var(--card);border-radius:10px;padding:14px;margin-bottom:12px}"
+".card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px;"
+"border:1px solid #1e2532}"
+/* WIDE SCREENS: a single 640px column wastes a desktop. Masonry-ish columns
+ * keep the cards readable without stretching tables and charts to absurd
+ * widths, and it degrades to one column on a phone with no media-query
+ * gymnastics. */
+"@media(min-width:900px){body{max-width:1400px;margin:0 auto}"
+".wrap{column-count:2;column-gap:14px}"
+".card{break-inside:avoid;-webkit-column-break-inside:avoid;display:inline-block;width:100%}}"
+"@media(min-width:1500px){.wrap{column-count:3}}"
 ".row{display:flex;justify-content:space-between;gap:12px;padding:3px 0}"
 ".row span:last-child{font-variant-numeric:tabular-nums;text-align:right}"
 "button{background:var(--acc);color:#04121f;border:0;border-radius:8px;padding:11px 16px;"
@@ -1416,15 +1438,23 @@ static const char PAGE[] =
 ".s.running{background:#3a3410;color:#e8c547}.s.done{background:#12331a;color:var(--ok)}"
 ".s.failed{background:#3a1414;color:var(--err)}.s.idle{background:#232a36;color:var(--dim)}"
 "</style></head><body>"
-"<h1>Benro Polaris &mdash; Plate Solver</h1>"
+"<h1><img src='/icon.svg' alt=''>Benro Polaris &mdash; Plate Solver</h1>"
+"<div class=wrap>"
 "<div class=card><h2>Solve</h2>"
-"<button id=b1 onclick=go(0,'latest')>Solve Latest Frame</button>"
-"<button id=b2 onclick=go(0,'wait')>Wait for Next Shot</button>"
+"<button id=b0 onclick=go(1,'capture')>Capture, Solve &amp; Apply</button>"
+"<button id=b1 class=alt onclick=go(0,'latest')>Solve Latest Frame</button>"
+"<button id=b2 class=alt onclick=go(0,'wait')>Wait for Next Shot</button>"
 "<button id=b3 class=alt onclick=go(1,'latest')>Solve Latest &amp; Apply</button>"
+"<button id=b5 class=alt onclick=applylast()>Apply Last Solution</button>"
 "<button id=b4 class=alt onclick=cancel()>Cancel</button>"
 "<div id=msg style='color:var(--dim);font-size:12.5px;margin-top:8px'></div>"
-"<div style='color:var(--dim);font-size:12.5px;margin-top:8px'>In astro mode the app "
-"owns the shutter &mdash; trigger the shot in the Benro app, then solve it here.</div>"
+"<div style='color:var(--dim);font-size:12.5px;margin-top:8px'>"
+"<b>Capture, Solve &amp; Apply</b> fires one frame (opcode 264), solves it and pushes the "
+"correction &mdash; the whole loop in one press. It works once compass alignment is done, but "
+"<b>not while astro mode owns the shutter</b>: there the device ignores an external capture, so "
+"take the shot in the Benro app and use <b>Solve Latest</b>. <b>Apply Last Solution</b> pushes "
+"the solve already on screen without redoing it &mdash; it applies at that frame\u2019s time and "
+"refuses if the frame is stale, since the mount has probably moved since.</div>"
 "<div class=row style='margin-top:10px'><span>status</span>"
 "<span><span id=st class='s idle'>idle</span></span></div></div>"
 "<div class=card><h2>Last solution</h2><div id=sol></div></div>"
@@ -1465,6 +1495,7 @@ static const char PAGE[] =
 "on, and an aligned mount &mdash; it will refuse without both. Corrections are small slews, not "
 "rate adjustments: the mount exposes no axis-rate primitive.</div></div>"
 "<div class=card><h2>Log</h2><pre id=log>&hellip;</pre></div>"
+"</div>"
 "<script>\n"
 "function f(n,d){return (n===undefined||n===null||isNaN(n))?'--':Number(n).toFixed(d)}\n"
 "function hms(deg){if(deg==null||isNaN(deg))return '--';var h=deg/15,H=Math.floor(h),"
@@ -1473,13 +1504,18 @@ static const char PAGE[] =
 "var D=Math.floor(deg),m=(deg-D)*60,M=Math.floor(m),S=(m-M)*60;"
 "return s+D+'\\u00b0 '+M+'\\u2032 '+S.toFixed(1)+'\\u2033'}\n"
 "function row(k,v){return '<div class=row><span>'+k+'</span><span>'+v+'</span></div>'}\n"
-"function go(a,m){['b1','b2','b3'].forEach(i=>document.getElementById(i).disabled=true);\n"
+"var BTNS=['b0','b1','b2','b3','b5'];\n"
+"function go(a,m){BTNS.forEach(i=>document.getElementById(i).disabled=true);\n"
 "  fetch('/api/solve?mode='+m+(a?'&apply=1':''),{method:'POST'})\n"
 "   .then(r=>r.json()).then(d=>{\n"
 "     if(d.started===false)document.getElementById('msg').textContent=\n"
 "       (d.reason||'did not start')+' ('+(d.elapsed_sec||0)+'s so far) \u2014 press Cancel to stop it';\n"
 "     else document.getElementById('msg').textContent='';\n"
 "     tick()})}\n"
+"function applylast(){var m=document.getElementById('msg');m.textContent='applying\u2026';\n"
+"  fetch('/api/apply',{method:'POST'}).then(r=>r.json()).then(function(d){\n"
+"    m.textContent=d.ok?('applied the last solution ('+(d.age_sec||0)+'s old)'):(d.error||'failed');\n"
+"    tick()})}\n"
 "function cancel(){fetch('/api/cancel',{method:'POST'}).then(r=>r.json()).then(d=>{\n"
 "  document.getElementById('msg').textContent=d.cancelled?'cancelled':(d.reason||'nothing to cancel');\n"
 "  tick()})}\n"
@@ -1490,7 +1526,7 @@ static const char PAGE[] =
 "  if(s.status==='running'&&s.elapsed_sec>20)document.getElementById('msg').textContent=\n"
 "    'searching a range of focal lengths \u2014 this takes up to ~4 min; set a focal length below to make it fast';\n"
 "  var busy=s.status==='running';rate(busy);\n"
-"  ['b1','b2','b3'].forEach(i=>document.getElementById(i).disabled=busy);\n"
+"  BTNS.forEach(i=>document.getElementById(i).disabled=busy);\n"
 "  document.getElementById('b4').disabled=!busy;\n"
 "  var o=s.solution;\n"
 "  document.getElementById('sol').innerHTML = (o&&o.solved)\n"
@@ -1617,6 +1653,33 @@ static void handle(int fd) {
     snprintf(path, sizeof path, "%s", target);
     qs = strchr(path, '?');
     if (qs) { *qs = 0; qs++; } else qs = (char *)"";
+
+    /* Home-screen icon. Served inline so the page stays self-contained -- there
+     * is no filesystem to drop a .png into and no CDN to reach. iOS uses
+     * apple-touch-icon; everything else takes the SVG favicon. */
+    if (!strcmp(path, "/icon.svg")) {
+        static const char ICON[] =
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'>"
+            "<defs><radialGradient id='s' cx='50%' cy='40%'>"
+            "<stop offset='0%' stop-color='#1b2436'/><stop offset='100%' stop-color='#0b0e14'/>"
+            "</radialGradient></defs>"
+            "<rect width='180' height='180' rx='38' fill='url(#s)'/>"
+            "<circle cx='52' cy='48' r='2.6' fill='#e6e6e6'/>"
+            "<circle cx='128' cy='40' r='2' fill='#cfd6e4'/>"
+            "<circle cx='142' cy='96' r='2.4' fill='#e6e6e6'/>"
+            "<circle cx='38' cy='118' r='1.8' fill='#cfd6e4'/>"
+            "<circle cx='96' cy='138' r='2.2' fill='#e6e6e6'/>"
+            "<circle cx='74' cy='86' r='3.4' fill='#fff'/>"
+            "<path d='M52 48 L74 86 L142 96 L96 138 Z' fill='none' stroke='#5aa9e6' "
+            "stroke-width='2.4' stroke-linejoin='round' opacity='.9'/>"
+            "<circle cx='90' cy='90' r='58' fill='none' stroke='#5aa9e6' stroke-width='3' "
+            "opacity='.35'/>"
+            "<path d='M90 26 v12 M90 142 v12 M26 90 h12 M142 90 h12' stroke='#5aa9e6' "
+            "stroke-width='3' stroke-linecap='round' opacity='.55'/>"
+            "</svg>";
+        respond(fd, 200, "image/svg+xml", ICON, sizeof ICON - 1);
+        return;
+    }
 
     if (!strcmp(path, "/") || !strcmp(path, "/index.html")) {
         respond(fd, 200, "text/html; charset=utf-8", PAGE, sizeof PAGE - 1);
@@ -1928,6 +1991,66 @@ static void handle(int fd) {
         return;
     }
 
+    /* Apply the LAST solution, without re-solving.
+     *
+     * Solving and applying were welded together, so a solve you liked could
+     * only be used by solving again -- and the second solve might fail or land
+     * differently. The result is already on disk; this pushes it.
+     *
+     * It applies at the FRAME'S time, not now: RA/Dec is fixed in the sky
+     * frame, and the sky turns 15.041"/s. It also refuses a stale solution --
+     * if the frame is minutes old the mount has probably moved and the
+     * solution no longer describes where it points. */
+    if (!strcmp(path, "/api/apply")) {
+        double ra, dec;
+        char eb[32], out[512];
+        long fep = 0, age = 0, maxage = 600;
+        if (!last_solution(&ra, &dec)) {
+            respond_json(fd, "{\"ok\":false,\"error\":\"no solution to apply\"}");
+            return;
+        }
+        read_file("/tmp/polaris-job.frame-epoch", eb, sizeof eb);
+        fep = atol(eb);
+        if (fep > 0) age = (long)time(NULL) - fep;
+        { char f[8]; if (param(qs, "force", f, sizeof f) && f[0] == '1') maxage = 86400; }
+        if (fep > 0 && age > maxage) {
+            snprintf(out, sizeof out,
+                "{\"ok\":false,\"error\":\"that solution is %ld s old -- the mount has "
+                "probably moved since, so it no longer describes where it points. "
+                "Solve a fresh frame.\",\"age_sec\":%ld}", age, age);
+            respond_json(fd, out);
+            return;
+        }
+        if (!may_read_mount()) {
+            respond_json(fd, "{\"ok\":false,\"error\":\"mount is not aligned\"}");
+            return;
+        }
+        {
+            char cmd[640], res[1024], ub[64] = "";
+            if (fep > 0) {
+                time_t t = (time_t)(fep + tz_offset_sec());
+                struct tm *g = gmtime(&t);
+                if (g) { char ts[32]; strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", g);
+                         snprintf(ub, sizeof ub, "--utc %s", ts); }
+            }
+            snprintf(cmd, sizeof cmd,
+                "%s/polaris-mount --lat %.6f --lon %.6f %s align "
+                "--solved-ra %.6f --solved-dec %.6f 2>&1",
+                g_astro, g_lat, g_lon, ub, ra, dec);
+            if (run_capture(cmd, res, sizeof res) == 0) {
+                char esc[2048];
+                json_escape(res, esc, sizeof esc);
+                snprintf(out, sizeof out,
+                    "{\"ok\":true,\"age_sec\":%ld,\"result\":\"%s\"}", age, esc);
+            } else {
+                snprintf(out, sizeof out,
+                    "{\"ok\":false,\"error\":\"align failed\",\"age_sec\":%ld}", age);
+            }
+            respond_json(fd, out);
+        }
+        return;
+    }
+
     if (!strcmp(path, "/api/solve")) {
         char a[16], m[16];
         int apply = param(qs, "apply", a, sizeof a) && a[0] == '1';
@@ -1935,6 +2058,7 @@ static void handle(int fd) {
         if (param(qs, "mode", m, sizeof m)) {
             if (!strcmp(m, "latest")) mode = 1;
             else if (!strcmp(m, "wait")) mode = 2;
+            else if (!strcmp(m, "capture")) mode = 3;   /* fire the shutter ourselves */
         }
         if (start_solve(apply, mode) == 0) {
             /* Do not lie by omission. This used to answer started:true whether

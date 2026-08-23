@@ -68,7 +68,13 @@ MAX_UNCERT_FRAC=0.25     # refuse if uncertainty exceeds this fraction of the co
 ARM_COOLDOWN=120
 
 # ---- auto-guiding ----------------------------------------------------------
+# Auto-guiding. GUIDE=1 lets it run at all; GUIDE_ON_TRACK starts it
+# automatically when the mount begins tracking (opcode 531), which is the point
+# at which you are trying to hold a target and therefore want drift corrected.
+# Each run writes its own CSV to polaris-astro/guide-sessions/ so a capture can
+# be audited afterwards.
 GUIDE=0
+GUIDE_ON_TRACK=1
 GUIDE_DRY_RUN=1
 GUIDE_INTERVAL=30        # seconds between drift checks
 GUIDE_THRESH=60          # correct once drift exceeds this many arcsec

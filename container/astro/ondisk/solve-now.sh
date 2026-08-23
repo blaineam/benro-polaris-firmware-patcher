@@ -88,6 +88,9 @@ fi
 
 echo "[solve-now] solving (hint comes from the mount)..." >&2
 [ "$FOCAL" = "auto" ] && FOCAL=""
+date -r "$FRAME" +%s > /tmp/polaris-job.frame-epoch 2>/dev/null || \
+    date +%s > /tmp/polaris-job.frame-epoch
+printf '%s\n' "$FRAME" > /tmp/polaris-job.frame 2>/dev/null
 SOL=$(FOCAL_MM="$FOCAL" sh "$ASTRO/polaris-align.sh" "$FRAME" "$FOCAL") || {
     echo "[solve-now] solver failed" >&2; exit 1; }
 echo "$SOL"
@@ -99,8 +102,48 @@ DEC=$(echo "$SOL" | sed -n 's/.*"dec_deg":\([-0-9.]*\).*/\1/p')
 echo "[solve-now] SOLVED  RA=$RA  Dec=$DEC" >&2
 
 if [ "$APPLY" = "1" ]; then
-    echo "[solve-now] applying to mount (530)..." >&2
-    "$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" align \
+    # ------------------------------------------------------------------
+    # THE CLOCK, AND THE FRAME'S TIME. Both were missing here.
+    #
+    # 1. The device runs LOCAL time and reports it as UTC. Applying without
+    #    correcting for that is wrong by the whole offset -- seven hours is
+    #    about 105 DEGREES of hour angle. This script previously called
+    #    `align` with neither --utc nor --clock-offset, so every apply from
+    #    the web page would have pushed that error into the mount.
+    # 2. RA/Dec is fixed in the sky frame, so converting it needs the time the
+    #    SHUTTER OPENED, not the time the apply runs. The sky turns 15.041"
+    #    per second; a 25 s solve is 376" of error on its own.
+    #
+    # If the offset is not known we REFUSE rather than apply a wrong heading.
+    # ------------------------------------------------------------------
+    TZOFF=""
+    [ -r /tmp/polaris-tzoffset ] && \
+        TZOFF=$(sed -n 's/^\(-\{0,1\}[0-9][0-9]*\)$/\1/p' /tmp/polaris-tzoffset | head -1)
+    if [ -z "$TZOFF" ] && [ -r /app/sd/polaris-astro/site.conf ]; then
+        TZOFF=$(sed -n 's/^TZ_OFFSET_SEC=\(-\{0,1\}[0-9][0-9]*\).*/\1/p' \
+                /app/sd/polaris-astro/site.conf | head -1)
+    fi
+    if [ -z "$TZOFF" ]; then
+        echo "[solve-now] REFUSING to apply: the clock offset is unknown." >&2
+        echo "[solve-now]   The device reports local time as UTC; applying without" >&2
+        echo "[solve-now]   correcting that would be wrong by hours of hour angle." >&2
+        echo "[solve-now]   Start the autosolve daemon (it resolves the offset from" >&2
+        echo "[solve-now]   the app's 782 message) or set TZ_OFFSET_SEC in site.conf." >&2
+        exit 4
+    fi
+
+    FEPOCH=$(date -r "$FRAME" +%s 2>/dev/null || date +%s)
+    AGE=$(( $(date +%s) - FEPOCH ))
+    FUTC=$(date -u -d "@$(( FEPOCH + TZOFF ))" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null \
+           || date -u -r "$(( FEPOCH + TZOFF ))" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+    echo "[solve-now] applying to mount (530) at the frame's time $FUTC (${AGE}s ago)..." >&2
+    if [ "$AGE" -gt "${APPLY_MAX_AGE:-600}" ]; then
+        echo "[solve-now] REFUSING: that frame is ${AGE}s old. The mount has probably" >&2
+        echo "[solve-now]   moved since, so this solution no longer describes where it" >&2
+        echo "[solve-now]   points. Take a fresh frame. (APPLY_MAX_AGE overrides.)" >&2
+        exit 5
+    fi
+    "$ASTRO/polaris-mount" --lat "$LAT" --lon "$LON" --utc "$FUTC" align \
         --solved-ra "$RA" --solved-dec "$DEC"
 else
     echo "[solve-now] dry run -- pass --apply to push this to the mount" >&2

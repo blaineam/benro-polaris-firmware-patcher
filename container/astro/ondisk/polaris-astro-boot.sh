@@ -53,6 +53,18 @@ SITE=/app/sd/polaris-astro/site.conf
         echo "no $SITE after ${i} tries -- microSD not mounted?"
     fi
 
+    # TRACK WATCHER -- always. Keeps /tmp/polaris-track current by following the
+    # device log continuously, because the log is truncated too fast for anyone
+    # to grep it on demand. Everything that gates on "is the mount aligned"
+    # reads that file. No connections, no cost.
+    if [ -x /app/sd/polaris-astro/polaris-trackwatch.sh ]; then
+        mkdir -p "$ASTRO"
+        cp /app/sd/polaris-astro/polaris-trackwatch.sh "$ASTRO"/ 2>/dev/null
+        chmod 755 "$ASTRO/polaris-trackwatch.sh" 2>/dev/null
+        echo "starting trackwatch"
+        setsid "$ASTRO/polaris-trackwatch.sh" </dev/null >/dev/null 2>&1 &
+    fi
+
     # WIFI WATCHDOG -- always, and first.
     #
     # The AP disappears when the phone disconnects and only a power cycle
@@ -208,6 +220,7 @@ SITE=/app/sd/polaris-astro/site.conf
         DRY_RUN="${AUTOSOLVE_DRY_RUN:-1}" \
         STUB_FRAME="${STUB_FRAME:-}" STUB_UTC="${STUB_UTC:-}" \
         GUIDE="${GUIDE:-0}" GUIDE_DRY_RUN="${GUIDE_DRY_RUN:-1}" \
+        GUIDE_ON_TRACK="${GUIDE_ON_TRACK:-1}" \
         GUIDE_INTERVAL="${GUIDE_INTERVAL:-30}" GUIDE_THRESH="${GUIDE_THRESH:-60}" \
         CENTRE_TOL_DEG="${CENTRE_TOL_DEG:-0.15}" MAX_ALIGN_ALT="${MAX_ALIGN_ALT:-65}" \
         MIN_LOGODDS="${MIN_LOGODDS:-100}" MIN_MATCHES="${MIN_MATCHES:-12}" \

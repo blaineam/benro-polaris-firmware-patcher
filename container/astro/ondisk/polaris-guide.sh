@@ -151,6 +151,21 @@ correct() {
 }
 
 log "clock: TZ_OFFSET_SEC=$TZ_OFFSET_SEC -> UTC $(utc_now)"
+# PER-SESSION AUDIT TRAIL. The rolling log is fine for watching, but useless
+# afterwards for answering "was the mount actually tracking well during THAT
+# capture?" -- it has since been overwritten by later sessions. Each guiding run
+# therefore gets its own CSV, timestamped, alongside the frames on the microSD.
+AUDIT_DIR=${AUDIT_DIR:-/app/sd/polaris-astro/guide-sessions}
+mkdir -p "$AUDIT_DIR" 2>/dev/null
+AUDIT="$AUDIT_DIR/guide-$(date '+%Y%m%d-%H%M%S').csv"
+{
+    echo "# polaris guiding session"
+    echo "# started=$(date '+%Y-%m-%d %H:%M:%S') ra=$RA dec=$DEC"
+    echo "# interval=${INTERVAL}s threshold=${THRESH_ARCSEC}arcsec dry_run=$DRY_RUN"
+    echo "time,drift_arcsec,dx_px,dy_px,corrected"
+} > "$AUDIT" 2>/dev/null
+log "audit trail: $AUDIT"
+
 log "guiding target ra=$RA dec=$DEC (dry_run=$DRY_RUN interval=${INTERVAL}s threshold=${THRESH_ARCSEC}\")"
 anchor || { log "could not anchor -- nothing to guide against"; exit 1; }
 
@@ -171,8 +186,10 @@ while :; do
     OVER=$(awk -v d="$DRIFT" -v t="$THRESH_ARCSEC" 'BEGIN{print (d>t)?1:0}')
     if [ "$OVER" = "1" ]; then
         log "drift ${DRIFT}\" (dx=$DX dy=$DY px) exceeds ${THRESH_ARCSEC}\""
+        printf '%s,%s,%s,%s,1\n' "$(date '+%H:%M:%S')" "$DRIFT" "$DX" "$DY" >> "$AUDIT" 2>/dev/null
         correct "$DRIFT"
     else
         log "drift ${DRIFT}\" (dx=$DX dy=$DY px) -- within tolerance"
+        printf '%s,%s,%s,%s,0\n' "$(date '+%H:%M:%S')" "$DRIFT" "$DX" "$DY" >> "$AUDIT" 2>/dev/null
     fi
 done
