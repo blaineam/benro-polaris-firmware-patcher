@@ -288,7 +288,9 @@ if [ "$MODE" = "ptp2only" ]; then
   python3 /opt/patcher/analyze_pgphoto.py "$PG" --apply "$W/pgphoto.patched" >/dev/null
   DIFFB="$( { cmp -l "$PG" "$W/pgphoto.patched" || true; } | wc -l | tr -d ' ')"
   # 14 = 3 (gates) + 7 (resetUsb: mov r0,#0 + bx lr) + 4 (list-files bl → nop)
-  [ "$DIFFB" = "14" ] || die "pgphoto patch changed $DIFFB bytes (expected 14) — aborting"
+  # KEEP_RESET_USB=1 skips the 7 resetUsb bytes, so the expected count drops.
+  if [ "${KEEP_RESET_USB:-0}" = "1" ]; then EXPECT_DIFF=7; else EXPECT_DIFF=14; fi
+  [ "$DIFFB" = "$EXPECT_DIFF" ] || die "pgphoto patch changed $DIFFB bytes (expected $EXPECT_DIFF) — aborting"
   log "  pgphoto patched: 14 bytes (gates + resetUsb + list-files skip) ✓"
 
   O_UID="$(stat -c %u "$STOCK_PTP2")"; O_GID="$(stat -c %g "$STOCK_PTP2")"; O_MODE="$(stat -c %a "$STOCK_PTP2")"
@@ -311,7 +313,8 @@ else
   log "full-libgphoto2: building reliability-patched base…"
   python3 /opt/patcher/analyze_pgphoto.py "$PG" --apply "$W/pgphoto.base" >/dev/null
   DIFFB="$( { cmp -l "$PG" "$W/pgphoto.base" || true; } | wc -l | tr -d ' ')"
-  [ "$DIFFB" = "14" ] || die "reliability base changed $DIFFB bytes (expected 14) — aborting"
+  if [ "${KEEP_RESET_USB:-0}" = "1" ]; then EXPECT_DIFF=7; else EXPECT_DIFF=14; fi
+  [ "$DIFFB" = "$EXPECT_DIFF" ] || die "reliability base changed $DIFFB bytes (expected $EXPECT_DIFF) — aborting"
   log "  base: 14-byte reliability patch (resetUsb + list-files + 3 gates) md5=$(md5sum "$W/pgphoto.base"|cut -d' ' -f1)"
 
   log "full-libgphoto2: on-disk trampolining 64 boundary entries…"

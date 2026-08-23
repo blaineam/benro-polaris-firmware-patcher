@@ -181,8 +181,20 @@ def main():
             sys.exit(2)
         for va, off in good:                       # 3 dispatch gates
             struct.pack_into("<I", data, off, MOV_R3_0)
-        struct.pack_into("<I", data, reset_off,   MOV_R0_0)   # resetUsb: return 0
-        struct.pack_into("<I", data, reset_off+4, BX_LR)
+        # resetUsb: return 0 without performing USBDEVFS_RESET.
+        #
+        # KEEP_RESET_USB=1 leaves the ORIGINAL prologue, i.e. the device still
+        # resets the USB bus on connect. This patch exists to stop a
+        # re-enumeration storm that made a cold connect take ~3 minutes -- but
+        # skipping the reset is also the remaining suspect in the separate
+        # cold-start fault, where gp_camera_init times out on PTP for minutes
+        # after a replug. The switch exists so the two can be separated by
+        # experiment rather than argument.
+        if os.environ.get("KEEP_RESET_USB") == "1":
+            sys.stderr.write("[analyze_pgphoto] KEEP_RESET_USB=1: USB reset left in place\n")
+        else:
+            struct.pack_into("<I", data, reset_off,   MOV_R0_0)   # resetUsb: return 0
+            struct.pack_into("<I", data, reset_off+4, BX_LR)
         struct.pack_into("<I", data, lf[0][1],    NOP)        # skip ARG_LIST_FILES
         with open(apply_to, "wb") as g:
             g.write(data)

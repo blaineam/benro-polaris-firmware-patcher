@@ -26,6 +26,13 @@ stays on the camera card; only the JPEG crosses the wire.
 See [docs/TESTED.md](docs/TESTED.md).
 
 
+### Diagnostic build options
+
+`--keep-usb-reset` leaves `resetUsb` unpatched, so the device still performs
+`USBDEVFS_RESET` on connect. The default patch suppresses it to stop a
+re-enumeration storm; this switch exists to test whether that suppression is
+implicated in other faults. See [docs/CAPTURE-PATH.md](docs/CAPTURE-PATH.md).
+
 ### Building against your own libgphoto2
 
 The fixes this project carries are patches applied to upstream source (see

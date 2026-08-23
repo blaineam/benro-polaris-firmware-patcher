@@ -32,13 +32,26 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 FWPKT=""; VER="2.5.34"; OUT="$HERE/out"; SELFTEST=0; FIXTYPO=1; SWAPUSB1=1; IMG="polaris-patcher"; MODE="full"
 SSHKEY=""
 
-LGREPO=""
-LGREF=""
+# These default FROM THE ENVIRONMENT so both forms work:
+#   LIBGPHOTO2_REF=my-branch ./patch-polaris.sh ...
+#   ./patch-polaris.sh --libgphoto2-ref my-branch ...
+# Without the ${VAR:-} the -e flags below would pass an empty string and
+# silently override an env var the user had exported.
+LGREPO="${LIBGPHOTO2_REPO:-}"
+LGREF="${LIBGPHOTO2_REF:-}"
+KEEPRESET="${KEEP_RESET_USB:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --fwpkt) FWPKT="$2"; shift 2;;
     --libgphoto2) VER="$2"; shift 2;;
+    --libgphoto2-repo)
+      [ -n "${2:-}" ] || { echo "error: --libgphoto2-repo needs a value" >&2; exit 1; }
+      LGREPO="$2"; shift 2;;
+    --libgphoto2-ref)
+      [ -n "${2:-}" ] || { echo "error: --libgphoto2-ref needs a value" >&2; exit 1; }
+      LGREF="$2"; shift 2;;
+    --keep-usb-reset) KEEPRESET=1; shift;;
     --out) OUT="$2"; shift 2;;
     --ptp2-only) MODE="ptp2only"; shift;;
     --selftest) SELFTEST=1; shift;;
@@ -100,6 +113,7 @@ docker run --rm \
   -e MODE="$MODE" \
   -e LIBGPHOTO2_VERSION="$VER" -e FIX_R5M2_TYPO="$FIXTYPO" -e SELFTEST="$SELFTEST" \
   -e LIBGPHOTO2_REPO="$LGREPO" -e LIBGPHOTO2_REF="$LGREF" \
+  -e KEEP_RESET_USB="$KEEPRESET" \
   -e SWAP_USB1="$SWAPUSB1" \
   -e SSH_PUBKEY="$SSHKEY" \
   -v "$IN":/in:ro -v "$OUT":/out \

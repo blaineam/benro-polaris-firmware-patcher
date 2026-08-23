@@ -492,14 +492,47 @@ where init got far enough to try, so they are a symptom, not the cause.
   eight retries over two full seconds, still busy. The wait is minutes, and the
   retry cannot be lengthened much: `polestar_app` watchdogs pgphoto at ~5 s.
 
-### The remaining suspect
+### resetUsb — TESTED, AND NOT THE CAUSE
 
-`resetUsb` is patched to return immediately (`mov r0,#0; bx lr`), deliberately
-skipping `USBDEVFS_RESET`, to stop a re-enumeration storm that caused a
-~3-minute stall on cold connect. Skipping the reset is exactly the kind of thing
-that could leave a cold-started body unready to answer PTP. Testing it means
-restoring the reset and checking whether cold start improves *and* whether the
-old storm comes back. **Not yet tried.**
+`resetUsb` is patched to return immediately (`mov r0,#0; bx lr`), skipping
+`USBDEVFS_RESET`, to stop a re-enumeration storm that caused a ~3-minute stall
+on cold connect. That made it the obvious suspect: a body that never gets a bus
+reset might well not be ready to answer PTP.
+
+It was tested. `--keep-usb-reset` (or `KEEP_RESET_USB=1`) builds pgphoto with the
+original prologue intact, and the reset is verifiably happening again —
+`usb 1-1.2: reset high-speed USB device number 8 using xhci-hcd` appears in
+dmesg. **Cold start behaved exactly the same.** Shots failed until they didn't,
+same as before.
+
+Two things were learned even so:
+
+* **`resetUsb` is not the cause of the cold-start fault.** Cross it off.
+* **The 3-minute enumeration storm did not come back** in this test. That does
+  not mean the original patch was unnecessary — it was added against observed
+  behaviour on a card full of 8K video — but the two faults are independent.
+
+The build option is kept, because it is the only way to separate the two, and
+because someone reproducing this will want to try it before spending an evening
+the way this one was spent.
+
+### Four theories, all disproved by logs
+
+Recorded so nobody re-runs them:
+
+| theory | disproved by |
+|---|---|
+| `DeviceBusy` latched as a successful declaration | the declaration runs and succeeds: `host capacity declared for dest 0x5, tries=1` |
+| the declaration is skipped when capturetarget is already 0x5 | same line — it is not skipped |
+| Full-Press just needs a brief retry | `retries=9 result=0x2019` — 8 retries over 2 s, still busy |
+| `resetUsb` skipping `USBDEVFS_RESET` | reset restored and verified in dmesg; behaviour unchanged |
+
+**What is actually known:** `gp_camera_init` times out on PTP for minutes after a
+cold connect, pgphoto exits, `polestar_app` restarts it every ~7 s, and it
+eventually succeeds on its own. The cause is upstream of everything this project
+patches. The next thing to look at is the PTP transport itself — what the body
+answers (or does not) during those first minutes on the wire — which needs USB
+capture, not more source reading.
 
 Evidence from a real cold start is preserved at
 `/app/sd/coldstart-evidence.log` on the device.
