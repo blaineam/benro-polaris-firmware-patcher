@@ -1484,6 +1484,9 @@ static const char PAGE[] =
 "<button style='padding:9px 14px;font-size:14px' onclick=wsave()>Save</button>"
 "<button class=alt style='padding:9px 14px;font-size:14px' onclick=wact('up')>Join</button>"
 "<button class=alt style='padding:9px 14px;font-size:14px' onclick=wact('down')>Disconnect</button>"
+"<label style='display:block;margin-top:8px;font-size:13.5px;cursor:pointer'>"
+"<input type=checkbox id=naj onchange=wauto() style='vertical-align:-2px;margin-right:6px'>"
+"Join automatically at power-up</label>"
 "<div id=nerr style='color:var(--err);font-size:12.5px;margin-top:6px'></div>"
 "<pre id=nlog style='max-height:120px;margin-top:8px;display:none'></pre>"
 "<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>Joins your home network on a "
@@ -1622,6 +1625,7 @@ static const char PAGE[] =
 "  t+='Access point: <b>'+(d.ap_ip||'down')+'</b>';\n"
 "  t+=' &middot; home network: <b>'+(d.sta_ip||'not joined')+'</b>';\n"
 "  if(d.configured)t+='<br>configured for <b>'+(d.ssid||'(unknown)')+'</b>';\n"
+"  var cb=document.getElementById('naj'); if(cb)cb.checked=!!d.autojoin;\n"
 "  else t+='<br>no network configured yet';\n"
 "  document.getElementById('nws').innerHTML=t}\n"
 "function wload(){fetch('/api/wifi').then(r=>r.json()).then(wshow)}\n"
@@ -1635,6 +1639,12 @@ static const char PAGE[] =
 "     if(d.ok)e.style.color='var(--ok)',e.textContent='saved (only the hashed key is stored)';\n"
 "     else e.style.color='var(--err)',e.textContent=d.error||'failed';\n"
 "     wload()})}\n"
+"function wauto(){var on=document.getElementById('naj').checked;\n"
+"  fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
+"    body:'action=autojoin_'+(on?'on':'off')}).then(function(){\n"
+"      document.getElementById('nerr').style.color='var(--dim)';\n"
+"      document.getElementById('nerr').textContent=on?'will join automatically at power-up':'auto-join off';\n"
+"      wload()})}\n"
 "function wact(a){var e=document.getElementById('nerr');e.style.color='var(--dim)';\n"
 "  e.textContent=(a=='up'?'joining\u2026 (up to 45s)':'disconnecting\u2026');\n"
 "  fetch('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},\n"
@@ -1914,10 +1924,23 @@ static void handle(int fd) {
                 respond_json(fd, "{\"ok\":true,\"saved\":true}");
                 return;
             }
+            if (!strcmp(action, "autojoin_on") || !strcmp(action, "autojoin_off")) {
+                if (!strcmp(action, "autojoin_on")) {
+                    FILE *f = fopen("/app/sd/polaris-wifi/autojoin", "w");
+                    if (f) { fputs("1\n", f); fclose(f); }
+                } else unlink("/app/sd/polaris-wifi/autojoin");
+                respond_json(fd, "{\"ok\":true}");
+                return;
+            }
             if (!strcmp(action, "up") || !strcmp(action, "down")) {
                 char cmd[256], res[2048], esc[4096];
-                snprintf(cmd, sizeof cmd, "timeout -t 75 %s/polaris-apsta.sh %s 2>&1",
-                         WD, action);
+                /* "up" runs the SAME script boot uses, so what you test from
+                 * the page is exactly what happens at power-on -- no second
+                 * code path to drift out of agreement. */
+                if (!strcmp(action, "up"))
+                    snprintf(cmd, sizeof cmd, "timeout -t 110 %s/polaris-autojoin.sh 2>&1 | tail -20", WD);
+                else
+                    snprintf(cmd, sizeof cmd, "timeout -t 75 %s/polaris-apsta.sh down 2>&1", WD);
                 run_capture(cmd, res, sizeof res);
                 json_escape(res, esc, sizeof esc);
                 snprintf(out, sizeof out, "{\"ok\":true,\"action\":\"%s\",\"log\":\"%s\"}",
@@ -1930,7 +1953,7 @@ static void handle(int fd) {
         /* status: SSID yes, key never */
         {
             char apip[64] = "", staip[64] = "", cssid[160] = "", res[256];
-            int haskey = 0;
+            int haskey = 0, autojoin = 0;
             if (run_capture("ifconfig wlan0 2>/dev/null | sed -n 's/.*inet addr:\\([0-9.]*\\).*/\\1/p'",
                             res, sizeof res) == 0) {
                 snprintf(apip, sizeof apip, "%s", res);
@@ -1949,10 +1972,13 @@ static void handle(int fd) {
             }
             { FILE *c = fopen("/app/sd/polaris-wifi/wpa.conf", "r");
               if (c) { haskey = 1; fclose(c); } }
+            { FILE *aj = fopen("/app/sd/polaris-wifi/autojoin", "r");
+              if (aj) { autojoin = 1; fclose(aj); } }
             snprintf(out, sizeof out,
                 "{\"ok\":true,\"ap_ip\":\"%s\",\"sta_ip\":\"%s\","
-                "\"ssid\":\"%s\",\"configured\":%s}",
-                apip, staip, cssid, haskey ? "true" : "false");
+                "\"ssid\":\"%s\",\"configured\":%s,\"autojoin\":%s}",
+                apip, staip, cssid, haskey ? "true" : "false",
+                autojoin ? "true" : "false");
             respond_json(fd, out);
         }
         return;

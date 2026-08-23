@@ -90,6 +90,18 @@ SITE=/app/sd/polaris-astro/site.conf
         setsid "$ASTRO/polaris-trackwatch.sh" </dev/null >/dev/null 2>&1 &
     fi
 
+    # AUTO-JOIN THE HOME NETWORK. Set from the dashboard; the flag lives on the
+    # microSD so the choice survives a power cycle. Runs in the background --
+    # it moves the AP to the home network's channel and restarts hostapd, which
+    # briefly drops every client, so it must not block the rest of boot.
+    #
+    # Deliberately AFTER the astro daemons start: if the join fails or the radio
+    # misbehaves, plate solving and the app path are already up and unaffected.
+    if [ -f /app/sd/polaris-wifi/autojoin ] && [ -x /app/sd/polaris-wifi/polaris-autojoin.sh ]; then
+        echo "auto-join enabled -- joining the home network in the background"
+        setsid /app/sd/polaris-wifi/polaris-autojoin.sh </dev/null >/dev/null 2>&1 &
+    fi
+
     # CAMERA FLIGHT RECORDER. Catches the "camera battery died and the mount
     # drove somewhere bad" event, which cannot be reproduced on demand -- it
     # happens when a battery happens to run out. CAMERA_WATCH=0 to skip.
