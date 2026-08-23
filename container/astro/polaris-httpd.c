@@ -41,6 +41,7 @@
 #define JOB_PID        "/tmp/polaris-job.pid"      /* pid of the running job */
 #define KEEPWIFI_FLAG  "/app/sd/polaris-astro/keep-wifi-awake"
 #define KEEPWIFI_PID   "/tmp/wifi-keepalive.pid"
+#define KEEPWIFI_FORCE "/app/sd/polaris-astro/keep-wifi-force"
 
 /* Find the keepalive by scanning /proc, not by trusting the pidfile and not
  * with `ps | grep`.
@@ -1475,13 +1476,16 @@ static const char PAGE[] =
 "makes the Benro app re-prompt for compass calibration.</div></div>"
 "<div class=card><h2>Wi-Fi</h2><div id=kws style='margin-bottom:8px'></div>"
 "<button style='padding:9px 14px;font-size:14px' onclick=kw(1)>Keep Awake</button>"
+"<button class=alt style='padding:9px 14px;font-size:14px' onclick=kw('force')>Force Awake</button>"
 "<button class=alt style='padding:9px 14px;font-size:14px' onclick=kw(0)>Allow Sleep</button>"
 "<div style='color:var(--dim);font-size:12.5px;margin-top:6px'>The Polaris powers its "
 "Wi-Fi down <b>60 s after the Benro app disconnects</b>, taking this page, ssh, Alpaca "
 "and LX200 with it &mdash; firmware behaviour, with no setting. Keep Awake holds one "
 "connection that registers itself as a client the way the app does, so the timer never "
 "starts. It uses battery, and it waits until the mount is aligned before connecting, "
-"because connecting earlier makes the Benro app ask for a compass calibration.</div></div>"
+"because connecting earlier makes the Benro app ask for a compass calibration. "
+"<b>Force Awake</b> skips that wait \u2014 useful for working on the box without keeping a "
+"phone in the app, at the cost of possibly triggering that dialog.</div></div>"
 "<div class=card><h2>Guiding</h2>"
 "<div id=gst style='margin-bottom:8px'></div>"
 "<svg id=gchart viewBox='0 0 640 180' preserveAspectRatio='none' "
@@ -1556,7 +1560,8 @@ static const char PAGE[] =
 "     else e.textContent=d.error||'failed'})}\n"
 
 "function kwshow(d){var t;\n"
-"  if(d.enabled&&d.running)t=d.aligned?'<b>keeping Wi-Fi awake</b>':'<b>armed</b> \u2014 waiting for the mount to be aligned';\n"
+"  if(d.enabled&&d.running&&d.forced)t='<b>keeping Wi-Fi awake</b> \u2014 forced, ignoring alignment';\n"
+"  else if(d.enabled&&d.running)t=d.aligned?'<b>keeping Wi-Fi awake</b>':'<b>armed</b> \u2014 waiting for the mount to be aligned';\n"
 "  else if(d.enabled)t='<b>enabled</b> but the helper is not running';\n"
 "  else t='Wi-Fi will sleep 60 s after the app disconnects (firmware default)';\n"
 "  document.getElementById('kws').innerHTML=t}\n"
@@ -1793,13 +1798,24 @@ static void handle(int fd) {
      * app demand a compass calibration while the mount is unaligned. The helper
      * therefore waits for alignment before it connects. */
     if (!strcmp(path, "/api/keepwifi")) {
-        char out[320]; int on = 0, running = 0;
+        char out[320]; int on = 0, running = 0, forced = 0;
         if (!strcmp(method, "POST") || !strcmp(method, "PUT")) {
             char v[16] = "";
             if (!param(qs, "on", v, sizeof v) && body) param(body, "on", v, sizeof v);
-            if (v[0] == '1' || !strcmp(v, "true")) {
+            if (v[0] == '1' || !strcmp(v, "true") || !strcmp(v, "force")) {
                 FILE *f = fopen(KEEPWIFI_FLAG, "w");
                 if (f) { fputs("1\n", f); fclose(f); }
+                /* "force" means connect without waiting for alignment. It is a
+                 * deliberate choice with a real consequence -- registering while
+                 * the mount is unaligned is what makes the Benro app ask for a
+                 * compass calibration -- so it is a separate, explicit flag
+                 * rather than a quietly relaxed default. */
+                if (!strcmp(v, "force")) {
+                    FILE *ff = fopen(KEEPWIFI_FORCE, "w");
+                    if (ff) { fputs("1\n", ff); fclose(ff); }
+                } else {
+                    unlink(KEEPWIFI_FORCE);
+                }
                 /* Launch unconditionally; the script refuses to double-start
                  * using a pidfile. Do NOT guard with `ps | grep` here: the
                  * guard runs in a subshell whose own command line contains the
@@ -1811,6 +1827,7 @@ static void handle(int fd) {
             } else {
                 char pb[32]; long kp;
                 unlink(KEEPWIFI_FLAG);
+                unlink(KEEPWIFI_FORCE);
                 read_file(KEEPWIFI_PID, pb, sizeof pb);
                 kp = atol(pb);
                 if (kp <= 0 || kill((pid_t)kp, 0) != 0) kp = (long)find_proc("wifi-keepalive.sh");
@@ -1844,10 +1861,11 @@ static void handle(int fd) {
         }
         { FILE *f = fopen(KEEPWIFI_FLAG, "r"); if (f) { on = 1; fclose(f); } }
         running = (find_proc("wifi-keepalive.sh") > 0);
+        { FILE *ff = fopen(KEEPWIFI_FORCE, "r"); if (ff) { forced = 1; fclose(ff); } }
         snprintf(out, sizeof out,
-                 "{\"ok\":true,\"enabled\":%s,\"running\":%s,\"aligned\":%s}",
+                 "{\"ok\":true,\"enabled\":%s,\"running\":%s,\"aligned\":%s,\"forced\":%s}",
                  on ? "true" : "false", running ? "true" : "false",
-                 may_read_mount() ? "true" : "false");
+                 may_read_mount() ? "true" : "false", forced ? "true" : "false");
         respond_json(fd, out);
         return;
     }

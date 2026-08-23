@@ -80,9 +80,22 @@ trap 'say "signalled -- exiting"; rm -f "$PIDF"; exit 0' INT TERM
 
 say "keepalive started (pid $$)"
 while :; do
-    if [ "${KEEPALIVE_REQUIRE_ALIGNED:-1}" = "1" ] && ! aligned; then
+    # MANUAL OVERRIDE. The alignment gate exists to avoid the compass dialog,
+    # but there are legitimate reasons to want the network up before then --
+    # not least being able to work on the box at all without keeping a phone in
+    # the Benro app. The force flag is a deliberate, user-pressed decision, so
+    # it wins over the automatic caution.
+    FORCEF=${KEEPALIVE_FORCE_FILE:-/app/sd/polaris-astro/keep-wifi-force}
+    if [ -f "$FORCEF" ]; then
+        [ "${_saidforce:-0}" = "1" ] || {
+            log "FORCED on: connecting regardless of alignment (may prompt the app for a compass calibration)"
+            _saidforce=1
+        }
+    elif [ "${KEEPALIVE_REQUIRE_ALIGNED:-1}" = "1" ] && ! aligned; then
         say "mount not aligned -- holding off (connecting now would make the app ask for a compass calibration)"
-        while [ "${KEEPALIVE_REQUIRE_ALIGNED:-1}" = "1" ] && ! aligned; do sleep 20; done
+        while [ "${KEEPALIVE_REQUIRE_ALIGNED:-1}" = "1" ] && ! aligned && [ ! -f "$FORCEF" ]; do
+            sleep 20
+        done
         say "mount is aligned -- connecting"
     fi
     # REGISTER, then hold. An idle connection is NOT a counted client: the
