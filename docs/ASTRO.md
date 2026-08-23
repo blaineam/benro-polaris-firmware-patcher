@@ -210,6 +210,10 @@ Two things worth knowing:
 Set `HTTPD_WAIT_ALIGNED=1` to go back to not starting the server at all until an
 alignment has completed.
 
+To reach the device from your ordinary network instead of its access point, see
+[NETWORKING.md](NETWORKING.md) — it can join your home wifi on a second
+interface while the access point keeps serving the Benro app.
+
 ---
 
 ## How high is too high to derive a heading?
@@ -243,6 +247,43 @@ The gate only bites on marginal corrections: at 80° the correction must exceed
 `MAX_ALIGN_ALT` remains as a hard stop, now at **85°**, because that close to the
 zenith an alt-az mount's azimuth axis is ill-conditioned mechanically as well as
 mathematically.
+
+---
+
+## The device locks up under TCP load (a stock defect, worked around)
+
+Symptom: every TCP service stops answering — ssh accepts the connection and
+never sends a banner, the web page and the Benro control port go silent — while
+**ping keeps replying** and the access point stays up. Shortly after, the device
+reboots itself.
+
+Cause: the wifi driver floods the kernel log with
+
+```
+dhd_tcpdata_info_get 1056: No more free tdata_psh_info!!
+```
+
+whenever its TCP-flow pool is exhausted, which on this firmware is routine (414
+of 943 lines in the kernel buffer were this one message). The kernel command
+line is `console=ttyAMA0,115200`, so **every one of those lines is written out a
+115200-baud serial port** — roughly 5 ms of blocked kernel time each. A few per
+second is invisible; hundreds per second is a kernel that does nothing but
+print. ICMP still answers because it is handled in softirq; every TCP listener
+starves.
+
+The fix is one line, applied at boot before anything else starts:
+
+```sh
+echo 1 > /proc/sys/kernel/printk
+```
+
+The messages still land in the kernel ring buffer, so `dmesg` keeps them for
+diagnosis; they simply no longer block the system to print. `PRINTK_QUIET=0` in
+`site.conf` opts out.
+
+Nothing in this project generates those messages — we only add TCP traffic that
+makes the pool churn faster. This is very likely a **stock defect** and may
+explain flakiness other owners see.
 
 ---
 
@@ -408,6 +449,9 @@ Note it is *our reading* of the spec -- it reported 35/35 while ConformU found
 | Real R5 II frame solved on device | 6.4″ vs upstream, 9.3 s |
 | **Real night sky solved on device** | 2 frames, log-odds 132 / 243, 27 / 48 matches, ~5 s |
 | Keep Awake registers as a client | `SP_ClientCtxAdd id[11] type[wifi] WifiCount[2]` |
+| Concurrent AP + station (same channel) | joined in 1 s, AP unaffected, survives reboot |
+| Auto-join at power-up | cold boot → joined in 12 s, first attempt |
+| Console-flood lockup fix | 80 TCP connections driven through, stayed responsive |
 | Wi-Fi survived closing the Benro app | with Keep Awake on; previously died 60 s later |
 | Alpaca conformance | 35/35 |
 | Boot autostart | across real reboots |
@@ -453,6 +497,13 @@ error. A clock fault would show as ~105° of RA, not fractions of a degree.
   verified against saved frames and per-endpoint, not by running the app through
   a real alignment. That run has not happened yet.
 - **Any camera other than the R5 Mark II**, and any firmware other than 4.0.0.32.
+- **The camera cold-start delay is NOT fixed.** After a cold start
+  `gp_camera_init` times out on PTP for minutes and shots fail until it clears.
+  Diagnosed, not solved — see [CAPTURE-PATH.md](CAPTURE-PATH.md). Three
+  plausible-looking fixes were tried and disproved by the logs.
+- **Concurrent AP+station across two BANDS crashes the firmware.** Same channel
+  works; different bands takes the whole device down. See
+  [NETWORKING.md](NETWORKING.md).
 
 ### Failed solves keep their evidence
 

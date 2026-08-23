@@ -430,3 +430,87 @@ So the solver never fires the shutter during calibration. Live view is the only
 frame source there. For a full-frame solve, take the shot in the Benro app and
 run `solve-now.sh --latest`, which is what the `--latest` and `--wait` modes
 exist for.
+
+---
+
+## THERE ARE TWO ptp2.so, AND ONLY ONE IS LOADED
+
+The patcher installs the camlib to **both** of these:
+
+```
+/app/lib/stage2/libgphoto2/2.5.34/ptp2.so
+/app/lib/libgphoto2/2.5.27.1/ptp2.so      <-- THIS is the one that gets loaded
+```
+
+`pgphoto`'s wrapper exports `CAMLIBS=/app/lib/stage2/libgphoto2/2.5.34`, so the
+stage2 path looks like the live one. It is not: pgphoto's compiled-in core
+resolves `2.5.27.1` first, and that is what ends up mapped.
+
+Check with `/proc/<pid>/maps`, never by md5-ing the file you just copied:
+
+```sh
+P=$(ps | grep pgphot[o] | awk '{print $1}' | head -1)
+grep ptp2.so /proc/$P/maps
+```
+
+Three consecutive hand-installed fixes were tested and "verified" against the
+stage2 copy while the device ran the 2.5.27.1 one — matching md5s, matching
+strings, and none of the code ever executing. A reflash would have worked, since
+the patcher writes both. **A hand install must write both paths.**
+
+---
+
+## Cold start: the camera does not answer PTP for minutes
+
+Reported: after a cold start (camera power-cycled or USB replugged) live view
+works immediately, but every shot fails for minutes, then starts working.
+
+What the log actually shows — and this took three wrong diagnoses to reach:
+
+```
+checkGphotoTask: pgphoto is exit, reboot it
+gp_camera_set_abilities ('Canon EOS R5m2')
+gp_camera_set_port_info ... usb:001,006
+*** Error *** PTP Timeout
+MsgFromCamera --> state:-10; manufacturer:none; model:none; storage:0
+```
+
+repeating every ~7 s. **`gp_camera_init` is timing out.** pgphoto exits,
+`polestar_app` restarts it, and round it goes. The shutter errors
+(`Full-Press failed (0x2019: PTP Device Busy)`) only appear on the attempts
+where init got far enough to try, so they are a symptom, not the cause.
+
+### What was ruled OUT, with evidence
+
+* **The host-capacity declaration is not being skipped.** It runs and succeeds:
+  `POLARIS host capacity declared for dest 0x5, tries=1`, and Full-Press fails
+  anyway.
+* **DeviceBusy being latched as success** was a real bug and is fixed (it now
+  leaves the flag clear so the next capture retries), but it was not this.
+* **Retrying Full-Press does not bridge it.** With a bounded retry in place the
+  log reads `POLARIS capture full-press was busy: retries=9 result=0x2019` —
+  eight retries over two full seconds, still busy. The wait is minutes, and the
+  retry cannot be lengthened much: `polestar_app` watchdogs pgphoto at ~5 s.
+
+### The remaining suspect
+
+`resetUsb` is patched to return immediately (`mov r0,#0; bx lr`), deliberately
+skipping `USBDEVFS_RESET`, to stop a re-enumeration storm that caused a
+~3-minute stall on cold connect. Skipping the reset is exactly the kind of thing
+that could leave a cold-started body unready to answer PTP. Testing it means
+restoring the reset and checking whether cold start improves *and* whether the
+old storm comes back. **Not yet tried.**
+
+Evidence from a real cold start is preserved at
+`/app/sd/coldstart-evidence.log` on the device.
+
+### How to capture this yourself
+
+`pgphoto`'s **stderr goes to `/app/Mlog.txt`**, not `Clog.txt` — and the device
+truncates `Mlog.txt` constantly, so reading it after the fact gets nothing. Use
+`polaris-logwatch` (20 ms, truncation-safe) to keep your own copy; the camera
+flight recorder already does exactly this into
+`/app/sd/polaris-astro/camera-roll.log`.
+
+Enable `STAGE2_GPLOG=1` in `/app/bin/pgphoto` for the libgphoto2 detail, and
+**turn it off afterwards** — it costs about 5.5 s per capture.

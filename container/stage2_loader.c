@@ -557,9 +557,17 @@ static void stage2_gplog_cb(int level, const char *domain, const char *str,
     /* Keep it to the PTP traffic we care about; the full firehose is enormous
      * and Mlog.txt is truncated by the app every few seconds. */
     if (!domain || !str) return;
+    /* "POLARIS" is in this list deliberately. Our own patched messages are the
+     * whole point of enabling this, and two of them -- "host capacity declared"
+     * and "pchddcapacity failed" -- contain none of the other keywords, so they
+     * were being dropped by the very filter meant to surface them. That made a
+     * cold-start capture log unreadable: "declaration ran and succeeded" and
+     * "declaration never ran" produced identical output (nothing), which is the
+     * worst possible property for a diagnostic. */
     if (strstr(str, "object added") || strstr(str, "eos event") ||
         strstr(str, "unhandled eos") || strstr(str, "ObjectAdded") ||
-        strstr(str, "capture") || strstr(str, "Capture"))
+        strstr(str, "capture") || strstr(str, "Capture") ||
+        strstr(str, "POLARIS") || strstr(str, "capacity"))
         fprintf(stderr, "[gplog] %s: %.180s\n", domain, str);
 }
 

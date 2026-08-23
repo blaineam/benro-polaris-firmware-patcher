@@ -235,3 +235,56 @@ else:
     print("[dbg_patch] config.c: host capacity declared for combined capture destinations")
 
 print("[dbg_patch] DONE -- POLARIS_DBG EOS-init non-fatal (production, no tracing) applied")
+
+# ---- camlibs/ptp2/library.c : retry Full-Press on DeviceBusy ---------------
+#
+#  WHY. On a COLD START the body refuses the shutter release for a while:
+#
+#      POLARIS capturedest current = 0x1 -> OVERRIDE 0x5
+#      POLARIS host capacity declared for dest 0x5, tries=1     <-- succeeded
+#      *** Error *** Canon EOS Full-Press failed (0x2019: PTP Device Busy)   x14
+#
+#  That log is from real hardware and it settles the cause: host capacity IS
+#  declared, successfully, and Full-Press still fails. So this is not our
+#  capture-destination work being skipped -- it is the CAMERA still bringing
+#  itself up (lens, card, metering) and declining to release. It clears on its
+#  own with no USB re-enumeration.
+#
+#  We cannot make the body ready sooner. We can stop reporting a failed shot
+#  for a condition that is transient by definition: wait briefly, drain the EOS
+#  event queue, and press again.
+#
+#  BOUNDED, and the bound matters: polestar_app watchdogs pgphoto at about 5 s,
+#  so an unbounded wait would crash-loop the daemon instead of losing one
+#  frame. 8 x 250 ms = 2 s worst case, comfortably inside that.
+#
+#  Only DeviceBusy is retried. Any other error still fails immediately -- a
+#  camera that is genuinely unable to shoot should say so, not hang.
+BUSY_ANCHOR = (
+    r'\t\t\tres = LOG_ON_PTP_E \(ptp_canon_eos_remotereleaseon \(params, 2, 0\)\);\n'
+)
+BUSY_PATCH = (
+    '\t\t\tres = LOG_ON_PTP_E (ptp_canon_eos_remotereleaseon (params, 2, 0));\n'
+    '\t\t\t/* POLARIS: a cold-started body answers Full-Press with 0x2019\n'
+    '\t\t\t * DeviceBusy until it has finished initialising. Retry briefly\n'
+    '\t\t\t * rather than surfacing a failed capture. Bounded well inside\n'
+    '\t\t\t * polestar_app\'s ~5s watchdog. */\n'
+    '\t\t\tif (res == PTP_RC_DeviceBusy) {\n'
+    '\t\t\t\tint _pbtries = 0;\n'
+    '\t\t\t\twhile (res == PTP_RC_DeviceBusy && _pbtries++ < 8) {\n'
+    '\t\t\t\t\tusleep (250*1000);\n'
+    '\t\t\t\t\tptp_check_eos_events (params);\n'
+    '\t\t\t\t\tres = LOG_ON_PTP_E (ptp_canon_eos_remotereleaseon (params, 2, 0));\n'
+    '\t\t\t\t}\n'
+    '\t\t\t\tGP_LOG_D ("POLARIS capture full-press was busy: retries=%d result=0x%04x",\n'
+    '\t\t\t\t          _pbtries, res);\n'
+    '\t\t\t}\n'
+)
+
+t = load(lib)
+if "_pbtries" in t:
+    print("[dbg_patch] library.c full-press busy-retry already patched -- skipping")
+else:
+    t = sub(t, BUSY_ANCHOR, BUSY_PATCH.replace('\\', '\\\\'), 1, "library.c full-press DeviceBusy retry")
+    save(lib, t)
+    print("[dbg_patch] library.c: Full-Press retries on DeviceBusy (cold-start capture failures)")
