@@ -31,17 +31,73 @@ mkdir -p "$SRC" /work/out
 #     (upstream never reads the tail).  See docs/HOW-IT-WORKS.md.
 FULLSTACK="${FULLSTACK:-0}"
 
-echo "[build] fetching libgphoto2 $VER"
+# --- WHERE libgphoto2 COMES FROM -------------------------------------------
+#  By default: the upstream RELEASE TARBALL for $VER. Release tarballs ship a
+#  pre-generated configure script, which is why the normal build needs no
+#  autotools.
+#
+#  To build from a fork, branch or commit instead:
+#     LIBGPHOTO2_REPO=https://github.com/you/libgphoto2   (default: upstream)
+#     LIBGPHOTO2_REF=my-branch | v2.5.34 | 0e5ec1f        (any git ref)
+#
+#  Setting LIBGPHOTO2_REF switches to a git clone. A git checkout has NO
+#  configure script, so autoreconf has to run -- that needs autoconf, automake,
+#  libtool and gettext in the build image, and it is checked for explicitly
+#  rather than failing three minutes later inside configure.
+#
+#  This exists because the fixes this project carries are patches applied to
+#  upstream source (see dbg_patch.py). Anyone maintaining their own fork of
+#  those -- or testing a fix before it is upstreamed -- should be able to build
+#  the firmware against it without editing this script.
+LIBGPHOTO2_REPO="${LIBGPHOTO2_REPO:-https://github.com/gphoto/libgphoto2}"
+LIBGPHOTO2_REF="${LIBGPHOTO2_REF:-}"
+
 cd "$SRC"
-if [ ! -d "libgphoto2-$VER" ]; then
-  for u in \
-    "https://github.com/gphoto/libgphoto2/releases/download/v$VER/libgphoto2-$VER.tar.xz" \
-    "https://github.com/gphoto/libgphoto2/releases/download/v$VER/libgphoto2-$VER.tar.bz2"; do
-    if wget -q -O lg.tar "$u"; then break; fi
+if [ -n "$LIBGPHOTO2_REF" ]; then
+  SRCDIR="libgphoto2-git"
+  echo "[build] fetching libgphoto2 from $LIBGPHOTO2_REPO @ $LIBGPHOTO2_REF"
+  # git is not in the patcher image (nothing else needs it -- the normal build
+  # downloads a release tarball). Install it on demand rather than making every
+  # ordinary build carry it.
+  if ! command -v git >/dev/null 2>&1; then
+    echo "[build] installing git (needed only for the LIBGPHOTO2_REF path)"
+    (apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1) || true
+  fi
+  for t in git autoreconf automake libtoolize autopoint; do
+    command -v "$t" >/dev/null 2>&1 || {
+      echo "[build] ERROR: building from a git ref needs '$t'." >&2
+      echo "[build]        The patcher image carries only what a release tarball" >&2
+      echo "[build]        needs. Install autoconf automake libtool gettext git," >&2
+      echo "[build]        or drop LIBGPHOTO2_REF to use the release tarball." >&2
+      exit 1; }
   done
-  tar xf lg.tar
+  if [ ! -d "$SRCDIR" ]; then
+    git clone --no-checkout "$LIBGPHOTO2_REPO" "$SRCDIR" || {
+      echo "[build] ERROR: could not clone $LIBGPHOTO2_REPO" >&2; exit 1; }
+  fi
+  ( cd "$SRCDIR" \
+    && git fetch --tags origin \
+    && git checkout --force "$LIBGPHOTO2_REF" ) || {
+      echo "[build] ERROR: '$LIBGPHOTO2_REF' is not a ref in $LIBGPHOTO2_REPO" >&2; exit 1; }
+  echo "[build] building from $(cd "$SRCDIR" && git rev-parse --short HEAD) \
+($(cd "$SRCDIR" && git log -1 --format=%s | cut -c1-60))"
+  cd "$SRCDIR"
+  if [ ! -f configure ]; then
+    echo "[build] git checkout has no configure -- running autoreconf"
+    autoreconf -i >/dev/null 2>&1 || { echo "[build] ERROR: autoreconf failed" >&2; exit 1; }
+  fi
+else
+  echo "[build] fetching libgphoto2 $VER (upstream release tarball)"
+  if [ ! -d "libgphoto2-$VER" ]; then
+    for u in \
+      "https://github.com/gphoto/libgphoto2/releases/download/v$VER/libgphoto2-$VER.tar.xz" \
+      "https://github.com/gphoto/libgphoto2/releases/download/v$VER/libgphoto2-$VER.tar.bz2"; do
+      if wget -q -O lg.tar "$u"; then break; fi
+    done
+    tar xf lg.tar
+  fi
+  cd "libgphoto2-$VER"
 fi
-cd "libgphoto2-$VER"
 
 # --- DIAGNOSTIC ONLY: POLARIS_TRACE instrumentation (TRACE=1) ----------------
 #  THROWAWAY tracing build — NOT for shipping. Injects unbuffered

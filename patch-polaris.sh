@@ -32,6 +32,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 FWPKT=""; VER="2.5.34"; OUT="$HERE/out"; SELFTEST=0; FIXTYPO=1; SWAPUSB1=1; IMG="polaris-patcher"; MODE="full"
 SSHKEY=""
 
+LGREPO=""
+LGREF=""
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --fwpkt) FWPKT="$2"; shift 2;;
@@ -96,6 +99,7 @@ fi
 docker run --rm \
   -e MODE="$MODE" \
   -e LIBGPHOTO2_VERSION="$VER" -e FIX_R5M2_TYPO="$FIXTYPO" -e SELFTEST="$SELFTEST" \
+  -e LIBGPHOTO2_REPO="$LGREPO" -e LIBGPHOTO2_REF="$LGREF" \
   -e SWAP_USB1="$SWAPUSB1" \
   -e SSH_PUBKEY="$SSHKEY" \
   -v "$IN":/in:ro -v "$OUT":/out \

@@ -25,6 +25,26 @@ needed two upstream libgphoto2 bugs fixed — see
 stays on the camera card; only the JPEG crosses the wire.
 See [docs/TESTED.md](docs/TESTED.md).
 
+
+### Building against your own libgphoto2
+
+The fixes this project carries are patches applied to upstream source (see
+`container/dbg_patch.py`). To build the firmware against a fork, a branch, or a
+specific commit instead of the release tarball:
+
+```bash
+./patch-polaris.sh --fwpkt ./FwPkt \
+  --libgphoto2-repo https://github.com/you/libgphoto2 \
+  --libgphoto2-ref  my-fix-branch
+```
+
+`--libgphoto2-ref` accepts any git ref — branch, tag, or commit hash. It
+switches the build from the release tarball to a git clone, which has no
+`configure` script, so `autoreconf` runs first; `git` is installed into the
+build image on demand and the other autotools are already there. Without these
+flags nothing changes: the ordinary build still uses the upstream release
+tarball for `--libgphoto2 <version>`.
+
 ## On-device plate solving (alpha)
 
 The `astro-plate-solving` branch adds astrometric plate solving that runs on the

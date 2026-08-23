@@ -13,6 +13,11 @@
 #
 #  Env:
 #     LIBGPHOTO2_VERSION   libgphoto2 release tag to build (default 2.5.34)
+#     LIBGPHOTO2_REPO      build from this git repo instead of the release
+#                          tarball (default: upstream gphoto/libgphoto2)
+#     LIBGPHOTO2_REF       git branch, tag or commit to build. Setting this
+#                          switches the build to a git clone, which needs
+#                          autotools in the image.
 #     FIX_R5M2_TYPO        1 = correct the upstream "EOS 5Rm2" model-name typo
 #     SELFTEST             1 = qemu-emulate the driver load (needs qemu-arm-static)
 #     SSH_PUBKEY           optional: authorized_keys line(s) to authorise for
@@ -60,7 +65,11 @@ TESTED_PGPHOTO_MD5="a0"  # informational only; verified structurally below
 [ -f /in/camera/config ] || die "/in/camera/config not found"
 
 STOCK_APPFS=/in/camera/appfs.ubifs
-log "libgphoto2 target : $LIBGPHOTO2_VERSION"
+if [ -n "${LIBGPHOTO2_REF:-}" ]; then
+  log "libgphoto2 target : ${LIBGPHOTO2_REPO:-upstream} @ $LIBGPHOTO2_REF (custom fork)"
+else
+  log "libgphoto2 target : $LIBGPHOTO2_VERSION"
+fi
 log "stock appfs.ubifs : $(stat -c %s "$STOCK_APPFS") bytes  md5=$(md5sum "$STOCK_APPFS"|cut -d' ' -f1)"
 
 FWVER="unknown"
