@@ -1,0 +1,31 @@
+#!/bin/sh
+# ===========================================================================
+#  udhcpc.script -- apply a DHCP lease on the STATION interface.
+#
+#  BusyBox udhcpc does not configure anything itself; it obtains the lease and
+#  then calls this. Without it the lease is granted and silently discarded --
+#  "lease of 10.0.0.110 obtained" in the log and no address on the interface,
+#  which reads exactly like a DHCP failure and is not one.
+#
+#  Deliberately does NOT touch the access point or its subnet: the Benro app
+#  talks directly to 192.168.0.1 and must keep working whatever the home
+#  network hands us. A default route is added only when there is none, so the
+#  device gains internet access without ever displacing the AP path.
+# ===========================================================================
+LOG=/app/sd/polaris-wifi/apsta.log
+
+case "$1" in
+  bound|renew)
+    /sbin/ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}"
+    if [ -n "$router" ] && ! /sbin/route -n 2>/dev/null | grep -q '^0\.0\.0\.0'; then
+        /sbin/route add default gw "$router" dev "$interface" 2>/dev/null
+    fi
+    echo "$(date '+%m-%d %H:%M:%S') lease $ip/${subnet} applied to $interface (gw ${router:-none})" >> "$LOG"
+    ;;
+  deconfig)
+    /sbin/ifconfig "$interface" 0.0.0.0 2>/dev/null
+    ;;
+  leasefail|nak)
+    echo "$(date '+%m-%d %H:%M:%S') dhcp $1 on $interface" >> "$LOG"
+    ;;
+esac
