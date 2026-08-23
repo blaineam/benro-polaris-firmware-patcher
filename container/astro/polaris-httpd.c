@@ -2031,6 +2031,18 @@ static void handle(int fd) {
         fep = atol(eb);
         if (fep > 0) age = (long)time(NULL) - fep;
         { char f[8]; if (param(qs, "force", f, sizeof f) && f[0] == '1') maxage = 86400; }
+        /* FAIL CLOSED ON UNKNOWN AGE. If we do not know when the frame was
+         * taken we cannot know whether the mount has moved since, and applying
+         * a solution that no longer describes where it points is exactly the
+         * failure this guard exists to prevent. The first version skipped the
+         * check when the timestamp was missing -- i.e. it was most permissive
+         * precisely when it knew least. */
+        if (fep <= 0 && maxage != 86400) {
+            respond_json(fd, "{\"ok\":false,\"error\":\"this solution has no recorded frame time, "
+                "so its age cannot be checked -- solve a fresh frame, or pass force=1 if you are "
+                "certain the mount has not moved\"}");
+            return;
+        }
         if (fep > 0 && age > maxage) {
             snprintf(out, sizeof out,
                 "{\"ok\":false,\"error\":\"that solution is %ld s old -- the mount has "
@@ -2051,8 +2063,11 @@ static void handle(int fd) {
                 if (g) { char ts[32]; strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", g);
                          snprintf(ub, sizeof ub, "--utc %s", ts); }
             }
+            /* bounded: an unaligned mount never answers 518/530, and
+             * polaris-mount then sits out its own timeout while this request
+             * hangs. Observed hanging a smoke test for the full client timeout. */
             snprintf(cmd, sizeof cmd,
-                "%s/polaris-mount --lat %.6f --lon %.6f %s align "
+                "timeout -t 25 %s/polaris-mount --lat %.6f --lon %.6f %s align "
                 "--solved-ra %.6f --solved-dec %.6f 2>&1",
                 g_astro, g_lat, g_lon, ub, ra, dec);
             if (run_capture(cmd, res, sizeof res) == 0) {
