@@ -37,3 +37,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 *.swp
+
+# build caches for the wifi userspace cross-build (sources are fetched)
+.cache-wifi/
+out/wifi/

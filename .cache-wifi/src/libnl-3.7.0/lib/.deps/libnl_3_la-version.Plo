@@ -1,6 +1,0 @@
-lib/libnl_3_la-version.lo: lib/version.c \
- /usr/arm-linux-gnueabi/include/stdc-predef.h include/netlink/version.h
-
-/usr/arm-linux-gnueabi/include/stdc-predef.h:
-
-include/netlink/version.h:
