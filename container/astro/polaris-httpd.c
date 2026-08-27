@@ -34,6 +34,9 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 
+#include "polaris-link.h"
+#include "webui.h"
+
 #define PORT_DEFAULT   8080
 #define JOB_LOG        "/tmp/polaris-job.log"
 #define JOB_STATUS     "/tmp/polaris-job.status"   /* idle|running|done|failed */
@@ -1659,6 +1662,121 @@ static const char PAGE[] =
 
 /* ------------------------------------------------------------------- main */
 
+/* ===================== the control link and its policy =====================
+ *
+ * The web UI reaches the mount through ONE persistent connection (polaris-link)
+ * rather than by running polaris-mount per request -- see polaris-link.h for
+ * why. What follows is the gate in front of it.
+ *
+ * DEFAULT DENY. The UI can only send opcodes named here. That is not
+ * ceremony: this protocol has commands that wedge the motors (530 -- field
+ * traces from the Aperion work show repeated 530s jamming the head) and
+ * commands that write persistent state, and a control surface reachable by
+ * anything on the wifi should not be one typo in a fetch() away from either.
+ * An opcode absent from this table is refused with its number in the error, so
+ * extending the table is the obvious next step rather than a mystery.
+ *
+ * `moves` marks anything that can drive a motor. Those are refused unless the
+ * request carries confirm=1, so a page reload or a stray retry cannot slew the
+ * head while the user is looking through the camera.
+ */
+typedef struct {
+    int         cmd;
+    const char *name;
+    int         moves;      /* 1 => needs confirm=1                        */
+    const char *note;
+} opcode_policy_t;
+
+static const opcode_policy_t OPCODES[] = {
+    /* --- read-only telemetry: safe, idempotent, no side effects --------- */
+    { 284, "mode",            0, "operating mode + tracking flag" },
+    { 517, "raw-angles",      0, "raw motor angles (yaw/pitch/roll, radians)" },
+    { 518, "pose",            0, "quaternion + compass + altitude" },
+
+    /* --- motion: every one of these can move the head ------------------- */
+    { 519, "goto",            1, "slew to alt/az, or abort an in-flight slew" },
+    { 531, "track",           1, "sidereal tracking on/off" },
+
+    /* --- alignment ------------------------------------------------------ */
+    { 527, "set-heading",     1, "write the compass heading (this is alignment)" },
+
+    /* NOT LISTED, DELIBERATELY:
+     *   530  multi-step star alignment -- wedges the motors on repeat.
+     *        polaris-mount.c refuses it too; one 527 does the same job.
+     *   808  registration -- owned by the link layer, not the UI.
+     *   anything that writes flash or firmware.
+     * The camera and creative-program opcodes go here as docs/APP-PROTOCOL.md
+     * confirms each one's payload; an undocumented guess in this table is a
+     * command sent blind at real hardware. */
+};
+#define OPCODE_COUNT (sizeof OPCODES / sizeof OPCODES[0])
+
+static const opcode_policy_t *opcode_policy(int cmd) {
+    size_t i;
+    for (i = 0; i < OPCODE_COUNT; i++)
+        if (OPCODES[i].cmd == cmd) return &OPCODES[i];
+    return NULL;
+}
+
+/* Should the link be up? It is the radio-keepalive as a side effect, and
+ * registering while UNALIGNED is what makes the Benro app demand a compass
+ * calibration (wifi-keepalive.sh documents this at length). So the same rule
+ * applies here: connect once the mount is aligned, or when the user has
+ * explicitly forced it. */
+static int link_wanted(void) {
+    /* POLARIS_LINK_FORCE=1 brings the link up regardless of what we know about
+     * alignment. It exists for two real cases: bench work against polaris-sim,
+     * where there is no device log to learn alignment from, and diagnosing a
+     * device whose log has been truncated (the firmware rotates /app/Mlog.txt,
+     * which is exactly how "aligned" becomes unknowable mid-session). It is an
+     * env var rather than a UI switch because the cost -- registering while
+     * unaligned makes the Benro app demand a compass calibration -- should be
+     * paid deliberately by someone who read this comment. */
+    const char *f = getenv("POLARIS_LINK_FORCE");
+    if (f && *f && *f != '0') return 1;
+    if (access(KEEPWIFI_FORCE, F_OK) == 0) return 1;
+    return alignment_state() == 1;
+}
+
+/* Bring the link up or down to match policy. Called from the event loop, so it
+ * must be cheap and must not block. */
+static void link_reconcile(void) {
+    static int last = -1;
+    int want = link_wanted();
+    if (want == last) return;
+    last = want;
+    if (want) plink_open(g_mount_host, g_mount_port);
+    else      plink_close();
+}
+
+/* Serve an embedded asset. Returns 1 if the path matched. */
+static int serve_asset(int fd, const char *path) {
+    size_t i;
+    const char *want = (!strcmp(path, "/")) ? "/index.html" : path;
+    for (i = 0; i < WEBUI_ASSET_COUNT; i++) {
+        const webui_asset_t *a = &WEBUI_ASSETS[i];
+        if (strcmp(a->path, want)) continue;
+        {
+            char hdr[512];
+            int hl = snprintf(hdr, sizeof hdr,
+                "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+                "%s"
+                /* The UI is versioned with the binary, so a long cache would
+                 * strand a browser on the previous build after an upgrade --
+                 * exactly the bug that is impossible to diagnose remotely.
+                 * no-cache still allows a 304 revalidation, which is cheap. */
+                "Cache-Control: no-cache\r\n"
+                "Connection: close\r\n\r\n",
+                a->ctype, a->len,
+                a->gzip ? "Content-Encoding: gzip\r\n" : "");
+            send_all(fd, hdr, (size_t)hl);
+            send_all(fd, (const char *)a->body, a->len);
+        }
+        return 1;
+    }
+    return 0;
+}
+
 static void handle(int fd) {
     char req[8192], *body = NULL;
     ssize_t n;
@@ -1737,8 +1855,130 @@ static void handle(int fd) {
         return;
     }
 
-    if (!strcmp(path, "/") || !strcmp(path, "/index.html")) {
+    /* The new control app. The plate-solve dashboard that used to live here is
+     * still built and still served at /legacy: it is field-tested, it is what
+     * the docs screenshot, and retiring it the same day its replacement lands
+     * would leave no way back if the new one misbehaves in the dark at 2 a.m.
+     * It becomes a panel inside the new UI, and /legacy goes when that panel
+     * has been used in the field. */
+    if (!strcmp(path, "/legacy") || !strcmp(path, "/legacy.html")) {
         respond(fd, 200, "text/html; charset=utf-8", PAGE, sizeof PAGE - 1);
+        return;
+    }
+    if (serve_asset(fd, path)) return;
+
+    /* ------------------------------------------------------ control link */
+
+    /* Everything the link has heard, plus its own health. One request, so the
+     * UI can render a whole frame without fanning out. */
+    if (!strcmp(path, "/api/link")) {
+        const plink_stats_t *st = plink_stats();
+        char out[16384];
+        int n = 0, first = 1, i;
+        double now = plink_now_ms();
+        const char *status =
+            st->status == PLINK_UP ? "up" :
+            st->status == PLINK_CONNECTING ? "connecting" : "down";
+        char esc[256];
+        json_escape(st->last_error, esc, sizeof esc);
+        n += snprintf(out + n, sizeof out - n,
+            "{\"status\":\"%s\",\"wanted\":%s,\"connects\":%lu,\"drops\":%lu,"
+            "\"rx\":%lu,\"tx\":%lu,\"parse_errors\":%lu,\"evictions\":%lu,"
+            "\"up_ms\":%.0f,\"last_rx_age_ms\":%.0f,\"error\":\"%s\",\"opcodes\":{",
+            status, link_wanted() ? "true" : "false",
+            st->connects, st->drops, st->rx_msgs, st->tx_msgs,
+            st->parse_errors, st->slot_evictions,
+            st->up_since_ms ? now - st->up_since_ms : 0.0,
+            st->last_rx_ms ? now - st->last_rx_ms : -1.0,
+            esc);
+        /* Dump every opcode the link has a payload for. The UI decodes these
+         * itself, so a newly understood opcode needs no C change -- which is
+         * the whole point while the protocol is still being mapped. */
+        for (i = 0; i < PLINK_SLOTS && n < (int)sizeof out - 512; i++) {
+            const plink_slot_t *sl = plink_get_index(i);
+            char aesc[PLINK_ARGS_MAX * 2];
+            if (!sl) continue;
+            json_escape(sl->args, aesc, sizeof aesc);
+            n += snprintf(out + n, sizeof out - n,
+                "%s\"%d\":{\"args\":\"%s\",\"age_ms\":%.0f,\"count\":%lu}",
+                first ? "" : ",", sl->cmd, aesc, now - sl->when_ms, sl->count);
+            first = 0;
+        }
+        n += snprintf(out + n, sizeof out - n, "}}");
+        respond_json(fd, out);
+        return;
+    }
+
+    /* Send one allowlisted opcode. POST cmd=519&args=...&confirm=1 */
+    if (!strcmp(path, "/api/link/send")) {
+        char cmds[16] = "", args[PLINK_ARGS_MAX] = "", conf[8] = "", types[8] = "";
+        const opcode_policy_t *pol;
+        long cmd = 0, type = PLINK_TYPE_CONTROL;
+        if (strcmp(method, "POST") && strcmp(method, "PUT")) {
+            respond(fd, 405, "text/plain", "POST only\n", 10); return;
+        }
+        if (!param(qs, "cmd", cmds, sizeof cmds) && body) param(body, "cmd", cmds, sizeof cmds);
+        if (!param(qs, "args", args, sizeof args) && body) param(body, "args", args, sizeof args);
+        if (!param(qs, "type", types, sizeof types) && body) param(body, "type", types, sizeof types);
+        if (!param(qs, "confirm", conf, sizeof conf) && body) param(body, "confirm", conf, sizeof conf);
+        /* parse_*_strict return 1 on SUCCESS (they read as predicates at the
+         * call sites in handle_alpaca). Inverting that here cost a debugging
+         * round: every request answered "cmd must be a number" for a cmd that
+         * was a perfectly good number. */
+        if (!parse_long_strict(cmds, &cmd)) { respond_400(fd, "cmd must be a number"); return; }
+        if (types[0] && !parse_long_strict(types, &type)) { respond_400(fd, "type must be a number"); return; }
+
+        pol = opcode_policy((int)cmd);
+        if (!pol) {
+            char msg[192];
+            snprintf(msg, sizeof msg,
+                "{\"ok\":false,\"error\":\"opcode %ld is not allowed\","
+                "\"hint\":\"add it to OPCODES[] in polaris-httpd.c once "
+                "docs/APP-PROTOCOL.md documents its payload\"}", cmd);
+            respond(fd, 403, "application/json", msg, strlen(msg));
+            return;
+        }
+        if (pol->moves && !(conf[0] == '1' || !strcmp(conf, "true"))) {
+            char msg[192];
+            snprintf(msg, sizeof msg,
+                "{\"ok\":false,\"error\":\"%s moves the mount; resend with confirm=1\"}",
+                pol->name);
+            respond(fd, 409, "application/json", msg, strlen(msg));
+            return;
+        }
+        if (plink_status() != PLINK_UP) {
+            const char *msg = "{\"ok\":false,\"error\":\"control link is down\"}";
+            respond(fd, 503, "application/json", msg, strlen(msg));
+            return;
+        }
+        if (plink_send((int)cmd, (int)type, args) != 0) {
+            const char *msg = "{\"ok\":false,\"error\":\"send failed\"}";
+            respond(fd, 502, "application/json", msg, strlen(msg));
+            return;
+        }
+        {
+            char msg[128];
+            snprintf(msg, sizeof msg, "{\"ok\":true,\"cmd\":%ld,\"name\":\"%s\"}",
+                     cmd, pol->name);
+            respond_json(fd, msg);
+        }
+        return;
+    }
+
+    /* What the UI is allowed to send, so it can grey out what it cannot do
+     * instead of discovering it with a 403 mid-gesture. */
+    if (!strcmp(path, "/api/link/opcodes")) {
+        char out[4096];
+        int n = 0; size_t i;
+        n += snprintf(out + n, sizeof out - n, "{\"opcodes\":[");
+        for (i = 0; i < OPCODE_COUNT && n < (int)sizeof out - 256; i++) {
+            n += snprintf(out + n, sizeof out - n,
+                "%s{\"cmd\":%d,\"name\":\"%s\",\"moves\":%s,\"note\":\"%s\"}",
+                i ? "," : "", OPCODES[i].cmd, OPCODES[i].name,
+                OPCODES[i].moves ? "true" : "false", OPCODES[i].note);
+        }
+        n += snprintf(out + n, sizeof out - n, "]}");
+        respond_json(fd, out);
         return;
     }
 
@@ -2406,15 +2646,27 @@ int main(int argc, char **argv) {
 
     for (;;) {
         fd_set rf;
-        int mx = sfd;
+        int mx = sfd, lfd;
+        struct timeval tv;
         FD_ZERO(&rf);
         FD_SET(sfd, &rf);
         if (lxfd >= 0) { FD_SET(lxfd, &rf); if (lxfd > mx) mx = lxfd; }
         if (dfd  >= 0) { FD_SET(dfd,  &rf); if (dfd  > mx) mx = dfd;  }
-        if (select(mx + 1, &rf, NULL, NULL, NULL) < 0) {
+        /* The control link rides the same loop: its socket joins the read set
+         * so pushed telemetry is absorbed the moment it lands, and the timeout
+         * below means the reconnect backoff and re-registration still run when
+         * nothing at all is happening. Without the timeout a link that dropped
+         * while the UI was closed would never come back -- select() would sit
+         * forever waiting on an fd that no longer exists. */
+        lfd = plink_fd();
+        if (lfd >= 0) { FD_SET(lfd, &rf); if (lfd > mx) mx = lfd; }
+        tv.tv_sec = 0; tv.tv_usec = 250000;
+        if (select(mx + 1, &rf, NULL, NULL, &tv) < 0) {
             if (errno == EINTR) continue;
             break;
         }
+        link_reconcile();
+        plink_pump();
         if (FD_ISSET(sfd, &rf)) {
             int c = accept(sfd, NULL, NULL);
             /* CLOSE-ON-EXEC. Anything we launch with system() forks a shell

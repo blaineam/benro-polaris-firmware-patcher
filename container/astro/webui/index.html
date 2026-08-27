@@ -1,0 +1,4 @@
+<!doctype html><html><head><meta charset=utf-8><title>Polaris</title></head>
+<body><h1>Polaris</h1><p id=s>loading…</p>
+<script>fetch('/api/link').then(r=>r.json()).then(o=>{document.getElementById('s').textContent='link: '+o.status})</script>
+</body></html>

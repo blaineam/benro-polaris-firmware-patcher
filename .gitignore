@@ -41,3 +41,8 @@ Thumbs.db
 # build caches for the wifi userspace cross-build (sources are fetched)
 .cache-wifi/
 out/wifi/
+
+# Generated from container/astro/webui/ by embed_webui.py at build time.
+# Not committed: it is a byte-for-byte function of the sources beside it, and a
+# stale checked-in copy would silently ship an old UI with new C.
+container/astro/webui.h
