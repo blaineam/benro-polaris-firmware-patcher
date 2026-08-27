@@ -63,17 +63,36 @@
 - **FREE PROGRAM (283) — a keyframe move flown by hand.** Jog the head, capture
   its live 517 pose as a keyframe, repeat, then play; the head walks the path on
   its own and keeps going with no browser attached. Linear or hold interpolation,
-  an optional photo track, a previewed timeline. That is all six shooting
-  programmes plus the programmable mode now wired.
+  an optional photo track, a previewed timeline.
+- **PATH-LAPSE (272 + waypoints) and SUN (277).** PATH-LAPSE is a moving
+  timelapse: capture 2–8 head poses as waypoints, each carrying the frames to
+  shoot on the leg reaching it, and the head glides the path firing as it goes.
+  It rides the **same** 272 opcode as the static timelapse — each waypoint is a
+  `step:2` point with a gimbal pose in radians and a cumulative arrival time, and
+  `SEND_END` sums the legs into the authoritative frame count — so it shares the
+  timelapse poll, run view and dead-man exactly. SUN schedules a sunrise/sunset
+  lapse across a time window (277): the head does the solar GOTO itself and
+  parks, pushing its own progress like HDR. The window is validated with the
+  **browser's** clock, not the device's (the Polaris clock is not UTC), and the
+  times are serialised as the app's `yyyy,MM,dd,HH,mm,ss` local wall-clock. Both
+  payloads are read from the app's own builders, not inferred; both preview the
+  exact frame before the two-tap confirm. **That is every shooting programme the
+  head exposes now wired** — timelapse, path-lapse, panorama, HDR, focus stack,
+  sun and astro — plus the FREE PROGRAM timeline; only Holy Grail's day-to-night
+  ramp is left.
 - **A real heisenbug caught by ASan before it shipped:** `absorb_reply`'s
   per-kind `seen[]` array was sized `[PROG_FOCUS+1]` and indexed by a kind that
-  grew past it — a global-buffer-overflow that corrupted an adjacent global.
-  Every test binary now also runs under AddressSanitizer + UBSan, clean.
+  grew past it — a global-buffer-overflow that corrupted an adjacent global. It
+  nearly recurred the instant PATH-LAPSE and SUN were added past the old bound,
+  so the enum now carries a `PROG_KIND_COUNT` sentinel and every per-kind array
+  is sized from it — the whole class of bug is gone, not just the one instance.
+  Every test binary also runs under AddressSanitizer + UBSan, clean.
 - The mount simulator learned jog, re-centre, registration, battery, card, the
   camera option lists, the astro control opcodes (mode/AHRS/yaw/half/pose), and
-  now runs all six programmes with a real countdown
-  (HDR via a pushed completion), so the whole control loop — motion through every
-  programme — is testable with no hardware attached. `test_prog.c` is 64
+  now runs every programme with a real countdown — timelapse and path-lapse off a
+  shared 272 model (the authoritative total taken from `SEND_END`'s `photoCnt`),
+  HDR and SUN via a pushed completion — so the whole control loop, motion through
+  every programme, is testable with no hardware attached. `test_prog.c` is 114
   assertions.
 
 ### Fixed

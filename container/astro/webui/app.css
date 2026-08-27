@@ -331,14 +331,24 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 
 /* ─────────────────────────────── programs ──────────────────────────────── */
 
-.segbar { display: flex; gap: 6px; margin-bottom: 12px; }
+.segbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .seg {
-  flex: 1 1 0; min-height: 42px;
+  flex: 1 1 auto; min-width: 84px; min-height: 42px;
   background: var(--card); color: var(--dim);
   border: 1px solid var(--line); border-radius: 10px;
   font: inherit; cursor: pointer;
 }
 .seg.on { color: var(--acc); border-color: var(--acc); }
+
+/* A smaller inline toggle used inside a panel (the Sun event picker). */
+.segbar.sub { margin-bottom: 0; }
+.seg2 {
+  flex: 1 1 0; min-height: 38px;
+  background: var(--card2); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 8px;
+  font: inherit; cursor: pointer;
+}
+.seg2.on { color: var(--acc); border-color: var(--acc); }
 
 .progpanel { display: flex; flex-direction: column; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 5px; }

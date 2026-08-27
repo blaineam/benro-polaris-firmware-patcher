@@ -69,6 +69,12 @@ static prog_wire_t wire_for(prog_kind_t k) {
          * (0 ended, -1 failed, 2 started), not a frame count, so there is no
          * remaining number to read -- completion is the pushed/answered 0. */
         case PROG_PLC:   return (prog_wire_t){ PROG_CMD_PLC, "step:5;", "ret", NULL, "0" };
+        /* PATH-LAPSE rides the timelapse opcode and answers the same step-4
+         * poll with a `ret` count. */
+        case PROG_PATHLAPSE: return (prog_wire_t){ PROG_CMD_LAPSE, "step:4;", "ret", NULL, NULL };
+        /* SUN is PUSH-driven like HDR: the head reports its reservation/shoot
+         * state on 277, and completion arrives as a pushed step (3/4). No poll. */
+        case PROG_SUN:   return (prog_wire_t){ PROG_CMD_SUN, "", "ret", NULL, "4" };
         default:         return (prog_wire_t){ 0, "", "", NULL, NULL };
     }
 }
@@ -564,6 +570,188 @@ int prog_start_plc(const plc_params_t *p, char *err, size_t errcap) {
     return 0;
 }
 
+/* ----------------------------------------------------------- path-lapse */
+
+/* Waypoints are captured live and held here between "add" calls, exactly like
+ * FREE PROGRAM's keyframes -- a path-lapse is a motion timelapse and the poses
+ * come off the head's own 517. */
+static pathlapse_wp_t g_wp[PATHLAPSE_MAX_WP];
+static int            g_nwp;
+
+void prog_pathlapse_clear(void) { g_nwp = 0; }
+int  prog_pathlapse_wp_count(void) { return g_nwp; }
+
+int prog_pathlapse_add_wp(long pic_count, char *err, size_t errcap) {
+    const plink_slot_t *s = plink_get(517);
+    pathlapse_wp_t *w;
+    if (g_nwp >= PATHLAPSE_MAX_WP)
+        return fail(err, errcap, "the head allows at most 8 waypoints");
+    if (!s) return fail(err, errcap, "the head has not reported its pose yet");
+    w = &g_wp[g_nwp];
+    w->pan  = plink_arg_num(s->args, "yaw", 0);
+    w->tilt = plink_arg_num(s->args, "pitch", 0);
+    w->roll = plink_arg_num(s->args, "roll", 0);
+    w->pic_count = pic_count;
+    g_nwp++;
+    return g_nwp;
+}
+
+int prog_pathlapse_wp_export(pathlapse_wp_t *out, int cap) {
+    int i, n = g_nwp < cap ? g_nwp : cap;
+    for (i = 0; i < n; i++) out[i] = g_wp[i];
+    return n;
+}
+
+int prog_check_pathlapse(const pathlapse_params_t *p, char *err, size_t errcap) {
+    int i;
+    if (!p) return fail(err, errcap, "no parameters");
+    if (p->n_wp < 2) return fail(err, errcap, "a path-lapse needs at least two waypoints");
+    if (p->n_wp > PATHLAPSE_MAX_WP) return fail(err, errcap, "at most 8 waypoints");
+    if (!(p->interval_s > 0) || p->interval_s > 3600)
+        return fail(err, errcap, "interval must be 0..3600 seconds");
+    /* The first waypoint is the start (no leg into it), so its count is unused;
+     * every later leg needs a real count. The app clamps a computed count to
+     * 9999, so a value above that is refused here too. */
+    for (i = 1; i < p->n_wp; i++) {
+        if (p->wp[i].pic_count != -1 && (p->wp[i].pic_count < 1 || p->wp[i].pic_count > 9999))
+            return fail(err, errcap, "each leg's frame count must be 1..9999, or unlimited");
+    }
+    return 0;
+}
+
+/* Build one path-lapse step-2 point frame into `buf` and advance the running
+ * totals. `time` is the CUMULATIVE seconds to REACH this point -- the leg into
+ * it (its own pic_count) is added BEFORE the time is stamped, so point 1 is
+ * time:0 and each later point carries the elapsed time to arrive there. The
+ * gimbal pose is radians (DynamicLapseLayout: the count is latched on the point
+ * the leg reaches, so it rides that point). */
+static void pathlapse_point(const pathlapse_params_t *p, int i, const char *iv,
+                            double *cum, long *total, int *unlimited,
+                            char *buf, size_t cap) {
+    char pan[24], tilt[24], roll[24], tm[24];
+    long legcount = (i == 0) ? 0 : p->wp[i].pic_count;
+    if (i > 0) {
+        if (legcount < 0) *unlimited = 1;          /* an ∞ leg makes the run ∞ */
+        else { *cum += legcount * p->interval_s; *total += legcount; }
+    }
+    fmt_num(pan,  sizeof pan,  p->wp[i].pan);
+    fmt_num(tilt, sizeof tilt, p->wp[i].tilt);
+    fmt_num(roll, sizeof roll, p->wp[i].roll);
+    fmt_num(tm,   sizeof tm,   *cum);
+    snprintf(buf, cap,
+        "step:2;point:%d;time:%s;gimbal:%s,%s,%s;para:%s,%ld;bulb:0;",
+        i + 1, tm, pan, tilt, roll, iv, legcount);
+}
+
+static int pathlapse_frames(const pathlapse_params_t *p, char *out, size_t cap) {
+    int i, n = 0, unlimited = 0;
+    char iv[24], tm[24], pt[192];
+    double cum = 0; long total = 0;
+    fmt_num(iv, sizeof iv, p->interval_s);
+    n += snprintf(out + n, cap - n, "1&%d&2&step:1;#", PROG_CMD_LAPSE);
+    for (i = 0; i < p->n_wp; i++) {
+        pathlapse_point(p, i, iv, &cum, &total, &unlimited, pt, sizeof pt);
+        n += snprintf(out + n, cap - n, "\n1&%d&2&%s#", PROG_CMD_LAPSE, pt);
+    }
+    /* SEND_END with the point count, total seconds, and total frames. */
+    fmt_num(tm, sizeof tm, cum);
+    n += snprintf(out + n, cap - n,
+        "\n1&%d&2&step:3;point:%d;time:%s;photoCnt:%ld;;preview:0;#",
+        PROG_CMD_LAPSE, p->n_wp, tm, unlimited ? -1 : total);
+    return n;
+}
+
+int prog_pathlapse_preview(const pathlapse_params_t *p, char *out, size_t outcap) {
+    if (!p) { if (outcap) out[0] = 0; return 0; }
+    return pathlapse_frames(p, out, outcap);
+}
+
+int prog_start_pathlapse(const pathlapse_params_t *p, char *err, size_t errcap) {
+    char frame[PLINK_ARGS_MAX], iv[24], tm[24], pt[192];
+    int i, unlimited = 0; double cum = 0; long total = 0;
+    if (prog_check_pathlapse(p, err, errcap) != 0) return -1;
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    if (g.kind != PROG_NONE) return fail(err, errcap, "a programme is already running");
+
+    fmt_num(iv, sizeof iv, p->interval_s);
+    plink_send(PROG_CMD_LAPSE, 2, "step:1;");
+    for (i = 0; i < p->n_wp; i++) {
+        pathlapse_point(p, i, iv, &cum, &total, &unlimited, pt, sizeof pt);
+        plink_send(PROG_CMD_LAPSE, 2, pt);
+    }
+    fmt_num(tm, sizeof tm, cum);
+    snprintf(frame, sizeof frame, "step:3;point:%d;time:%s;photoCnt:%ld;;preview:0;",
+             p->n_wp, tm, unlimited ? -1 : total);
+    plink_send(PROG_CMD_LAPSE, 2, frame);
+
+    fprintf(stderr, "[prog] path-lapse start: %d waypoints, %ld frames%s\n",
+            p->n_wp, total, unlimited ? " (unlimited leg)" : "");
+    begin(PROG_PATHLAPSE, (unlimited || total == 0) ? -1 : total, "path-lapse");
+    return 0;
+}
+
+/* ------------------------------------------------------------------ sun */
+
+/* The app formats the window times as yyyy,MM,dd,HH,mm,ss in local time. We do
+ * the same with gmtime-style fields off the passed-in unix seconds. `localtm`
+ * is filled by the caller's timezone-corrected broken-down time so the head
+ * gets local wall-clock, matching the phone. */
+static void sun_fmt_time(long unix_s, char *out, size_t cap) {
+    /* The server runs in the site's timezone (the astro tools already assume
+     * this), so plain localtime is the phone-equivalent wall clock. */
+    time_t t = (time_t)unix_s;
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    snprintf(out, cap, "%04d,%02d,%02d,%02d,%02d,%02d",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+}
+
+int prog_check_sun(const sun_params_t *p, long now_unix, char *err, size_t errcap) {
+    if (!p) return fail(err, errcap, "no parameters");
+    if (!(p->interval_s > 0) || p->interval_s > 3600)
+        return fail(err, errcap, "interval must be 0..3600 seconds");
+    if (p->end_unix < p->start_unix + 180)
+        return fail(err, errcap, "the window must be at least 3 minutes long");
+    /* The head clamps the start to now ±1h; a start well outside that is
+     * something it will reject, so catch it here where the message is useful. */
+    if (now_unix > 0 && (p->start_unix < now_unix - 3600 || p->start_unix > now_unix + 3600))
+        return fail(err, errcap, "the start must be within an hour of now (the head enforces this)");
+    return 0;
+}
+
+static void sun_start_frame(const sun_params_t *p, char *out, size_t cap) {
+    char st[32], en[32], iv[24];
+    sun_fmt_time(p->start_unix, st, sizeof st);
+    sun_fmt_time(p->end_unix, en, sizeof en);
+    fmt_num(iv, sizeof iv, p->interval_s);
+    snprintf(out, cap, "step:1;sun:%d;interval:%s;startTime:%s;endTime:%s;",
+             p->sunset ? 1 : 0, iv, st, en);
+}
+
+int prog_sun_preview(const sun_params_t *p, char *out, size_t outcap) {
+    char args[256];
+    if (!p) { if (outcap) out[0] = 0; return 0; }
+    sun_start_frame(p, args, sizeof args);
+    return snprintf(out, outcap, "1&%d&2&%s#", PROG_CMD_SUN, args);
+}
+
+int prog_start_sun(const sun_params_t *p, char *err, size_t errcap) {
+    char args[256];
+    /* now is not re-checked here (the route checks with the client's clock);
+     * pass 0 to skip the window-vs-now check at the wire. */
+    if (prog_check_sun(p, 0, err, errcap) != 0) return -1;
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    if (g.kind != PROG_NONE) return fail(err, errcap, "a programme is already running");
+    sun_start_frame(p, args, sizeof args);
+    fprintf(stderr, "[prog] sun start: %s\n", args);
+    if (plink_send(PROG_CMD_SUN, 2, args) != 0)
+        return fail(err, errcap, "could not send the start step");
+    begin(PROG_SUN, -1, args);
+    g.remaining = -1;
+    return 0;
+}
+
 /* ---------------------------------------------------------------- control */
 
 void prog_cancel(void) {
@@ -575,6 +763,8 @@ void prog_cancel(void) {
          * live -- the sentinel in `paused` tells them apart. */
         case PROG_FOCUS: plink_send(PROG_CMD_FOCUS, 2, g.paused == 2 ? "step:10;" : "step:6;"); break;
         case PROG_PLC:   plink_send(PROG_CMD_PLC,   2, "step:6;"); break;
+        case PROG_PATHLAPSE: plink_send(PROG_CMD_LAPSE, 2, "step:7;"); break;  /* same cancel as timelapse */
+        case PROG_SUN:   plink_send(PROG_CMD_SUN,   2, "step:2;"); break;
         default: break;
     }
     memset(&g, 0, sizeof g);
@@ -607,7 +797,7 @@ int prog_pano_interval(int seconds) {
 static void absorb_reply(void) {
     prog_wire_t w = wire_for(g.kind);
     const plink_slot_t *s = plink_get(w.cmd);
-    static unsigned long seen[PROG_PLC + 1];
+    static unsigned long seen[PROG_KIND_COUNT];
     double v;
     char step[8] = "";
     if (!s || s->count == seen[g.kind]) return;
@@ -693,7 +883,9 @@ int prog_status_json(char *out, int cap) {
                      : g.kind == PROG_PANO  ? "panorama"
                      : g.kind == PROG_HDR   ? "hdr"
                      : g.kind == PROG_FOCUS ? "focus"
-                     : g.kind == PROG_PLC   ? "program" : "none";
+                     : g.kind == PROG_PLC   ? "program"
+                     : g.kind == PROG_PATHLAPSE ? "pathlapse"
+                     : g.kind == PROG_SUN   ? "sun" : "none";
     n += snprintf(out + n, cap - n, "{\"kind\":\"%s\"", kind);
     if (g.kind == PROG_NONE) return n + snprintf(out + n, cap - n, "}");
 
@@ -702,7 +894,10 @@ int prog_status_json(char *out, int cap) {
         "\"paused\":%s,\"preview\":%s,\"stale\":%s",
         (plink_now_ms() - g.started_ms) / 1000.0,
         g.total, g.remaining,
-        g.total == -1 ? "true" : "false",
+        /* SUN is bounded by its window but its frame count is the head's to
+         * compute -- unknown here, NOT unlimited. Only a run we deliberately
+         * started open-ended (total -1, e.g. an ∞ timelapse) is "unlimited". */
+        (g.total == -1 && g.kind != PROG_SUN) ? "true" : "false",
         /* paused==2 is the focus-PREVIEW sentinel, not a real pause. */
         (g.paused == 1) ? "true" : "false",
         (g.paused == 2) ? "true" : "false",

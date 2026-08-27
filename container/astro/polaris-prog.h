@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: MIT
  *
  * polaris-prog — the capture programmes: timelapse (272), panorama (271),
- *                HDR (280), focus stacking (270), and the FREE PROGRAM
- *                keyframe timeline (283).
+ *                HDR (280), focus stacking (270), the FREE PROGRAM keyframe
+ *                timeline (283), motion PATH-LAPSE (272 + waypoints) and the
+ *                scheduled SUN lapse (277).
  *
  * WHY THE SERVER OWNS THESE
  * -------------------------
@@ -45,6 +46,18 @@
 #define PROG_CMD_LAPSE      272
 #define PROG_CMD_HDR        280
 #define PROG_CMD_PLC        283   /* FREE PROGRAM -- the keyframe timeline    */
+#define PROG_CMD_SUN        277   /* SUN -- scheduled sunrise/sunset lapse    */
+
+/* PATH-LAPSE is mode 5 but rides the SAME opcode as timelapse (272); its
+ * per-point step 2 carries a gimbal pose. So it is a lapse with waypoints, not
+ * a new command. */
+#define LAPSE_STEP_END_BACK  8    /* return-to-start toggle                   */
+
+/* SUN steps (277). start builds the whole string; cancel/end/complete are
+ * bare steps (POC:626-642). */
+#define SUN_STEP_START       1
+#define SUN_STEP_CANCEL      2
+#define SUN_STEP_END         3
 
 /* 283 SP_PLC steps (POC:745-765). Uploads a keyframe timeline across three
  * independent tracks (photo events, camera params, motion pose), then replays
@@ -90,7 +103,12 @@ typedef enum {
     PROG_PANO,
     PROG_HDR,
     PROG_FOCUS,
-    PROG_PLC
+    PROG_PLC,
+    PROG_PATHLAPSE,
+    PROG_SUN,
+    PROG_KIND_COUNT   /* sentinel: size per-kind arrays with this, never a
+                       * hardcoded last-kind + 1. A stale bound here overran a
+                       * global once (the seen[] buffer). Keep it LAST. */
 } prog_kind_t;
 
 typedef struct {
@@ -132,6 +150,28 @@ typedef struct {
     int shots;       /* 2..200                                                 */
     int isp;         /* stitch all-in-focus in the head                        */
 } focus_params_t;
+
+/* One PATH-LAPSE waypoint: a head pose the move passes through, with the frames
+ * to shoot ON THE LEG that reaches it. Poses are captured live (517, radians),
+ * like FREE PROGRAM. */
+typedef struct {
+    double pan, tilt, roll;  /* RADIANS                                        */
+    long   pic_count;        /* frames on the leg into this point (-1 = ∞)     */
+} pathlapse_wp_t;
+#define PATHLAPSE_MAX_WP 8   /* the app caps at 8                              */
+
+typedef struct {
+    pathlapse_wp_t wp[PATHLAPSE_MAX_WP];
+    int    n_wp;
+    double interval_s;       /* seconds between frames                         */
+} pathlapse_params_t;
+
+typedef struct {
+    int    sunset;           /* 0 = sunrise, 1 = sunset                        */
+    double interval_s;       /* seconds between frames                         */
+    long   start_unix;       /* window start (clamped to now ±1h by the head)  */
+    long   end_unix;         /* window end (>= start + 3 min)                  */
+} sun_params_t;
 
 /* One motion keyframe of a FREE PROGRAM: a head pose held at a moment in the
  * timeline. Poses are captured live from the head (517, radians), so what you
@@ -189,6 +229,26 @@ int prog_plc_key_count_export(plc_key_t *out, int cap);
 int prog_plc_preview(const plc_params_t *p, char *out, size_t outcap);
 int prog_check_plc(const plc_params_t *p, char *err, size_t errcap);
 int prog_start_plc(const plc_params_t *p, char *err, size_t errcap);
+
+/* PATH-LAPSE: like FREE PROGRAM, the waypoints are captured live and held
+ * server-side; the frames-per-leg come from the automatic rate the app derives
+ * (shots latched on the 2nd point from the great-circle angle), or an explicit
+ * per-leg count. Here the caller supplies per-leg counts directly. */
+int prog_pathlapse_add_wp(long pic_count, char *err, size_t errcap);
+void prog_pathlapse_clear(void);
+int prog_pathlapse_wp_count(void);
+int prog_pathlapse_wp_export(pathlapse_wp_t *out, int cap);
+int prog_check_pathlapse(const pathlapse_params_t *p, char *err, size_t errcap);
+int prog_pathlapse_preview(const pathlapse_params_t *p, char *out, size_t outcap);
+int prog_start_pathlapse(const pathlapse_params_t *p, char *err, size_t errcap);
+
+/* SUN: a scheduled sunrise/sunset timelapse. The head does the solar GOTO and
+ * parks (track:0). Times are unix seconds; the module formats them as the app's
+ * yyyy,MM,dd,HH,mm,ss. `now_unix` is passed in because the C library clock is
+ * off-limits in some builds and the caller already knows the time. */
+int prog_check_sun(const sun_params_t *p, long now_unix, char *err, size_t errcap);
+int prog_sun_preview(const sun_params_t *p, char *out, size_t outcap);
+int prog_start_sun(const sun_params_t *p, char *err, size_t errcap);
 
 /* Render the exact frame a pano start WOULD send, without sending it. This
  * exists because the pano start payload is inference — see the header comment.

@@ -2427,6 +2427,111 @@ static void handle(int fd) {
         respond_json(fd, out); return;
     }
 
+    /* ---------------------------------------------------- path-lapse (272) */
+
+    /* A motion timelapse: fly the head, capture a waypoint with the frames to
+     * shoot on the leg INTO it, repeat (2..8 points), then run. Same server-held
+     * capture-then-play shape as the free program; same 272 opcode as timelapse
+     * so it reports on the identical step-4 poll. Moves motors -> confirm gated. */
+    if (!strcmp(path, "/api/prog/pathlapse/wp")) {
+        char v[16]="", err[160]="", out[256]; long pc;
+        if (!param(qs,"count",v,sizeof v) && body) param(body,"count",v,sizeof v);
+        /* -1 (or "inf") = shoot for the whole leg; otherwise a positive count. */
+        pc = (v[0]=='\0') ? -1 : (!strcmp(v,"inf") ? -1 : atol(v));
+        { int n = prog_pathlapse_add_wp(pc, err, sizeof err);
+          if (n < 0) { char m[256]; json_escape(err, out, sizeof out);
+              snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+              respond(fd, 409, "application/json", m, strlen(m)); return; }
+          snprintf(out, sizeof out, "{\"ok\":true,\"waypoints\":%d}", n);
+          respond_json(fd, out); return; }
+    }
+    if (!strcmp(path, "/api/prog/pathlapse/clear")) {
+        prog_pathlapse_clear();
+        respond_json(fd, "{\"ok\":true,\"waypoints\":0}"); return;
+    }
+    if (!strcmp(path, "/api/prog/pathlapse")) {
+        char iv[24]="", conf[8]="";
+        pathlapse_params_t pp; char err[160]="", out[2048]; int n;
+        memset(&pp, 0, sizeof pp);
+        if (!param(qs,"interval",iv,sizeof iv) && body) param(body,"interval",iv,sizeof iv);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        pp.interval_s = atof(iv);
+        pp.n_wp = prog_pathlapse_wp_export(pp.wp, PATHLAPSE_MAX_WP);
+        if (!(conf[0]=='1'||!strcmp(conf,"true"))) {
+            char frame[2048], fesc[3072], m[3300];
+            if (prog_check_pathlapse(&pp, err, sizeof err) != 0) {
+                json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"valid\":false,\"error\":\"%s\"}", out);
+                respond(fd, 200, "application/json", m, strlen(m)); return;
+            }
+            prog_pathlapse_preview(&pp, frame, sizeof frame);
+            json_escape(frame, fesc, sizeof fesc);
+            snprintf(m, sizeof m, "{\"ok\":true,\"valid\":true,\"preview\":true,\"waypoints\":%d,\"frame\":\"%s\"}", pp.n_wp, fesc);
+            respond(fd, 200, "application/json", m, strlen(m)); return;
+        }
+        if (prog_start_pathlapse(&pp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
+        respond_json(fd, out); return;
+    }
+
+    /* ---------------------------------------------------------- sun (277) */
+
+    /* A scheduled sunrise/sunset lapse: the head does the solar GOTO and parks.
+     * The window is clamped to now ±1h by the head, so the client's clock is the
+     * authority for the pre-flight range check (the device clock is not UTC).
+     * The UI passes `now` (its own unix time). GET/POST-without-confirm previews
+     * the exact 277 frame; confirm=1 sends it. Moves motors -> confirm gated. */
+    if (!strcmp(path, "/api/prog/sun")) {
+        char set[8]="", iv[24]="", st[24]="", en[24]="", nw[24]="", conf[8]="";
+        sun_params_t sp; char err[160]="", out[512]; long now = 0; int n;
+        memset(&sp, 0, sizeof sp);
+        if (!param(qs,"sunset",set,sizeof set) && body) param(body,"sunset",set,sizeof set);
+        if (!param(qs,"interval",iv,sizeof iv) && body) param(body,"interval",iv,sizeof iv);
+        if (!param(qs,"start",st,sizeof st) && body) param(body,"start",st,sizeof st);
+        if (!param(qs,"end",en,sizeof en) && body) param(body,"end",en,sizeof en);
+        if (!param(qs,"now",nw,sizeof nw) && body) param(body,"now",nw,sizeof nw);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        sp.sunset = (set[0]=='1'||!strcmp(set,"true")||!strcmp(set,"sunset")) ? 1 : 0;
+        sp.interval_s = atof(iv);
+        sp.start_unix = atol(st);
+        sp.end_unix   = atol(en);
+        now = nw[0] ? atol(nw) : 0;
+        if (!(conf[0]=='1'||!strcmp(conf,"true"))) {
+            char frame[512], fesc[1024], m[1400];
+            if (prog_check_sun(&sp, now, err, sizeof err) != 0) {
+                json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"valid\":false,\"error\":\"%s\"}", out);
+                respond(fd, 200, "application/json", m, strlen(m)); return;
+            }
+            prog_sun_preview(&sp, frame, sizeof frame);
+            json_escape(frame, fesc, sizeof fesc);
+            snprintf(m, sizeof m, "{\"ok\":true,\"valid\":true,\"preview\":true,\"frame\":\"%s\"}", fesc);
+            respond(fd, 200, "application/json", m, strlen(m)); return;
+        }
+        /* Range-check with the CLIENT clock before committing (start_sun skips
+         * the now-check because the device clock cannot be trusted for it). */
+        if (prog_check_sun(&sp, now, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        if (prog_start_sun(&sp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
+        respond_json(fd, out); return;
+    }
+
     /* What the UI is allowed to send, so it can grey out what it cannot do
      * instead of discovering it with a 403 mid-gesture. */
     if (!strcmp(path, "/api/link/opcodes")) {

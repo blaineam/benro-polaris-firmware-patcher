@@ -145,10 +145,12 @@ class Mount:
                 if self.prog["total"] >= 0:
                     self.prog["remaining"] = max(0, self.prog["total"] - shot)
                     if self.prog["remaining"] == 0:
-                        # HDR announces completion with a pushed step:3; others
-                        # just let their poll read 0.
-                        if self.prog.get("push"):
-                            self.push_q.append("280@step:3;ret:0;")
+                        # Push-driven programmes (HDR step:3, SUN step:4)
+                        # announce completion with a pushed frame; polled ones
+                        # (timelapse/path-lapse/pano/focus) just let their poll
+                        # read 0.
+                        if self.prog.get("done_push"):
+                            self.push_q.append(self.prog["done_push"])
                         self.prog = None      # finished
                 # unlimited: remaining stays a sentinel that never hits 0
 
@@ -405,7 +407,8 @@ class Handler(socketserver.BaseRequestHandler):
                 # HDR is always 3 frames; the head pushes step:5 remaining then step:3.
                 with mount.lock:
                     mount.prog = {"cmd": "280", "per_s": 1.5, "total": 3,
-                                  "remaining": 3, "t0": time.time(), "push": True}
+                                  "remaining": 3, "t0": time.time(),
+                                  "done_push": "280@step:3;ret:0;"}
                 self.send("280@step:5;ret:3;")
             elif step == "4":
                 with mount.lock:
@@ -453,18 +456,39 @@ class Handler(socketserver.BaseRequestHandler):
                 az, alt = mount.reported()
             self.send(f"517@yaw:{az*DEG:.6f};pitch:{-alt*DEG:.6f};roll:0.000000;")
         elif cmd == "272":
+            # Timelapse AND path-lapse ride this opcode. A plain timelapse sends
+            # one point; a path-lapse sends 2..8, each with a gimbal pose and a
+            # per-leg count. Either way the AUTHORITATIVE frame total is photoCnt
+            # in SEND_END (step 3) -- summing the legs -- so the countdown keys
+            # off that, not off any single point's count.
             step = args.get("step")
-            if step == "2":
-                # step 2 carries "para:<interval>,<count>"
+            if step == "1":
+                with mount.lock:
+                    mount.prog = {"cmd": "272", "per_s": 1.0, "total": -1,
+                                  "remaining": -1, "t0": time.time()}
+            elif step == "2":
                 para = args.get("para", "0,0").split(",")
                 try:
-                    interval = float(para[0]); count = int(para[1])
+                    interval = float(para[0])
                 except (ValueError, IndexError):
-                    interval, count = 1.0, -1
+                    interval = 1.0
                 with mount.lock:
-                    mount.prog = {"cmd": "272", "per_s": max(0.2, interval),
-                                  "total": count, "remaining": count if count >= 0 else -1,
-                                  "t0": time.time()}
+                    if not (mount.prog and mount.prog["cmd"] == "272"):
+                        mount.prog = {"cmd": "272", "total": -1,
+                                      "remaining": -1, "t0": time.time()}
+                    mount.prog["per_s"] = max(0.2, interval)
+            elif step == "3":
+                # SEND_END: photoCnt is the definitive total (-1 = unlimited).
+                try:
+                    total = int(args.get("photoCnt", "-1"))
+                except ValueError:
+                    total = -1
+                with mount.lock:
+                    if not (mount.prog and mount.prog["cmd"] == "272"):
+                        mount.prog = {"cmd": "272", "per_s": 1.0, "t0": time.time()}
+                    mount.prog["total"] = total
+                    mount.prog["remaining"] = total if total >= 0 else -1
+                    mount.prog["t0"] = time.time()
             elif step == "4":
                 # remaining-count poll: reply, and the app re-asks
                 r = -1
@@ -476,6 +500,28 @@ class Handler(socketserver.BaseRequestHandler):
                 with mount.lock:
                     mount.prog = None
                 self.send("272@ret:0;")
+        elif cmd == "277":
+            # SUN: a scheduled solar lapse. Push-driven like HDR -- the head
+            # reserves the window, does the solar GOTO, then shoots and pushes
+            # progress, ending with step:4. The sim skips the wait and runs a
+            # brisk demo countdown so the whole flow is exercisable.
+            step = args.get("step")
+            if step == "1":
+                try:
+                    interval = float(args.get("interval", "10"))
+                except ValueError:
+                    interval = 10.0
+                with mount.lock:
+                    mount.mode = 8
+                    mount.prog = {"cmd": "277", "per_s": max(0.2, interval / 4.0),
+                                  "total": 4, "remaining": 4, "t0": time.time(),
+                                  "done_push": "277@step:4;ret:0;"}
+                # Acknowledge the reservation and report the first remaining count.
+                self.send("277@step:5;ret:4;")
+            elif step in ("2", "3"):    # cancel / end
+                with mount.lock:
+                    mount.prog = None
+                self.send(f"277@step:{step};ret:0;")
         elif cmd == "271":
             step = args.get("step")
             if step == "2":

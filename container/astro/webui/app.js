@@ -642,7 +642,8 @@ function paintProg(d) {
 
   var titles = { panorama: 'Panorama running', timelapse: 'Timelapse running',
                  hdr: 'HDR bracket', focus: d.preview ? 'Focus preview' : 'Focus stack running',
-                 program: 'Program running' };
+                 program: 'Program running', pathlapse: 'Path-lapse running',
+                 sun: 'Sun lapse running' };
   $('#progrun-title').textContent = titles[d.kind] || 'Running';
 
   var fill = $('#progfill');
@@ -656,6 +657,10 @@ function paintProg(d) {
     line = (typeof d.taken === 'number' ? d.taken : '—') + ' frames · ∞ · ' + fmtDuration(d.elapsed_s) + ' elapsed';
   } else if (known) {
     line = (d.total - d.remaining) + ' of ' + d.total + ' frames · ' + fmtDuration(d.elapsed_s) + ' elapsed';
+  } else if (typeof d.remaining === 'number' && d.remaining >= 0) {
+    /* Total unknown (the head owns the count, e.g. a Sun lapse), but it is
+       reporting how many frames are left. */
+    line = d.remaining + ' frames remaining · ' + fmtDuration(d.elapsed_s) + ' elapsed';
   } else {
     line = fmtDuration(d.elapsed_s) + ' elapsed · waiting on the head';
   }
@@ -1032,6 +1037,179 @@ function wirePlc() {
   plcRenderKeys();
 }
 
+/* ─────────────────────────── path-lapse ────────────────────────────────── */
+
+/* A moving timelapse. Like the free program, the waypoint POSES live server-
+   side (captured from the head's live attitude); the client keeps a display
+   copy plus each leg's frame count so it can show the derived totals. */
+var plWps = [];    /* [{pan, tilt, roll, count}] mirrored from the server */
+var plPending = 0; /* waypoints requested (synchronous), to number legs safely */
+
+function plLegInf() { return $('#pl-legframes').dataset.inf === '1'; }
+
+function plRender() {
+  var ol = $('#pl-wps');
+  if (!plWps.length) {
+    ol.innerHTML = '<li class="dim">none yet — jog the head, then capture a waypoint</li>';
+  } else ol.innerHTML = plWps.map(function (w, i) {
+    var lead = i === 0 ? 'start' : (w.count < 0 ? '∞ frames' : w.count + ' frames');
+    return '<li>#' + (i + 1) + ' · pan ' + (w.pan * 180 / Math.PI).toFixed(1) +
+           '° tilt ' + (w.tilt * 180 / Math.PI).toFixed(1) + '° · ' + lead + '</li>';
+  }).join('');
+
+  /* Derived: sum the legs (skip the start; an ∞ leg makes the whole run ∞). */
+  var iv = parseFloat($('#pl-interval').value) || 0, total = 0, inf = false, i;
+  for (i = 1; i < plWps.length; i++) {
+    if (plWps[i].count < 0) inf = true; else total += plWps[i].count;
+  }
+  $('#pl-frames').textContent = plWps.length < 2 ? '—' : (inf ? '∞' : total);
+  $('#pl-time').textContent = plWps.length < 2 ? '—' : (inf ? '∞' : fmtDuration(total * iv));
+
+  var start = $('#pl-start');
+  start.disabled = plWps.length < 2;
+  start.textContent = plWps.length < 2 ? 'Add at least two waypoints' : 'Preview path-lapse';
+  if (plWps.length < 2) { start.dataset.armed = '0'; start.classList.remove('armed'); $('#pl-preview').hidden = true; }
+}
+
+function wirePathlapse() {
+  $('#pl-leg-inf').addEventListener('click', function () {
+    var f = $('#pl-legframes'), on = f.dataset.inf === '1';
+    f.dataset.inf = on ? '0' : '1';
+    f.disabled = !on;                     /* disable the number field while ∞ */
+    this.classList.toggle('armed', !on);
+  });
+
+  $('#pl-interval').addEventListener('input', plRender);
+
+  $('#pl-capture').addEventListener('click', function () {
+    /* The first waypoint is the start; its count is unused. Later ones carry the
+       frames on the leg reaching them. The server reads the head's LIVE pose.
+       `plPending` counts requested waypoints SYNCHRONOUSLY so two quick taps
+       (faster than a round-trip) still number their legs correctly — keying off
+       plWps.length would let the second tap think it is the start too. */
+    var first = plPending === 0;
+    var count = first ? 0 : (plLegInf() ? -1 : (parseInt($('#pl-legframes').value, 10) || 1));
+    plPending++;
+    post('/api/prog/pathlapse/wp', { count: count }).then(function (r) {
+      if (r && r.ok === false) { plPending--; setHint('<b>Waypoint:</b> ' + (r.error || '')); return; }
+      var pose = S.ops['517'] ? kv(S.ops['517'].args) : {};
+      plWps.push({ pan: parseFloat(pose.yaw || 0), tilt: parseFloat(pose.pitch || 0),
+                   roll: parseFloat(pose.roll || 0), count: count });
+      plRender();
+    });
+  });
+
+  $('#pl-clear').addEventListener('click', function () {
+    post('/api/prog/pathlapse/clear', {}).then(function () { plWps = []; plPending = 0; plRender(); });
+  });
+
+  var start = $('#pl-start');
+  start.addEventListener('click', function () {
+    var params = { interval: parseFloat($('#pl-interval').value) || 4 };
+    if (start.dataset.armed !== '1') {
+      post('/api/prog/pathlapse', params).then(function (r) {
+        if (r && r.valid === false) { setHint('<b>Path-lapse:</b> ' + (r.error || '')); return; }
+        setHint('');
+        $('#pl-frame').textContent = r.frame;
+        $('#pl-preview').hidden = false;
+        start.dataset.armed = '1'; start.classList.add('armed');
+        start.textContent = 'Run it — ' + r.waypoints + ' waypoints';
+      });
+      return;
+    }
+    post('/api/prog/pathlapse', Object.assign(params, { confirm: 1 })).then(function (r) {
+      start.dataset.armed = '0'; start.classList.remove('armed');
+      start.textContent = 'Preview path-lapse';
+      $('#pl-preview').hidden = true;
+      if (r && r.ok === false) setHint('<b>Path-lapse refused.</b> ' + (r.error || ''));
+      progRefresh();
+    });
+  });
+
+  plRender();
+}
+
+/* ────────────────────────────── sun ────────────────────────────────────── */
+
+/* A scheduled solar lapse. The window is validated with the CLIENT clock (the
+   device clock is not UTC), so `now` rides along on every request. */
+var sunEvent = 0;   /* 0 sunrise, 1 sunset */
+
+function sunLocalValue(d) {
+  /* datetime-local wants "YYYY-MM-DDTHH:MM:SS" in LOCAL time, no zone. */
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' +
+         p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+function sunUnix(sel) {
+  var v = $(sel).value;
+  if (!v) return NaN;
+  return Math.floor(new Date(v).getTime() / 1000);   /* parsed as LOCAL time */
+}
+
+function sunRender() {
+  var s = sunUnix('#sun-start'), e = sunUnix('#sun-end');
+  var iv = parseFloat($('#sun-interval').value) || 0;
+  if (isNaN(s) || isNaN(e) || e <= s) {
+    $('#sun-window').textContent = '—'; $('#sun-frames').textContent = '—';
+  } else {
+    $('#sun-window').textContent = fmtDuration(e - s);
+    $('#sun-frames').textContent = iv > 0 ? '≈ ' + Math.floor((e - s) / iv) : '—';
+  }
+  var b = $('#sun-start-btn');   /* editing invalidates a shown preview */
+  if (b.dataset.armed === '1') { b.dataset.armed = '0'; b.classList.remove('armed'); b.textContent = 'Preview sun lapse'; $('#sun-preview').hidden = true; }
+}
+
+function wireSun() {
+  $$('#tab-programs [data-sun]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('#tab-programs [data-sun]').forEach(function (x) { x.classList.toggle('on', x === b); });
+      sunEvent = parseInt(b.dataset.sun, 10);
+      sunRender();
+    });
+  });
+
+  $('#sun-fill').addEventListener('click', function () {
+    var now = new Date(), end = new Date(now.getTime() + 30 * 60 * 1000);
+    $('#sun-start').value = sunLocalValue(now);
+    $('#sun-end').value = sunLocalValue(end);
+    sunRender();
+  });
+
+  ['#sun-interval', '#sun-start', '#sun-end'].forEach(function (sel) {
+    $(sel).addEventListener('input', sunRender);
+  });
+
+  var start = $('#sun-start-btn');
+  start.addEventListener('click', function () {
+    var s = sunUnix('#sun-start'), e = sunUnix('#sun-end');
+    if (isNaN(s) || isNaN(e)) { setHint('<b>Sun:</b> set a start and end time (try “Now → +30 min”).'); return; }
+    var params = { sunset: sunEvent, interval: parseFloat($('#sun-interval').value) || 10,
+                   start: s, end: e, now: Math.floor(Date.now() / 1000) };
+    if (start.dataset.armed !== '1') {
+      post('/api/prog/sun', params).then(function (r) {
+        if (r && r.valid === false) { setHint('<b>Sun:</b> ' + (r.error || '')); return; }
+        setHint('');
+        $('#sun-frame').textContent = r.frame;
+        $('#sun-preview').hidden = false;
+        start.dataset.armed = '1'; start.classList.add('armed');
+        start.textContent = 'Schedule it';
+      });
+      return;
+    }
+    post('/api/prog/sun', Object.assign(params, { confirm: 1 })).then(function (r) {
+      start.dataset.armed = '0'; start.classList.remove('armed');
+      start.textContent = 'Preview sun lapse';
+      $('#sun-preview').hidden = true;
+      if (r && r.ok === false) setHint('<b>Sun refused.</b> ' + (r.error || ''));
+      progRefresh();
+    });
+  });
+
+  sunRender();
+}
+
 /* ──────────────────────────────── tabs ─────────────────────────────────── */
 
 function wireTabs() {
@@ -1057,4 +1235,6 @@ wireSettings();
 wirePrograms();
 wireAstro();
 wirePlc();
+wirePathlapse();
+wireSun();
 poll();

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <signal.h>
@@ -386,6 +387,110 @@ int main(void) {
         pp.n_keys = 2; pp.keys[1].t_s = 0;   /* not increasing */
         ok(prog_check_plc(&pp, err2, sizeof err2) != 0 && strstr(err2, "increase"),
            "non-increasing keyframe times are refused");
+    }
+
+    /* ---- PATH-LAPSE: fly to a pose, capture it as a waypoint, run ---- */
+    reset();
+    {
+        pathlapse_params_t pp; char err2[160], prev[2048];
+        prog_pathlapse_clear();
+        pump(120);   /* let a 517 pose land */
+        ok(prog_pathlapse_wp_count() == 0, "waypoints start empty");
+        ok(prog_pathlapse_add_wp(0,   err2, sizeof err2) == 1, "first waypoint is the start (no leg into it)");
+        ok(prog_pathlapse_add_wp(100, err2, sizeof err2) == 2, "second waypoint: 100 frames on the leg into it");
+        ok(prog_pathlapse_wp_count() == 2, "two waypoints held before the run");
+
+        memset(&pp, 0, sizeof pp);
+        pp.interval_s = 4;
+        pp.n_wp = prog_pathlapse_wp_export(pp.wp, PATHLAPSE_MAX_WP);
+        ok(pp.n_wp == 2, "the waypoints export back out");
+        ok(pp.wp[0].pan == 0.5 && pp.wp[0].tilt == -0.2,
+           "the captured pose is the head's own 517 (radians, verbatim)");
+        ok(pp.wp[1].pic_count == 100, "the second leg's frame count is stored");
+
+        prog_pathlapse_preview(&pp, prev, sizeof prev);
+        ok(strstr(prev, "1&272&2&step:1;") != NULL, "the timeline opens with the timelapse START");
+        ok(strstr(prev, "step:2;point:1;time:0;gimbal:0.5,-0.2,0;para:4,0;") != NULL,
+           "point 1 is the start: time 0, its pose, no leg (count 0)");
+        ok(strstr(prev, "step:2;point:2;time:400;gimbal:0.5,-0.2,0;para:4,100;") != NULL,
+           "point 2 carries its 100 frames and the elapsed time 100*4=400 to reach it");
+        ok(strstr(prev, "step:3;point:2;time:400;photoCnt:100;") != NULL,
+           "SEND_END has the point count, total seconds and total frames");
+
+        ok(prog_start_pathlapse(&pp, err2, sizeof err2) == 0, "path-lapse starts");
+        pump(120);
+        ok(saw("1&272&2&step:1;"), "START reaches the head");
+        ok(saw("1&272&2&step:2;point:2;time:400;gimbal:0.5,-0.2,0;para:4,100;"),
+           "the waypoint with its gimbal pose is uploaded");
+        ok(saw("1&272&2&step:3;"), "SEND_END is sent");
+        {
+            char st[512]; prog_status_json(st, sizeof st);
+            ok(strstr(st, "\"kind\":\"pathlapse\"") != NULL, "status reports the path-lapse");
+        }
+        reset(); pump(1500);
+        ok(saw("1&272&2&step:4;"), "path-lapse rides the timelapse remaining-count poll (step 4)");
+        prog_cancel(); pump(60);
+        ok(saw("1&272&2&step:7;"), "cancel sends the timelapse CANCEL step");
+    }
+
+    /* ---- path-lapse validation ---- */
+    {
+        pathlapse_params_t pp; char err2[160];
+        memset(&pp, 0, sizeof pp);
+        pp.interval_s = 4; pp.n_wp = 1;
+        ok(prog_check_pathlapse(&pp, err2, sizeof err2) != 0 && strstr(err2, "two waypoints"),
+           "a single waypoint is refused");
+        pp.n_wp = 2; pp.wp[1].pic_count = 20000;
+        ok(prog_check_pathlapse(&pp, err2, sizeof err2) != 0 && strstr(err2, "1..9999"),
+           "an out-of-range leg count is refused");
+        pp.wp[1].pic_count = 100; pp.interval_s = 0;
+        ok(prog_check_pathlapse(&pp, err2, sizeof err2) != 0 && strstr(err2, "interval"),
+           "a zero interval is refused");
+    }
+
+    /* ---- SUN: a scheduled solar lapse (push-driven, like HDR) ---- */
+    reset();
+    {
+        sun_params_t sp; char err2[160], prev[512], expect[128];
+        long now = 1700000000L;              /* a fixed instant, TZ-independent */
+        struct tm tmv; time_t ts;
+        memset(&sp, 0, sizeof sp);
+        sp.sunset = 1; sp.interval_s = 10;
+        sp.start_unix = now; sp.end_unix = now + 600;
+
+        /* Build the expected wall-clock string the SAME way the module does, so
+         * the assertion holds whatever timezone the test machine is in. */
+        ts = (time_t)sp.start_unix; localtime_r(&ts, &tmv);
+        snprintf(expect, sizeof expect, "startTime:%04d,%02d,%02d,%02d,%02d,%02d;",
+                 tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday,
+                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+
+        prog_sun_preview(&sp, prev, sizeof prev);
+        ok(strstr(prev, "1&277&2&step:1;") != NULL, "SUN previews the 277 start frame");
+        ok(strstr(prev, "sun:1;") != NULL, "sunset is sun:1");
+        ok(strstr(prev, "interval:10;") != NULL, "the interval is carried");
+        ok(strstr(prev, expect) != NULL, "the start time is formatted yyyy,MM,dd,HH,mm,ss (local)");
+
+        ok(prog_check_sun(&sp, now, err2, sizeof err2) == 0, "a valid window passes");
+        sp.end_unix = now + 60;
+        ok(prog_check_sun(&sp, now, err2, sizeof err2) != 0 && strstr(err2, "3 minutes"),
+           "a window under 3 minutes is refused");
+        sp.start_unix = now + 7200; sp.end_unix = now + 7200 + 600;   /* > 1h out */
+        ok(prog_check_sun(&sp, now, err2, sizeof err2) != 0 && strstr(err2, "hour"),
+           "a start more than an hour from now is refused");
+
+        sp.start_unix = now; sp.end_unix = now + 600;
+        ok(prog_start_sun(&sp, err2, sizeof err2) == 0, "SUN starts");
+        pump(120);
+        ok(saw("1&277&2&step:1;sun:1;interval:10;"), "the start frame reaches the head");
+        {
+            char st[512]; prog_status_json(st, sizeof st);
+            ok(strstr(st, "\"kind\":\"sun\"") != NULL, "status reports the sun lapse");
+        }
+        reset(); pump(600);
+        ok(!saw("1&277&2&step:"), "SUN is not polled (the head pushes its own state)");
+        prog_cancel(); pump(60);
+        ok(saw("1&277&2&step:2;"), "cancel sends the SUN cancel step");
     }
 
     /* ---- a lost link ends the run rather than reporting phantom progress ---- */

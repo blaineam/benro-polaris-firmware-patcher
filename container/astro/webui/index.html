@@ -122,6 +122,8 @@
         <button class="seg" data-prog="hdr">HDR</button>
         <button class="seg" data-prog="focus">Focus stack</button>
         <button class="seg" data-prog="plc">Program</button>
+        <button class="seg" data-prog="pathlapse">Path-lapse</button>
+        <button class="seg" data-prog="sun">Sun</button>
       </div>
 
       <!-- Timelapse -->
@@ -324,6 +326,88 @@
           <code id="plc-frame" class="framebox"></code>
         </div>
         <button id="plc-start" class="startbtn" type="button" disabled>Add at least two keyframes</button>
+      </div>
+
+      <!-- PATH-LAPSE: a moving timelapse through captured waypoints -->
+      <div class="card progpanel" data-prog="pathlapse" hidden>
+        <p class="tiny dim">
+          A moving timelapse. Fly the head to a framing with the Control jog and
+          capture it as a waypoint; set how many frames to shoot on the way to
+          the next one, fly there, capture again (2–8 waypoints). The head glides
+          the path and fires as it goes — and, being head-side, it keeps running
+          whether or not this page stays open.
+        </p>
+        <div class="field">
+          <label>Waypoints</label>
+          <ol id="pl-wps" class="keylist"><li class="dim">none yet — jog the head, then capture a waypoint</li></ol>
+          <div class="markrow">
+            <button id="pl-capture" class="ghost" type="button">Capture waypoint</button>
+            <button id="pl-clear" class="ghost" type="button">Clear all</button>
+          </div>
+          <p class="tiny dim">The first waypoint is just the start; each later one carries the frames shot on the leg into it.</p>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="pl-interval">Interval between frames</label>
+            <div class="fieldrow"><input id="pl-interval" type="number" min="0.5" max="3600" step="0.5" value="4"><span class="unit">s</span></div>
+          </div>
+          <div class="field">
+            <label for="pl-legframes">Frames to reach the next waypoint</label>
+            <div class="fieldrow"><input id="pl-legframes" type="number" min="1" max="9999" step="1" value="50"><button id="pl-leg-inf" class="ghost sm" type="button">∞</button></div>
+          </div>
+        </div>
+        <dl class="kv derived">
+          <dt>Total frames</dt><dd id="pl-frames">—</dd>
+          <dt>Shooting time</dt><dd id="pl-time">—</dd>
+        </dl>
+        <div id="pl-preview" class="preview" hidden>
+          <p class="tiny dim">The waypoint timeline that will be uploaded to the head:</p>
+          <code id="pl-frame" class="framebox"></code>
+        </div>
+        <button id="pl-start" class="startbtn" type="button" disabled>Add at least two waypoints</button>
+      </div>
+
+      <!-- SUN: a scheduled sunrise/sunset lapse -->
+      <div class="card progpanel" data-prog="sun" hidden>
+        <p class="tiny dim">
+          The head points at the rising or setting sun and shoots a timelapse
+          across a time window, doing the solar GOTO itself and parking when the
+          window ends. The window has to be within an hour of now and at least
+          three minutes long — the head enforces both.
+        </p>
+        <div class="field">
+          <label>Event</label>
+          <div class="segbar sub" role="tablist">
+            <button class="seg2 on" data-sun="0" type="button">Sunrise</button>
+            <button class="seg2" data-sun="1" type="button">Sunset</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="sun-interval">Interval between frames</label>
+          <div class="fieldrow"><input id="sun-interval" type="number" min="1" max="3600" step="1" value="10"><span class="unit">s</span></div>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="sun-start">Start</label>
+            <input id="sun-start" type="datetime-local" step="1">
+          </div>
+          <div class="field">
+            <label for="sun-end">End</label>
+            <input id="sun-end" type="datetime-local" step="1">
+          </div>
+        </div>
+        <div class="markrow">
+          <button id="sun-fill" class="ghost sm" type="button">Now → +30 min</button>
+        </div>
+        <dl class="kv derived">
+          <dt>Window</dt><dd id="sun-window">—</dd>
+          <dt>Frames</dt><dd id="sun-frames">—</dd>
+        </dl>
+        <div id="sun-preview" class="preview" hidden>
+          <p class="tiny dim">The exact command that will be sent to the head:</p>
+          <code id="sun-frame" class="framebox"></code>
+        </div>
+        <button id="sun-start-btn" class="startbtn" type="button">Preview sun lapse</button>
       </div>
     </div>
   </section>

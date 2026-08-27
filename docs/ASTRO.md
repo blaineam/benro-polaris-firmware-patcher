@@ -265,6 +265,37 @@ maths. Motion interpolates linearly between keyframes or holds (step) at each;
 an optional photo track shoots along the way. The exact timeline is previewed
 before it is uploaded.
 
+### PATH-LAPSE and SUN
+
+**PATH-LAPSE** is a moving timelapse, and it is not a new command — it rides the
+**same 272 opcode** as the static timelapse. You fly the head and capture 2–8
+waypoints; each one after the first carries the number of frames to shoot on the
+leg that reaches it (or ∞ for the whole leg). On the wire each waypoint is a
+`step:2` point with the gimbal pose in radians and a **cumulative** arrival time
+(the sum of the earlier legs' `frames × interval`), and `SEND_END` reports the
+summed `photoCnt`. Because it is 272, it shares the timelapse's remaining-count
+poll, its run view and its dead-man exactly — nothing new to trust. The frame
+counts come from the app's own `DynamicLapseLayout` builder, so the payload is
+read, not inferred; the timeline is previewed before the two-tap confirm. The
+poses are captured server-side (like FREE PROGRAM), so what you fly to is what
+is stored.
+
+**SUN** schedules a sunrise/sunset timelapse across a time window (277): the head
+does the solar GOTO itself and parks when the window ends, pushing its own
+progress the way HDR does rather than being polled. Two things are load-bearing.
+First, the window has to be within an hour of *now* and at least three minutes
+long — the head enforces both, so the browser checks them up front with a clear
+message. Second, the check and the serialised times use the **browser's** clock,
+not the device's: the Polaris runs local time while reporting itself as UTC (the
+same clock trap the plate solver already corrects for), so trusting it here would
+schedule the shoot hours off. The window is sent as the app's
+`yyyy,MM,dd,HH,mm,ss` local wall-clock, `sun:0` for sunrise and `sun:1` for
+sunset.
+
+That is every shooting programme the head exposes now driven from the browser —
+timelapse, path-lapse, panorama, HDR, focus stack, sun and astro — alongside the
+FREE PROGRAM timeline. Only Holy Grail's day-to-night exposure ramp is left.
+
 ### Live view
 
 The stream is the head's own mjpg-streamer on **:8080**, referenced directly
