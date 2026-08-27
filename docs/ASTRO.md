@@ -207,8 +207,24 @@ stitch/limit flags would not decompile (docs/APP-FEATURES.md, panorama pitfall
 guess until it is confirmed on hardware — watch the first run. Timelapse has no
 such caveat; its payload is read directly from the app's layout classes.
 
-HDR (280) and focus stacking (270) are mapped in the protocol doc but not wired:
-same multi-step shape, still to be exercised against hardware.
+**HDR (280) and focus stacking (270) are wired too.** Both payloads are read
+directly from the app's own `getStartShootingParameter()` builders, so unlike
+panorama neither is inference:
+
+- **HDR** is a three-frame shutter bracket around the camera's current exposure.
+  Because the head speaks exposure INDICES, the bracket walks the shutter a
+  chosen number of steps either side of the current index and holds the other
+  axes — and the preview resolves those indices back to the real shutter speeds
+  from the camera's own list, so you see "1/250 / 1/60 / 1/15" before it fires,
+  never a raw index. It refuses to run until the camera's shutter list has
+  loaded (open the Control tab once), because bracketing without it would be
+  guessing. The head PUSHES HDR progress (`step:5` remaining, `step:3` done)
+  rather than being polled.
+- **Focus stacking** racks the lens between two marked limits and stitches an
+  all-in-focus frame. Set manual focus, rack with the four hold-repeat buttons
+  (they go through the ordinary 311 focus-adjust), mark near and far, then start
+  or dry-preview. Its only number is the frame count (2–200). The start frame is
+  `step:3;;num:<shots>;` — the double semicolon is the app's own, not a typo.
 
 ### Live view
 

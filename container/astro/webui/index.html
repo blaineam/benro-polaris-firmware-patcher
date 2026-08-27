@@ -119,6 +119,8 @@
       <div class="segbar" role="tablist">
         <button class="seg on" data-prog="lapse">Timelapse</button>
         <button class="seg" data-prog="pano">Panorama</button>
+        <button class="seg" data-prog="hdr">HDR</button>
+        <button class="seg" data-prog="focus">Focus stack</button>
       </div>
 
       <!-- Timelapse -->
@@ -219,6 +221,65 @@
           <code id="pa-frame" class="framebox"></code>
         </div>
         <button id="pa-start" class="startbtn" type="button">Preview panorama</button>
+      </div>
+
+      <!-- HDR -->
+      <div class="card progpanel" data-prog="hdr" hidden>
+        <p class="tiny dim">
+          A three-frame bracket around the camera's current exposure, walking the
+          <b>shutter</b> a chosen number of steps either way and holding aperture,
+          ISO, EV and white balance where they are. Set the base exposure on the
+          Control tab first.
+        </p>
+        <div class="field">
+          <label for="hdr-spread">Bracket spread <span class="dim">(shutter-list steps between frames)</span></label>
+          <div class="fieldrow">
+            <input id="hdr-spread" type="number" min="1" max="30" step="1" value="3">
+            <span class="unit">steps</span>
+          </div>
+        </div>
+        <label class="switch"><input id="hdr-isp" type="checkbox"><span>Merge in the head</span></label>
+        <div id="hdr-preview" class="preview" hidden>
+          <p class="tiny dim">The three shutter speeds this will actually use, read
+            from your camera:</p>
+          <code id="hdr-shutters" class="framebox"></code>
+        </div>
+        <button id="hdr-start" class="startbtn" type="button">Preview HDR</button>
+      </div>
+
+      <!-- Focus stack -->
+      <div class="card progpanel" data-prog="focus" hidden>
+        <p class="tiny dim">
+          Set the camera to <b>manual focus</b>. Rack to the near limit and mark
+          it, rack to the far limit and mark it, then start — the head walks the
+          focus between the two and stitches an all-in-focus frame.
+        </p>
+        <div class="field">
+          <label>Rack focus</label>
+          <div class="rackrow">
+            <button class="ghost sm rack" data-adj="-4" type="button">◄◄ near</button>
+            <button class="ghost sm rack" data-adj="-1" type="button">◄ near</button>
+            <button class="ghost sm rack" data-adj="1"  type="button">far ►</button>
+            <button class="ghost sm rack" data-adj="4"  type="button">far ►►</button>
+          </div>
+          <p class="tiny dim">Hold-repeats while pressed. The head relays focus to the camera over its own tether.</p>
+        </div>
+        <div class="markrow">
+          <button id="fs-mark-near" class="ghost" type="button">Set near limit</button>
+          <button id="fs-mark-far" class="ghost" type="button">Set far limit</button>
+        </div>
+        <div class="field">
+          <label for="fs-shots">Frames</label>
+          <div class="fieldrow">
+            <input id="fs-shots" type="number" min="2" max="200" step="1" value="14">
+            <span class="unit">shots</span>
+          </div>
+        </div>
+        <label class="switch"><input id="fs-isp" type="checkbox" checked><span>Stitch all-in-focus in the head</span></label>
+        <div class="markrow">
+          <button id="fs-preview" class="ghost" type="button">Dry preview</button>
+          <button id="fs-start" class="startbtn" type="button">Start focus stack</button>
+        </div>
       </div>
     </div>
   </section>

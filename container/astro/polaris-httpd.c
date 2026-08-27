@@ -2202,6 +2202,86 @@ static void handle(int fd) {
         return;
     }
 
+    /* HDR. GET/POST-without-confirm returns the exact frame AND the three real
+     * shutter speeds it resolved to (from the camera's own list), so the bracket
+     * is never a mystery before it fires. confirm=1 sends it. */
+    if (!strcmp(path, "/api/prog/hdr")) {
+        char sp[8]="", isp[8]="", conf[8]="";
+        hdr_params_t hp; char err[160]="", out[1024]; int n;
+        if (!param(qs,"spread",sp,sizeof sp) && body) param(body,"spread",sp,sizeof sp);
+        if (!param(qs,"isp",isp,sizeof isp) && body) param(body,"isp",isp,sizeof isp);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        hp.spread = sp[0] ? atoi(sp) : 3;
+        hp.isp = (isp[0]=='1' || !strcmp(isp,"true")) ? 1 : 0;
+        if (!(conf[0]=='1' || !strcmp(conf,"true"))) {
+            char frame[600], fesc[1200], m[1400];
+            if (prog_check_hdr(&hp, err, sizeof err) != 0) {
+                json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"valid\":false,\"error\":\"%s\"}", out);
+                respond(fd, 200, "application/json", m, strlen(m)); return;
+            }
+            prog_hdr_preview(&hp, frame, sizeof frame);
+            json_escape(frame, fesc, sizeof fesc);
+            snprintf(m, sizeof m, "{\"ok\":true,\"valid\":true,\"preview\":true,\"frame\":\"%s\"}", fesc);
+            respond(fd, 200, "application/json", m, strlen(m)); return;
+        }
+        if (prog_start_hdr(&hp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
+        respond_json(fd, out); return;
+    }
+
+    /* Focus stack. Setup (mark near/far, preview) then start. Racking the lens
+     * between the marks goes through the ordinary 311 focus-adjust send. */
+    if (!strcmp(path, "/api/prog/focus/mark")) {
+        char v[8]="";
+        if (!param(qs,"which",v,sizeof v) && body) param(body,"which",v,sizeof v);
+        if (prog_focus_mark((v[0]=='1'||!strcmp(v,"far")||!strcmp(v,"end")) ? 1 : 0) != 0) {
+            respond(fd, 503, "application/json", "{\"ok\":false,\"error\":\"control link is down\"}", 48); return;
+        }
+        respond_json(fd, "{\"ok\":true}"); return;
+    }
+    if (!strcmp(path, "/api/prog/focus")) {
+        char sh[8]="", isp[8]="", prev[8]="", conf[8]="";
+        focus_params_t fp; char err[160]="", out[512]; int n;
+        if (!param(qs,"shots",sh,sizeof sh) && body) param(body,"shots",sh,sizeof sh);
+        if (!param(qs,"isp",isp,sizeof isp) && body) param(body,"isp",isp,sizeof isp);
+        if (!param(qs,"preview",prev,sizeof prev) && body) param(body,"preview",prev,sizeof prev);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        fp.shots = sh[0] ? atoi(sh) : 14;
+        fp.isp = (isp[0]=='1' || !strcmp(isp,"true")) ? 1 : 0;
+        if (prev[0]=='1' || !strcmp(prev,"true")) {
+            if (prog_focus_preview(&fp, err, sizeof err) != 0) {
+                char m[256]; json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+                respond(fd, 409, "application/json", m, strlen(m)); return;
+            }
+        } else if (conf[0]=='1' || !strcmp(conf,"true")) {
+            if (prog_start_focus(&fp, err, sizeof err) != 0) {
+                char m[256]; json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+                respond(fd, 409, "application/json", m, strlen(m)); return;
+            }
+        } else {
+            /* No confirm, no preview: just validate. */
+            char m[256];
+            if (prog_check_focus(&fp, err, sizeof err) != 0) {
+                json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"valid\":false,\"error\":\"%s\"}", out);
+            } else snprintf(m, sizeof m, "{\"ok\":true,\"valid\":true}");
+            respond(fd, 200, "application/json", m, strlen(m)); return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
+        respond_json(fd, out); return;
+    }
+
     /* Progress. Cheap read of server memory; the poll to the head runs in the
      * event loop, not here. */
     if (!strcmp(path, "/api/prog")) {

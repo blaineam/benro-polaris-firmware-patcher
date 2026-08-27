@@ -81,12 +81,33 @@ static int spawn_head(pid_t *child, int *wirefd) {
             if (n <= 0) _exit(0);
             b[n] = 0;
             write(pfd[1], b, (size_t)n);
-            if (strstr(b, "step:3;") || strstr(b, "step:4;")) {
+            /* Each programme's START refills the countdown, so a shared `rem`
+             * that a previous run drained does not make the next one look done
+             * the instant it begins. */
+            if (strstr(b, "&2&step:1;") || strstr(b, "&2&step:2;") ||
+                strstr(b, "&2&step:3;")) rem = 8;
+            /* Camera shutter list, so HDR can resolve real indices/labels. */
+            if (strstr(b, "1&268&"))
+                write(c, "268@RD:0;V:4;R:1/1000,1/500,1/250,1/125,1/60,1/30;#", 51);
+            /* Timelapse/panorama countdown poll. */
+            if (strstr(b, "step:4;") || strstr(b, "step:3;")) {
                 char r[64];
                 int len = snprintf(r, sizeof r, "%s@ret:%d;#",
                                    strstr(b, "1&271") ? "271" : "272", rem);
                 if (rem > 0) rem--;
                 write(c, r, (size_t)len);
+            }
+            /* Focus running-info (step 7) answers with remainNum. */
+            if (strstr(b, "1&270&2&step:7;")) {
+                char r[64];
+                int len = snprintf(r, sizeof r, "270@step:7;remainNum:%d;#", rem);
+                if (rem > 0) rem--;
+                write(c, r, (size_t)len);
+            }
+            /* HDR: the head PUSHES progress. When it sees the start, emit a
+             * step:5 remaining then a step:3 complete shortly after. */
+            if (strstr(b, "1&280&2&step:1;")) {
+                write(c, "280@step:5;ret:2;#", 18);
             }
             write(c, "518@compass:1.0;alt:-1.0;#", 26);
         }
@@ -227,6 +248,84 @@ int main(void) {
         ok(saw("1&271&2&step:3;"), "panorama polls its own remaining count");
     }
 
+    /* ---- HDR: three shutter values resolved from the camera, push progress ---- */
+    prog_cancel(); pump(60); reset();   /* the panorama above is still running */
+    {
+        hdr_params_t h = { 2, 1 };   /* spread 2, isp on */
+        char err2[160], prev[512];
+        /* Prime the shutter list into the cache. */
+        plink_send(268, 1, ""); pump(120);
+        prog_hdr_preview(&h, prev, sizeof prev);
+        ok(strstr(prev, "1&280&2&step:1;isp:1;") != NULL, "HDR preview is a complete 280 start frame");
+        ok(strstr(prev, "p1:0,2,") && strstr(prev, "p2:0,4,") && strstr(prev, "p3:0,5,"),
+           "the three frames bracket the shutter index, high end CLAMPED to the list (V4 s2, len6 -> 2/4/5)");
+        ok(strstr(prev, "shutters: 1/250 / 1/60 / 1/30") != NULL,
+           "the preview shows the REAL shutter labels the indices resolve to");
+        ok(prog_start_hdr(&h, err2, sizeof err2) == 0, "HDR starts");
+        pump(120);
+        ok(saw("1&280&2&step:1;isp:1;p1:0,2,"), "the HDR start frame reaches the head");
+        {
+            char st[512]; prog_status_json(st, sizeof st);
+            ok(strstr(st, "\"kind\":\"hdr\"") != NULL && strstr(st, "\"total\":3"),
+               "HDR reports as a 3-frame programme");
+        }
+        /* It should NOT poll -- HDR is push-driven. */
+        reset(); pump(600);
+        ok(!saw("1&280&2&step:"), "HDR is not polled (the head pushes its own progress)");
+        /* The pushed step:5 remaining lands, then a completion clears it. */
+        write(g_wire, "", 0);   /* no-op keep symmetry */
+        prog_cancel(); pump(60);
+        ok(saw("1&280&2&step:4;"), "HDR cancel sends step 4");
+    }
+
+    /* ---- focus stack: mark, start, poll remainNum, cancel ---- */
+    reset();
+    {
+        focus_params_t f = { 14, 1 };
+        char err2[160];
+        ok(prog_check_focus(&f, err2, sizeof err2) == 0, "a 14-shot focus stack validates");
+        f.shots = 1;
+        ok(prog_check_focus(&f, err2, sizeof err2) != 0, "1 shot is refused (min is 2)");
+        f.shots = 250;
+        ok(prog_check_focus(&f, err2, sizeof err2) != 0, "251 shots is refused (max is 200)");
+        f.shots = 14;
+
+        prog_focus_mark(0); pump(60);
+        ok(saw("1&270&2&step:1;"), "marking the near limit sends step 1");
+        prog_focus_mark(1); pump(60);
+        ok(saw("1&270&2&step:2;"), "marking the far limit sends step 2");
+
+        reset();
+        ok(prog_start_focus(&f, err2, sizeof err2) == 0, "focus stack starts");
+        pump(120);
+        ok(saw("1&270&2&step:3;;num:14;isp:1;"),
+           "the start frame carries ;num:<shots>; with the genuine double semicolon");
+        reset();
+        pump(2500);
+        ok(saw("1&270&2&step:7;"), "focus polls RUNNING_INFO (step 7), not a made-up opcode");
+        {
+            char st[512]; prog_status_json(st, sizeof st);
+            ok(strstr(st, "\"kind\":\"focus\"") != NULL, "status reports focus");
+            ok(strstr(st, "\"remaining\":") != NULL, "the remainNum count is surfaced");
+        }
+        prog_cancel(); pump(60);
+        ok(saw("1&270&2&step:6;"), "focus cancel sends step 6");
+    }
+
+    /* ---- focus preview is a distinct, cancellable dry traverse ---- */
+    reset();
+    {
+        focus_params_t f = { 8, 0 };
+        char err2[160], st[512];
+        ok(prog_focus_preview(&f, err2, sizeof err2) == 0, "focus preview starts");
+        pump(80);
+        ok(saw("1&270&2&step:8;;num:8;"), "preview sends step 8 with the shot count");
+        prog_status_json(st, sizeof st);
+        ok(strstr(st, "\"preview\":true") != NULL, "status flags it as a preview, not a real run");
+        prog_cancel(); pump(60);
+        ok(saw("1&270&2&step:10;"), "cancelling a preview sends step 10, not step 6");
+    }
+
     /* ---- a lost link ends the run rather than reporting phantom progress ---- */
     plink_close();
     prog_tick();
@@ -235,8 +334,12 @@ int main(void) {
     /* ---- nothing starts without a link ---- */
     {
         lapse_params_t l = { 4.0, 10, 0, 24 };
+        hdr_params_t h = { 2, 0 };
+        char err2[160];
         ok(prog_start_lapse(&l, err, sizeof err) != 0 && strstr(err, "link"),
            "a programme will not start with the link down");
+        ok(prog_check_hdr(&h, err2, sizeof err2) != 0 && strstr(err2, "link"),
+           "HDR refuses with the link down (it cannot bracket without the camera)");
     }
 
     if (child > 0) { kill(child, SIGTERM); waitpid(child, NULL, 0); }

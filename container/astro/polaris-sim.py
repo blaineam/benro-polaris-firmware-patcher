@@ -101,6 +101,7 @@ class Mount:
         # progress loop is exercisable with no hardware. `prog_total<0` = a
         # timelapse's unlimited default, which never reaches zero.
         self.prog = None          # None | dict(cmd, remaining, total, per_s, t0)
+        self.push_q = []          # unsolicited frames for the handler to flush
         self.track_drift = getattr(args, "track_drift", 0.0)   # arcsec/min
         self.track_t0 = None
         self.drift_accum = 0.0
@@ -143,6 +144,10 @@ class Mount:
                 if self.prog["total"] >= 0:
                     self.prog["remaining"] = max(0, self.prog["total"] - shot)
                     if self.prog["remaining"] == 0:
+                        # HDR announces completion with a pushed step:3; others
+                        # just let their poll read 0.
+                        if self.prog.get("push"):
+                            self.push_q.append("280@step:3;ret:0;")
                         self.prog = None      # finished
                 # unlimited: remaining stays a sentinel that never hits 0
 
@@ -237,6 +242,10 @@ class Handler(socketserver.BaseRequestHandler):
         while not self.server.stopping:
             mount.tick()
             now = time.time()
+            with mount.lock:
+                pending = mount.push_q; mount.push_q = []
+            for frame in pending:
+                self.send(frame)
             if now - last_pose > 0.1:                       # ~10 Hz telemetry
                 last_pose = now
                 az, alt = mount.reported()
@@ -379,6 +388,53 @@ class Handler(socketserver.BaseRequestHandler):
             self.send("778@capacity:82;charge:0;")
         elif cmd == "775":
             self.send("775@status:1;totalspace:62914560;freespace:41943040;usespace:20971520;")
+        elif cmd in ("265", "266", "267", "268", "275"):
+            # Camera option lists: RD:0=available, V=selected index, R=csv.
+            lists = {
+                "268": "1/1000,1/500,1/250,1/125,1/60,1/30,1/15,1/8,1/4,0.5,1",
+                "275": "1.4,2,2.8,4,5.6,8,11,16,22",
+                "265": "Auto,100,200,400,800,1600,3200,6400",
+                "267": "-2,-1.7,-1.3,-1,-0.7,-0.3,0,0.3,0.7,1,1.3,1.7,2",
+                "266": "Auto,Daylight,Cloudy,Shade,Tungsten,Fluorescent",
+            }
+            self.send(f"{cmd}@RD:0;V:4;R:{lists[cmd]};")
+        elif cmd == "280":
+            step = args.get("step")
+            if step == "1":
+                # HDR is always 3 frames; the head pushes step:5 remaining then step:3.
+                with mount.lock:
+                    mount.prog = {"cmd": "280", "per_s": 1.5, "total": 3,
+                                  "remaining": 3, "t0": time.time(), "push": True}
+                self.send("280@step:5;ret:3;")
+            elif step == "4":
+                with mount.lock:
+                    mount.prog = None
+                self.send("280@step:4;#" if False else "280@step:4;")
+        elif cmd == "270":
+            step = args.get("step")
+            if step in ("1", "2"):
+                self.send(f"270@step:{step};ret:0;")
+            elif step in ("3", "8"):
+                try:
+                    num = int(args.get("num", "14"))
+                except ValueError:
+                    num = 14
+                with mount.lock:
+                    mount.prog = {"cmd": "270", "per_s": 1.0, "total": num,
+                                  "remaining": num, "t0": time.time()}
+                self.send(f"270@step:{step};ret:0;")
+            elif step == "7":
+                r = -1
+                with mount.lock:
+                    if mount.prog and mount.prog["cmd"] == "270":
+                        r = mount.prog["remaining"]
+                self.send(f"270@step:7;remainNum:{r};")
+            elif step in ("6", "10"):
+                with mount.lock:
+                    mount.prog = None
+                self.send(f"270@step:{step};ret:0;")
+        elif cmd == "311":
+            self.send("311@ret:0;")   # focus adjust ack
         elif cmd == "272":
             step = args.get("step")
             if step == "2":

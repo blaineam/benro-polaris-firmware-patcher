@@ -38,9 +38,23 @@
   method failed to decompile — so `/api/prog/pano` without a confirm returns the
   exact frame that would be sent and the UI shows it, labelled as unverified,
   before anything reaches the motors.
-- The mount simulator learned jog, re-centre, registration, battery, card, and
-  now runs timelapse/panorama with a real frame countdown, so the whole control
-  loop — motion through programmes — is testable with no hardware attached.
+- **HDR (280) and focus stacking (270).** Both payloads are read straight from
+  the app's own `getStartShootingParameter()` builders — not inference. HDR is a
+  three-frame shutter bracket around the current exposure: since the head speaks
+  exposure INDICES, it walks the shutter index and the preview resolves the
+  three indices back to the camera's real shutter labels ("1/250 / 1/60 / 1/15")
+  so the bracket is never a mystery before it fires; it refuses to run until the
+  shutter list has loaded, and the head pushes its progress rather than being
+  polled. Focus stacking racks the lens between two marked limits (four
+  hold-repeat rack buttons through the 311 focus-adjust, mark near/far, dry
+  preview or start) and stitches all-in-focus; its start frame carries the
+  genuine `;num:<shots>;` double semicolon. Both fold into the same run view,
+  poll model and dead-man as timelapse/panorama.
+- The mount simulator learned jog, re-centre, registration, battery, card, the
+  camera option lists, and now runs all four programmes with a real countdown
+  (HDR via a pushed completion), so the whole control loop — motion through every
+  programme — is testable with no hardware attached. `test_prog.c` is 64
+  assertions.
 
 ### Fixed
 

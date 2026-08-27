@@ -387,3 +387,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 }
 #progfill.stale { background: var(--warn); }
 @keyframes slide { from { transform: translateX(-120%); } to { transform: translateX(320%); } }
+
+/* HDR / focus-stack panels */
+.rackrow { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; }
+.rack { touch-action: none; }
+.rack:active { border-color: var(--acc); color: var(--acc); }
+.markrow { display: flex; gap: 8px; }
+.markrow .ghost, .markrow .startbtn { flex: 1 1 0; }
+.ghost.marked { border-color: var(--ok); color: var(--ok); }

@@ -35,9 +35,39 @@ typedef struct {
     char        start_frame[PLINK_ARGS_MAX];  /* what we actually sent  */
     lapse_params_t lapse;
     pano_params_t  pano;
+    focus_params_t focus;
+    hdr_params_t   hdr;
 } state_t;
 
 static state_t g;
+
+/* The opcode a running programme reports on, and the poll it answers.
+ *   poll_step = 0 -> the head PUSHES progress; we send nothing (HDR).
+ * The remaining count is read from `rem_key`, falling back to `rem_key2`.
+ * Completion is signalled either by remaining hitting 0, or by the head
+ * pushing `done_step` on its own (HDR step 3). */
+typedef struct {
+    int         cmd;
+    const char *poll_step;   /* what we send to ask; NULL/"" = do not poll  */
+    const char *rem_key;     /* primary remaining-count key in the reply    */
+    const char *rem_key2;    /* fallback key                                */
+    const char *done_step;   /* a pushed step value that means "finished"   */
+} prog_wire_t;
+
+static prog_wire_t wire_for(prog_kind_t k) {
+    switch (k) {
+        /* Timelapse and panorama answer a poll with the count in `ret`
+         * (panorama falls back to `num`). */
+        case PROG_LAPSE: return (prog_wire_t){ PROG_CMD_LAPSE, "step:4;", "ret", NULL, NULL };
+        case PROG_PANO:  return (prog_wire_t){ PROG_CMD_PANO,  "step:3;", "ret", "num", NULL };
+        /* Focus stack answers RUNNING_INFO with `remainNum`. */
+        case PROG_FOCUS: return (prog_wire_t){ PROG_CMD_FOCUS, "step:7;", "remainNum", NULL, "5" };
+        /* HDR is PUSH-driven: the head sends step:5;ret:<remaining> and step:3
+         * on completion, so we poll nothing. */
+        case PROG_HDR:   return (prog_wire_t){ PROG_CMD_HDR, "", "ret", NULL, "3" };
+        default:         return (prog_wire_t){ 0, "", "", NULL, NULL };
+    }
+}
 
 /* ------------------------------------------------------------------ util */
 
@@ -53,7 +83,64 @@ static void fmt_num(char *out, size_t cap, double v) {
     else                                snprintf(out, cap, "%.3f", v);
 }
 
+/* Read the camera's live selection for one exposure axis out of the link
+ * cache. The option-list replies (265/266/267/268/275) carry
+ * `RD:<avail>;V:<index>;R:<comma,list>;` -- V is the selected INDEX, which is
+ * exactly what the set commands and the HDR frame want. Returns the index, or
+ * `dflt` when the camera has not reported that axis yet. `count` (optional)
+ * receives the number of options, so a shifted index can be clamped to the
+ * real list rather than guessed. */
+static int cam_index(int get_cmd, int *count, int dflt) {
+    const plink_slot_t *s = plink_get(get_cmd);
+    int idx;
+    if (count) *count = 0;
+    if (!s) return dflt;
+    idx = (int)plink_arg_num(s->args, "V", dflt);
+    if (count) {
+        char list[PLINK_ARGS_MAX];
+        if (plink_arg(s->args, "R", list, sizeof list) == 0 && list[0]) {
+            int n = 1; const char *p;
+            for (p = list; *p; p++) if (*p == ',') n++;
+            *count = n;
+        }
+    }
+    return idx;
+}
+
+/* The nth option's human label from an axis's cached R: list, or "?" if the
+ * camera has not reported it. Used to show the three real shutter speeds an HDR
+ * bracket will use, so the frame is never a mystery before it fires. */
+static void cam_label(int get_cmd, int index, char *out, size_t cap) {
+    const plink_slot_t *s = plink_get(get_cmd);
+    char list[PLINK_ARGS_MAX];
+    int i = 0; char *p, *save = NULL;
+    snprintf(out, cap, "?");
+    if (!s || plink_arg(s->args, "R", list, sizeof list) != 0) return;
+    for (p = strtok_r(list, ",", &save); p; p = strtok_r(NULL, ",", &save), i++)
+        if (i == index) { snprintf(out, cap, "%s", p); return; }
+}
+
 /* ---------------------------------------------------------- validation */
+
+int prog_check_hdr(const hdr_params_t *p, char *err, size_t errcap) {
+    if (!p) return fail(err, errcap, "no parameters");
+    if (p->spread < 1 || p->spread > 30)
+        return fail(err, errcap, "bracket spread must be 1..30 shutter steps");
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    /* HDR needs the camera's shutter list to build the three frames; without it
+     * we would be inventing indices. Refusing beats bracketing blind. */
+    if (!plink_get(268))
+        return fail(err, errcap, "the camera's shutter list has not loaded yet — "
+                                 "open the Control tab once so it can be read");
+    return 0;
+}
+
+int prog_check_focus(const focus_params_t *p, char *err, size_t errcap) {
+    if (!p) return fail(err, errcap, "no parameters");
+    if (p->shots < 2 || p->shots > 200)
+        return fail(err, errcap, "shots must be between 2 and 200");
+    return 0;
+}
 
 int prog_check_lapse(const lapse_params_t *p, char *err, size_t errcap) {
     if (!p) return fail(err, errcap, "no parameters");
@@ -156,6 +243,64 @@ int prog_pano_preview(const pano_params_t *p, char *out, size_t outcap) {
     return snprintf(out, outcap, "1&%d&2&%s#", PROG_CMD_PANO, args);
 }
 
+/* 280 step 1 (HDRLayout.getStartShootingParameter):
+ *     step:1;isp:<0|1>;p1:<bulb>,<sIdx>,<fIdx>,<evIdx>,<isoIdx>,<wbIdx>;p2:…;p3:…;
+ * p1=under, p2=normal, p3=over. Every axis is an INDEX into the camera's own
+ * option list. We hold aperture/EV/ISO/WB at the current setting and bracket
+ * only the shutter, `spread` list-entries either side of the current index --
+ * which is what "one stop, quantised to what the camera offers" reduces to when
+ * the head speaks indices. `shut_idx` receives the three indices so the caller
+ * can show the real shutter labels. */
+static void hdr_frames(const hdr_params_t *p, int shut_idx[3], char *out, size_t cap) {
+    int scount = 0;
+    int sV = cam_index(268, &scount, 0);
+    int fV = cam_index(275, NULL, 0);
+    int eV = cam_index(267, NULL, 0);
+    int iV = cam_index(265, NULL, 0);
+    int wV = cam_index(266, NULL, 0);
+    int lo = sV - p->spread, hi = sV + p->spread;
+    int order[3];
+    /* Clamp to the real list; if the list length is unknown, only clamp the
+     * low end (a negative index is always wrong, a high one merely maybe). */
+    if (lo < 0) lo = 0;
+    if (scount > 0 && hi > scount - 1) hi = scount - 1;
+    /* p1 under / p2 normal / p3 over. Which shutter index is "under" (darker)
+     * depends on the list's direction, which is not established -- so this does
+     * NOT assert a direction: it emits the three indices lo,mid,hi in a fixed
+     * order and lets the operator read the resulting speeds in the preview. */
+    order[0] = lo; order[1] = sV; order[2] = hi;
+    shut_idx[0] = order[0]; shut_idx[1] = order[1]; shut_idx[2] = order[2];
+    snprintf(out, cap,
+        "step:%d;isp:%d;p1:0,%d,%d,%d,%d,%d;p2:0,%d,%d,%d,%d,%d;p3:0,%d,%d,%d,%d,%d;",
+        HDR_STEP_START, p->isp ? 1 : 0,
+        order[0], fV, eV, iV, wV,
+        order[1], fV, eV, iV, wV,
+        order[2], fV, eV, iV, wV);
+}
+
+int prog_hdr_preview(const hdr_params_t *p, char *out, size_t outcap) {
+    char args[PLINK_ARGS_MAX];
+    int idx[3];
+    char a[24], b[24], c[24];
+    if (!p) { if (outcap) out[0] = 0; return 0; }
+    hdr_frames(p, idx, args, sizeof args);
+    cam_label(268, idx[0], a, sizeof a);
+    cam_label(268, idx[1], b, sizeof b);
+    cam_label(268, idx[2], c, sizeof c);
+    /* The frame, then the three human shutter speeds it resolves to. */
+    return snprintf(out, outcap, "1&%d&2&%s#\nshutters: %s / %s / %s",
+                    PROG_CMD_HDR, args, a, b, c);
+}
+
+/* 270 step 3 (SP_FOCUS_STACK_START + FocusTrackLayout.getStartShootingParameter):
+ *     step:3;;num:<shots>;isp:<0|1>;
+ * The double semicolon is real -- getStartShootingParameter returns ";num:…;"
+ * and the caller prepends "step:3;". Same substring-protocol reasoning as the
+ * timelapse step-3 frame: do not tidy it. */
+static void focus_start_frame(const focus_params_t *p, int step, char *out, size_t cap) {
+    snprintf(out, cap, "step:%d;;num:%d;isp:%d;", step, p->shots, p->isp ? 1 : 0);
+}
+
 /* ----------------------------------------------------------------- start */
 
 static void begin(prog_kind_t kind, long total, const char *frame) {
@@ -215,11 +360,74 @@ int prog_start_pano(const pano_params_t *p, char *err, size_t errcap) {
     return 0;
 }
 
+int prog_start_hdr(const hdr_params_t *p, char *err, size_t errcap) {
+    char args[PLINK_ARGS_MAX], frame[PLINK_ARGS_MAX];
+    int idx[3];
+    if (prog_check_hdr(p, err, errcap) != 0) return -1;
+    if (g.kind != PROG_NONE) return fail(err, errcap, "a programme is already running");
+
+    hdr_frames(p, idx, args, sizeof args);
+    prog_hdr_preview(p, frame, sizeof frame);
+    fprintf(stderr, "[prog] HDR start: %s\n", frame);
+    if (plink_send(PROG_CMD_HDR, 2, args) != 0)
+        return fail(err, errcap, "could not send the start step");
+
+    begin(PROG_HDR, 3, args);   /* always exactly three frames */
+    g.hdr = *p;
+    return 0;
+}
+
+int prog_focus_mark(int which) {
+    /* Marking a limit is meaningful any time before a run; it is not gated on a
+     * running programme, since it is what you do to SET one up. */
+    if (plink_status() != PLINK_UP) return -1;
+    return plink_send(PROG_CMD_FOCUS, 2,
+                      which ? "step:2;" : "step:1;");
+}
+
+int prog_focus_preview(const focus_params_t *p, char *err, size_t errcap) {
+    char args[PLINK_ARGS_MAX];
+    if (prog_check_focus(p, err, errcap) != 0) return -1;
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    if (g.kind != PROG_NONE) return fail(err, errcap, "a programme is already running");
+    focus_start_frame(p, FOCUS_STEP_PREVIEW, args, sizeof args);
+    if (plink_send(PROG_CMD_FOCUS, 2, args) != 0)
+        return fail(err, errcap, "could not send the preview step");
+    /* The preview is a dry traverse; treat it as a running programme so its
+     * step counter is polled and it can be cancelled, but mark it a preview so
+     * the UI can say so. Reuses the focus poll (step 7). */
+    begin(PROG_FOCUS, p->shots, args);
+    g.focus = *p;
+    g.paused = 2;   /* sentinel: "preview", surfaced in the status JSON */
+    return 0;
+}
+
+int prog_start_focus(const focus_params_t *p, char *err, size_t errcap) {
+    char args[PLINK_ARGS_MAX];
+    if (prog_check_focus(p, err, errcap) != 0) return -1;
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    if (g.kind != PROG_NONE) return fail(err, errcap, "a programme is already running");
+    focus_start_frame(p, FOCUS_STEP_START, args, sizeof args);
+    fprintf(stderr, "[prog] focus-stack start: %s\n", args);
+    if (plink_send(PROG_CMD_FOCUS, 2, args) != 0)
+        return fail(err, errcap, "could not send the start step");
+    begin(PROG_FOCUS, p->shots, args);
+    g.focus = *p;
+    return 0;
+}
+
 /* ---------------------------------------------------------------- control */
 
 void prog_cancel(void) {
-    if (g.kind == PROG_LAPSE) plink_send(PROG_CMD_LAPSE, 2, "step:7;");
-    if (g.kind == PROG_PANO)  plink_send(PROG_CMD_PANO,  2, "step:6;");
+    switch (g.kind) {
+        case PROG_LAPSE: plink_send(PROG_CMD_LAPSE, 2, "step:7;"); break;
+        case PROG_PANO:  plink_send(PROG_CMD_PANO,  2, "step:6;"); break;
+        case PROG_HDR:   plink_send(PROG_CMD_HDR,   2, "step:4;"); break;
+        /* Focus: cancel the run, or the preview (step 10) if that is what is
+         * live -- the sentinel in `paused` tells them apart. */
+        case PROG_FOCUS: plink_send(PROG_CMD_FOCUS, 2, g.paused == 2 ? "step:10;" : "step:6;"); break;
+        default: break;
+    }
     memset(&g, 0, sizeof g);
 }
 
@@ -248,23 +456,32 @@ int prog_pano_interval(int seconds) {
  * the head answers, ask again. The reply carries it in `ret:`, falling back to
  * `num:` (POC:1836-1848). */
 static void absorb_reply(void) {
-    const plink_slot_t *s = plink_get(g.kind == PROG_PANO ? PROG_CMD_PANO : PROG_CMD_LAPSE);
-    static unsigned long seen_pano = 0, seen_lapse = 0;
-    unsigned long *seen = (g.kind == PROG_PANO) ? &seen_pano : &seen_lapse;
+    prog_wire_t w = wire_for(g.kind);
+    const plink_slot_t *s = plink_get(w.cmd);
+    static unsigned long seen[PROG_FOCUS + 1];
     double v;
-    if (!s || s->count == *seen) return;
-    *seen = s->count;
+    char step[8] = "";
+    if (!s || s->count == seen[g.kind]) return;
+    seen[g.kind] = s->count;
     g.last_reply_ms = plink_now_ms();
     g.stale = 0;
 
-    v = plink_arg_num(s->args, "ret", NAN);
-    if (!(v == v)) v = plink_arg_num(s->args, "num", NAN);
+    /* A pushed completion step ends the run regardless of any count -- HDR
+     * signals done this way (step:3), and focus's COMPLETION (step:5) does too. */
+    if (w.done_step && plink_arg(s->args, "step", step, sizeof step) == 0 &&
+        !strcmp(step, w.done_step)) {
+        fprintf(stderr, "[prog] %s complete (step %s)\n",
+                g.kind == PROG_HDR ? "HDR" : "focus stack", step);
+        memset(&g, 0, sizeof g);
+        return;
+    }
+
+    v = plink_arg_num(s->args, w.rem_key, NAN);
+    if (!(v == v) && w.rem_key2) v = plink_arg_num(s->args, w.rem_key2, NAN);
     if (v == v && v >= 0) {
         g.remaining = (long)v;
-        /* Zero remaining is the head saying it is done. */
         if (g.remaining == 0) {
-            fprintf(stderr, "[prog] %s complete\n",
-                    g.kind == PROG_PANO ? "panorama" : "timelapse");
+            fprintf(stderr, "[prog] programme complete\n");
             memset(&g, 0, sizeof g);
         }
     }
@@ -272,6 +489,7 @@ static void absorb_reply(void) {
 
 void prog_tick(void) {
     double now;
+    prog_wire_t w;
     if (g.kind == PROG_NONE) return;
 
     /* A programme cannot outlive the link: without it we can neither observe
@@ -287,12 +505,16 @@ void prog_tick(void) {
     if (g.kind == PROG_NONE) return;
 
     now = plink_now_ms();
-    if (now >= g.next_poll_ms) {
+    w = wire_for(g.kind);
+    /* HDR is push-only (poll_step ""), so it is never polled -- it just waits
+     * for the head's step:5/step:3. Everything else asks on the POLL_MS cadence. */
+    if (w.poll_step && w.poll_step[0] && now >= g.next_poll_ms) {
         g.next_poll_ms = now + POLL_MS;
-        plink_send(g.kind == PROG_PANO ? PROG_CMD_PANO : PROG_CMD_LAPSE, 2,
-                   g.kind == PROG_PANO ? "step:3;" : "step:4;");
+        plink_send(w.cmd, 2, w.poll_step);
     }
-    /* Stale, not finished. See STALE_MS. */
+    /* Stale, not finished. See STALE_MS. For HDR, "stale" only means the head
+     * has gone quiet -- expected between its short bracket and completion, so
+     * the UI treats HDR staleness gently. */
     if (!g.stale && now - g.last_reply_ms > STALE_MS) {
         g.stale = 1;
         fprintf(stderr, "[prog] no progress reply for %.0f s — run state unknown\n",
@@ -319,17 +541,21 @@ int lapse_durations(const lapse_params_t *p, double *shooting_s, double *video_s
 int prog_status_json(char *out, int cap) {
     int n = 0;
     const char *kind = g.kind == PROG_LAPSE ? "timelapse"
-                     : g.kind == PROG_PANO  ? "panorama" : "none";
+                     : g.kind == PROG_PANO  ? "panorama"
+                     : g.kind == PROG_HDR   ? "hdr"
+                     : g.kind == PROG_FOCUS ? "focus" : "none";
     n += snprintf(out + n, cap - n, "{\"kind\":\"%s\"", kind);
     if (g.kind == PROG_NONE) return n + snprintf(out + n, cap - n, "}");
 
     n += snprintf(out + n, cap - n,
         ",\"elapsed_s\":%.0f,\"total\":%ld,\"remaining\":%ld,\"unlimited\":%s,"
-        "\"paused\":%s,\"stale\":%s",
+        "\"paused\":%s,\"preview\":%s,\"stale\":%s",
         (plink_now_ms() - g.started_ms) / 1000.0,
         g.total, g.remaining,
         g.total == -1 ? "true" : "false",
-        g.paused ? "true" : "false",
+        /* paused==2 is the focus-PREVIEW sentinel, not a real pause. */
+        (g.paused == 1) ? "true" : "false",
+        (g.paused == 2) ? "true" : "false",
         g.stale ? "true" : "false");
     if (g.total > 0 && g.remaining >= 0)
         n += snprintf(out + n, cap - n, ",\"taken\":%ld", g.total - g.remaining);
@@ -340,5 +566,7 @@ int prog_status_json(char *out, int cap) {
     if (g.kind == PROG_LAPSE)
         n += snprintf(out + n, cap - n, ",\"interval_s\":%.3f,\"fps\":%d",
                       g.lapse.interval_s, g.lapse.fps);
+    if (g.kind == PROG_FOCUS)
+        n += snprintf(out + n, cap - n, ",\"shots\":%d", g.focus.shots);
     return n + snprintf(out + n, cap - n, "}");
 }

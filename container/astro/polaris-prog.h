@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
- * polaris-prog — the capture programmes: timelapse (272) and panorama (271).
+ * polaris-prog — the capture programmes: timelapse (272), panorama (271),
+ *                HDR (280) and focus stacking (270).
  *
  * WHY THE SERVER OWNS THESE
  * -------------------------
@@ -18,13 +19,14 @@
  *
  * THE HONEST CAVEAT, WHICH IS LOAD-BEARING
  * ----------------------------------------
- * The timelapse payloads are read directly from the app's own layout classes
- * and are solid. The PANORAMA START payload is NOT: `SP_PANORAMIC_START` has
- * zero call sites in the decompiled app and `MainActivity.clickStart` — the
- * method that binds its boolean arguments — failed to decompile
- * (docs/APP-FEATURES.md, "what a naive panorama port gets wrong", item 14). The
- * field ORDER and the units are established; the runtime binding of `isp`,
- * `bgsem` and `dir` is inference.
+ * The timelapse, HDR and focus-stack payloads are read directly from the app's
+ * own `getStartShootingParameter()` builders and are solid — HDR's is the exact
+ * `p1/p2/p3:<bulb>,<sIdx>,<fIdx>,<evIdx>,<isoIdx>,<wbIdx>` triple, focus's is
+ * `;num:<shots>;`. The PANORAMA START payload is the one that is NOT solid:
+ * `SP_PANORAMIC_START` has zero call sites and `MainActivity.clickStart` — which
+ * binds its boolean arguments — failed to decompile (docs/APP-FEATURES.md,
+ * "what a naive panorama port gets wrong", item 14). Its field ORDER and units
+ * are established; the runtime binding of `isp`, `bgsem` and `dir` is inference.
  *
  * So panorama start is built here but never sent blind: prog_pano_preview()
  * renders the exact frame for a human to read first, the UI shows it, and the
@@ -37,8 +39,24 @@
 #include <stddef.h>
 
 /* Opcodes and the step selectors, from docs/APP-PROTOCOL.md §5.6. */
+#define PROG_CMD_FOCUS      270
 #define PROG_CMD_PANO       271
 #define PROG_CMD_LAPSE      272
+#define PROG_CMD_HDR        280
+
+/* Focus stack (270). Racking the lens between two limits is SETUP done before
+ * the run: mark the near limit, rack, mark the far limit, then start. */
+#define FOCUS_STEP_MARK_A    1
+#define FOCUS_STEP_MARK_B    2
+#define FOCUS_STEP_START     3
+#define FOCUS_STEP_CANCEL    6
+#define FOCUS_STEP_RUNNING   7
+#define FOCUS_STEP_PREVIEW   8
+
+/* HDR (280). Always exactly three frames; the head pushes progress
+ * (step:5;ret:<remaining>) and completion (step:3) rather than being polled. */
+#define HDR_STEP_START       1
+#define HDR_STEP_CANCEL      4
 
 #define PANO_STEP_START      2
 #define PANO_STEP_REMAINING  3
@@ -57,7 +75,9 @@
 typedef enum {
     PROG_NONE = 0,
     PROG_LAPSE,
-    PROG_PANO
+    PROG_PANO,
+    PROG_HDR,
+    PROG_FOCUS
 } prog_kind_t;
 
 typedef struct {
@@ -86,11 +106,42 @@ typedef struct {
     int    isp;          /* in-head stitching                               */
 } pano_params_t;
 
+typedef struct {
+    /* Frames bracket the SHUTTER around the camera's current exposure, `spread`
+     * entries apart in the camera's own shutter list (the head takes indices,
+     * not stops, so this is unambiguous whatever the list spacing). The other
+     * axes (aperture/EV/ISO/WB) are held at the current setting. */
+    int spread;      /* shutter-list steps between adjacent frames, >=1        */
+    int isp;         /* merge in the head                                      */
+} hdr_params_t;
+
+typedef struct {
+    int shots;       /* 2..200                                                 */
+    int isp;         /* stitch all-in-focus in the head                        */
+} focus_params_t;
+
 /* Start a programme. Returns 0 on success, -1 with `err` filled otherwise
  * (link down, another programme already running, or a parameter out of range).
  * Both MOVE MOTORS; the HTTP layer gates them behind an explicit confirm. */
 int prog_start_lapse(const lapse_params_t *p, char *err, size_t errcap);
 int prog_start_pano (const pano_params_t  *p, char *err, size_t errcap);
+int prog_start_hdr  (const hdr_params_t   *p, char *err, size_t errcap);
+int prog_start_focus(const focus_params_t *p, char *err, size_t errcap);
+
+/* HDR and focus-stack render a preview too -- HDR because it resolves the three
+ * shutter values from the camera's live indices (so you see the actual speeds
+ * before firing), focus because a dry preview traverse exists in the protocol.
+ * `hdr_preview` fills `shutters` with the three human labels when it can. */
+int prog_hdr_preview  (const hdr_params_t *p, char *out, size_t outcap);
+int prog_check_hdr    (const hdr_params_t *p, char *err, size_t errcap);
+int prog_check_focus  (const focus_params_t *p, char *err, size_t errcap);
+
+/* Focus-stack SETUP, before a run. Mark the near limit, rack the lens (via the
+ * 311 focus-adjust opcode through the ordinary send path), mark the far limit.
+ * `prog_focus_mark(0)` = near/start, `(1)` = far/end. */
+int prog_focus_mark(int which);
+/* A dry preview traverse between the marked limits (270 step 8). */
+int prog_focus_preview(const focus_params_t *p, char *err, size_t errcap);
 
 /* Render the exact frame a pano start WOULD send, without sending it. This
  * exists because the pano start payload is inference — see the header comment.

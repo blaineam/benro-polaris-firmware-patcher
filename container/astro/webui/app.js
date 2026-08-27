@@ -640,7 +640,9 @@ function paintProg(d) {
   pick.hidden = !!running;
   if (!running) return;
 
-  $('#progrun-title').textContent = d.kind === 'panorama' ? 'Panorama running' : 'Timelapse running';
+  var titles = { panorama: 'Panorama running', timelapse: 'Timelapse running',
+                 hdr: 'HDR bracket', focus: d.preview ? 'Focus preview' : 'Focus stack running' };
+  $('#progrun-title').textContent = titles[d.kind] || 'Running';
 
   var fill = $('#progfill');
   var known = !d.unlimited && typeof d.remaining === 'number' && d.remaining >= 0 && d.total > 0;
@@ -706,6 +708,104 @@ function progPoll() {
   }).catch(function () { progTimer = setTimeout(progPoll, 4000); });
 }
 
+/* ---- HDR panel ---- */
+
+function armHdr() {
+  var btn = $('#hdr-start');
+  var params = { spread: parseInt($('#hdr-spread').value, 10) || 3, isp: $('#hdr-isp').checked ? 1 : 0 };
+  if (btn.dataset.armed !== '1') {
+    /* first tap: resolve the real three shutter speeds and show them */
+    post('/api/prog/hdr', params).then(function (r) {
+      if (!r || r.valid === false) {
+        $('#hdr-preview').hidden = true;
+        setHint('<b>HDR is not ready.</b> ' + ((r && r.error) || ''));
+        return;
+      }
+      setHint('');
+      /* the preview frame's trailing "shutters: a / b / c" line is the useful bit */
+      var m = /shutters:\s*(.+)$/.exec(r.frame || '');
+      $('#hdr-shutters').textContent = m ? m[1] : r.frame;
+      $('#hdr-preview').hidden = false;
+      btn.dataset.armed = '1'; btn.classList.add('armed');
+      btn.textContent = 'Fire the three-frame bracket';
+    });
+    return;
+  }
+  post('/api/prog/hdr', Object.assign(params, { confirm: 1 })).then(function (r) {
+    btn.dataset.armed = '0'; btn.classList.remove('armed');
+    btn.textContent = 'Preview HDR';
+    $('#hdr-preview').hidden = true;
+    if (r && r.ok === false) setHint('<b>HDR refused.</b> ' + (r.error || ''));
+    progRefresh();
+  });
+}
+
+/* ---- focus-stack panel ---- */
+
+var rackHold = 0;
+
+function focusMark(which, btn) {
+  post('/api/prog/focus/mark', { which: which }).then(function () {
+    if (btn) { btn.classList.add('marked'); setTimeout(function () { btn.classList.remove('marked'); }, 1500); }
+  });
+}
+
+function wireFocusRack() {
+  $$('.rack').forEach(function (btn) {
+    var adj = btn.dataset.adj;
+    /* Racking is a 311 focus-adjust, hold-repeats like the phone app (~300 ms).
+       It goes through the ordinary allowlisted send, not a bespoke route. */
+    function tick() { send(311, 'mode:1;adj:' + adj + ';'); }
+    btn.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+      tick();
+      if (navigator.vibrate) navigator.vibrate(6);
+      rackHold = setInterval(tick, 300);
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) {
+      btn.addEventListener(ev, function () { clearInterval(rackHold); });
+    });
+  });
+  $('#fs-mark-near').addEventListener('click', function () { focusMark(0, this); });
+  $('#fs-mark-far').addEventListener('click', function () { focusMark(1, this); });
+
+  $('#fs-preview').addEventListener('click', function () {
+    post('/api/prog/focus', { shots: parseInt($('#fs-shots').value, 10) || 14,
+                              isp: $('#fs-isp').checked ? 1 : 0, preview: 1 }).then(function (r) {
+      if (r && r.ok === false) setHint('<b>Preview refused.</b> ' + (r.error || ''));
+      progRefresh();
+    });
+  });
+
+  var start = $('#fs-start');
+  start.addEventListener('click', function () {
+    var params = { shots: parseInt($('#fs-shots').value, 10) || 14, isp: $('#fs-isp').checked ? 1 : 0 };
+    if (start.dataset.armed !== '1') {
+      /* validate + arm */
+      post('/api/prog/focus', params).then(function (r) {
+        if (r && r.valid === false) { setHint('<b>Focus stack:</b> ' + (r.error || '')); return; }
+        setHint('');
+        start.dataset.armed = '1'; start.classList.add('armed');
+        start.textContent = 'Tap again — racks focus and shoots';
+        setTimeout(function () {
+          if (start.dataset.armed === '1') {
+            start.dataset.armed = '0'; start.classList.remove('armed');
+            start.textContent = 'Start focus stack';
+          }
+        }, 4000);
+      });
+      return;
+    }
+    post('/api/prog/focus', Object.assign(params, { confirm: 1 })).then(function (r) {
+      start.dataset.armed = '0'; start.classList.remove('armed');
+      start.textContent = 'Start focus stack';
+      if (r && r.ok === false) setHint('<b>Focus stack refused.</b> ' + (r.error || ''));
+      progRefresh();
+    });
+  });
+}
+
 function wirePrograms() {
   $$('.seg').forEach(function (b) {
     b.addEventListener('click', function () {
@@ -725,6 +825,16 @@ function wirePrograms() {
     .forEach(function (sel) { $(sel).addEventListener('input', paintPanoDerived); });
   $('#pa-start').addEventListener('click', armPano);
   paintPanoDerived();
+
+  /* Re-preview HDR / re-arm focus when their inputs change. */
+  ['#hdr-spread', '#hdr-isp'].forEach(function (sel) {
+    $(sel).addEventListener('input', function () {
+      var b = $('#hdr-start');
+      if (b.dataset.armed === '1') { b.dataset.armed = '0'; b.classList.remove('armed'); b.textContent = 'Preview HDR'; $('#hdr-preview').hidden = true; }
+    });
+  });
+  $('#hdr-start').addEventListener('click', armHdr);
+  wireFocusRack();
 }
 
 /* ──────────────────────────────── tabs ─────────────────────────────────── */
