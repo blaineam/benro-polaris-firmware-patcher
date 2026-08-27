@@ -1684,31 +1684,87 @@ static const char PAGE[] =
 typedef struct {
     int         cmd;
     const char *name;
+    int         sub;        /* subsystem selector -- see below             */
     int         moves;      /* 1 => needs confirm=1                        */
     const char *note;
 } opcode_policy_t;
 
+/* THE SUBSYSTEM SELECTOR IS PER-OPCODE AND THE TABLE OWNS IT.
+ *
+ * The third wire field is not a constant: camera parameters ride 1, status and
+ * capture ride 2, gimbal motion rides 3, camera identity rides 4 -- and there
+ * are exceptions inside those ranges (520 and 526 use 2 despite being 5xx).
+ * A command sent on the wrong subsystem is not rejected, it is IGNORED, which
+ * debugs like a dead mount. So the client does not get to choose: it names an
+ * opcode and the server supplies the selector documented for it.
+ *
+ * Values below are from docs/APP-PROTOCOL.md §5, each traceable to the
+ * decompiled app. An opcode whose payload is not documented there does not
+ * belong in this table yet -- see the note at the end.
+ */
 static const opcode_policy_t OPCODES[] = {
-    /* --- read-only telemetry: safe, idempotent, no side effects --------- */
-    { 284, "mode",            0, "operating mode + tracking flag" },
-    { 517, "raw-angles",      0, "raw motor angles (yaw/pitch/roll, radians)" },
-    { 518, "pose",            0, "quaternion + compass + altitude" },
+    /* --- read-only telemetry and identity ------------------------------ */
+    { 284, "mode",          3, 0, "operating mode + tracking flag" },
+    { 517, "raw-angles",    3, 0, "raw motor angles (radians, pitch negated)" },
+    { 518, "pose",          3, 0, "quaternion + compass + altitude" },
+    { 778, "battery",       2, 0, "capacity + charging state" },
+    { 775, "sd-info",       2, 0, "card status, total/free/used space" },
+    { 286, "camera-info",   4, 0, "connected camera identity" },
+    { 282, "image-format",  4, 0, "current image format" },
+    { 292, "preview-state", 2, 0, "is the camera preview stream on" },
 
-    /* --- motion: every one of these can move the head ------------------- */
-    { 519, "goto",            1, "slew to alt/az, or abort an in-flight slew" },
-    { 531, "track",           1, "sidereal tracking on/off" },
+    /* --- camera option lists. Fetch these BEFORE setting anything: the
+     *     set commands take an INDEX into these lists, not a physical value,
+     *     so a hardcoded table silently sets the wrong exposure. ---------- */
+    { 265, "iso-options",     1, 0, "ISO option list + selected index" },
+    { 266, "wb-options",      1, 0, "white-balance option list + index" },
+    { 267, "ev-options",      1, 0, "exposure-compensation list + index" },
+    { 268, "shutter-options", 1, 0, "shutter-speed list + index" },
+    { 275, "aperture-options",1, 0, "aperture list + index" },
+
+    /* --- camera settings. Index-valued; see above. --------------------- */
+    { 258, "set-iso",       1, 0, "iso:<index into 265's list>" },
+    { 259, "set-wb",        1, 0, "wb:<index into 266's list>" },
+    { 260, "set-ev",        1, 0, "ev:<index into 267's list>" },
+    { 261, "set-shutter",   1, 0, "s:<index into 268's list>" },
+    { 276, "set-aperture",  1, 0, "fNum:<index into 275's list>" },
+    { 262, "set-focus",     1, 0, "mod:<mode>;f:<value>" },
+    { 311, "focus-adjust",  1, 0, "mode:<m>;adj:<v> -- nudges focus" },
+    { 291, "set-preview",   2, 0, "state:<0|1> -- the MJPEG stream on :8080" },
+
+    /* --- capture. Not motion, but these DO commit frames to the card, so
+     *     they are confirmed like motion is: a stray retry should not fire
+     *     the shutter during a long exposure. --------------------------- */
+    { 264, "photo",         2, 1, "state:<s>;bulb:<b>;c:<c> -- fires the shutter" },
+    { 263, "record",        2, 1, "state:<0|1> -- video record start/stop" },
+
+    /* --- motion ---------------------------------------------------------
+     * The jog opcodes (513/514/521, 532/533/534) are deliberately NOT here:
+     * they go through /api/move, which owns the 50 ms repeat and the dead-man
+     * stop. Reaching them through the raw send endpoint would bypass both and
+     * is exactly how an axis gets left running. */
+    { 519, "goto",          3, 1, "state;yaw;pitch;lat;lng;track;speed -- slews" },
+    { 531, "track",         3, 1, "sidereal tracking on/off" },
+    { 523, "recentre",      3, 1, "axis:<1|2|3> -- re-zero one axis" },
+    { 549, "auto-level",    3, 1, "state:<0|1> -- actively levels the head" },
 
     /* --- alignment ------------------------------------------------------ */
-    { 527, "set-heading",     1, "write the compass heading (this is alignment)" },
+    { 527, "set-heading",   3, 1, "compass heading; UNSIGNED [0,360) offset by 180" },
+    { 547, "auto-level-en", 3, 0, "read the auto-level enable flag" },
+    { 548, "set-auto-level-en", 3, 0, "en:<0|1> -- persistent" },
 
     /* NOT LISTED, DELIBERATELY:
-     *   530  multi-step star alignment -- wedges the motors on repeat.
-     *        polaris-mount.c refuses it too; one 527 does the same job.
-     *   808  registration -- owned by the link layer, not the UI.
+     *   530  multi-step star alignment -- wedges the motors on repeat, and the
+     *        app, the alpaca driver and polaris-mount.c describe three
+     *        DIFFERENT step sequences. One 527 does the job.
+     *   542  releases the travel limits -- and the polarity is inverted from
+     *        the obvious reading (state:1 = limits OFF). A UI one fetch() away
+     *        from letting the head swing into its own accessory is not a UI.
+     *   772  deletes files.
+     *   808  registration -- owned by the link layer.
      *   anything that writes flash or firmware.
-     * The camera and creative-program opcodes go here as docs/APP-PROTOCOL.md
-     * confirms each one's payload; an undocumented guess in this table is a
-     * command sent blind at real hardware. */
+     * Adding an opcode here means finding its payload in docs/APP-PROTOCOL.md
+     * first. A guess in this table is a command sent blind at real hardware. */
 };
 #define OPCODE_COUNT (sizeof OPCODES / sizeof OPCODES[0])
 
@@ -1737,6 +1793,32 @@ static int link_wanted(void) {
     if (f && *f && *f != '0') return 1;
     if (access(KEEPWIFI_FORCE, F_OK) == 0) return 1;
     return alignment_state() == 1;
+}
+
+/* Ask for the things the head does NOT push.
+ *
+ * Pose, mode and raw angles stream on their own once registered. Battery, card
+ * space and camera identity are request/response -- the phone app polls them on
+ * a 2 s timer. We poll slower: nothing here changes fast, the AP is shared with
+ * the live-view stream, and a status chip that is five seconds stale is honest
+ * while a flooded radio is not.
+ *
+ * Camera identity is asked for less often still: it only changes when a body is
+ * plugged or unplugged, and it rides subsystem 4 rather than 2. */
+static void telemetry_poll(void) {
+    static double last_fast = 0, last_slow = 0;
+    double now = plink_now_ms();
+    if (plink_status() != PLINK_UP) { last_fast = last_slow = 0; return; }
+    if (now - last_fast > 5000.0) {
+        last_fast = now;
+        plink_send(778, 2, "");     /* battery: capacity + charging      */
+        plink_send(775, 2, "");     /* card: status + free/total/used    */
+    }
+    if (now - last_slow > 30000.0) {
+        last_slow = now;
+        plink_send(286, 4, "");     /* camera identity                   */
+        plink_send(292, 2, "");     /* is the preview stream running     */
+    }
 }
 
 /* Bring the link up or down to match policy. Called from the event loop, so it
@@ -1912,22 +1994,20 @@ static void handle(int fd) {
 
     /* Send one allowlisted opcode. POST cmd=519&args=...&confirm=1 */
     if (!strcmp(path, "/api/link/send")) {
-        char cmds[16] = "", args[PLINK_ARGS_MAX] = "", conf[8] = "", types[8] = "";
+        char cmds[16] = "", args[PLINK_ARGS_MAX] = "", conf[8] = "";
         const opcode_policy_t *pol;
-        long cmd = 0, type = PLINK_TYPE_CONTROL;
+        long cmd = 0;
         if (strcmp(method, "POST") && strcmp(method, "PUT")) {
             respond(fd, 405, "text/plain", "POST only\n", 10); return;
         }
         if (!param(qs, "cmd", cmds, sizeof cmds) && body) param(body, "cmd", cmds, sizeof cmds);
         if (!param(qs, "args", args, sizeof args) && body) param(body, "args", args, sizeof args);
-        if (!param(qs, "type", types, sizeof types) && body) param(body, "type", types, sizeof types);
         if (!param(qs, "confirm", conf, sizeof conf) && body) param(body, "confirm", conf, sizeof conf);
         /* parse_*_strict return 1 on SUCCESS (they read as predicates at the
          * call sites in handle_alpaca). Inverting that here cost a debugging
          * round: every request answered "cmd must be a number" for a cmd that
          * was a perfectly good number. */
         if (!parse_long_strict(cmds, &cmd)) { respond_400(fd, "cmd must be a number"); return; }
-        if (types[0] && !parse_long_strict(types, &type)) { respond_400(fd, "type must be a number"); return; }
 
         pol = opcode_policy((int)cmd);
         if (!pol) {
@@ -1952,7 +2032,9 @@ static void handle(int fd) {
             respond(fd, 503, "application/json", msg, strlen(msg));
             return;
         }
-        if (plink_send((int)cmd, (int)type, args) != 0) {
+        /* The TABLE's subsystem, never the client's: see the comment above
+         * OPCODES[]. A wrong selector is ignored by the head, not rejected. */
+        if (plink_send((int)cmd, pol->sub, args) != 0) {
             const char *msg = "{\"ok\":false,\"error\":\"send failed\"}";
             respond(fd, 502, "application/json", msg, strlen(msg));
             return;
@@ -2026,13 +2108,13 @@ static void handle(int fd) {
     /* What the UI is allowed to send, so it can grey out what it cannot do
      * instead of discovering it with a 403 mid-gesture. */
     if (!strcmp(path, "/api/link/opcodes")) {
-        char out[4096];
+        char out[8192];
         int n = 0; size_t i;
         n += snprintf(out + n, sizeof out - n, "{\"opcodes\":[");
         for (i = 0; i < OPCODE_COUNT && n < (int)sizeof out - 256; i++) {
             n += snprintf(out + n, sizeof out - n,
-                "%s{\"cmd\":%d,\"name\":\"%s\",\"moves\":%s,\"note\":\"%s\"}",
-                i ? "," : "", OPCODES[i].cmd, OPCODES[i].name,
+                "%s{\"cmd\":%d,\"name\":\"%s\",\"sub\":%d,\"moves\":%s,\"note\":\"%s\"}",
+                i ? "," : "", OPCODES[i].cmd, OPCODES[i].name, OPCODES[i].sub,
                 OPCODES[i].moves ? "true" : "false", OPCODES[i].note);
         }
         n += snprintf(out + n, sizeof out - n, "]}");
@@ -2736,6 +2818,7 @@ int main(int argc, char **argv) {
         }
         link_reconcile();
         plink_pump();
+        telemetry_poll();
         jog_tick();
         if (FD_ISSET(sfd, &rf)) {
             int c = accept(sfd, NULL, NULL);

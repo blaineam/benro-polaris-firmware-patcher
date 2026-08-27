@@ -87,6 +87,15 @@ class Mount:
         self.slew_rate = args.slew_rate        # deg/s
         self.jitter = args.jitter              # deg, non-repeatable settle error
         self.true_alt, self.true_az = 45.0, (0.0 + self.az_error) % 360.0
+        # Jog velocity per axis, deg/s, set by 513/514/521 (fast, continuous)
+        # and 532/533/534 (slow, latched). `jog_seen` is the last time a fast
+        # command arrived: fast jog is a dead-man stream on real hardware, and
+        # modelling it as one is the whole point -- a client that stops sending
+        # must visibly stop the mount here too.
+        self.jog = {"pan": 0.0, "tilt": 0.0, "rot": 0.0}
+        self.jog_seen = {"pan": 0.0, "tilt": 0.0, "rot": 0.0}
+        self.jog_latched = {"pan": False, "tilt": False, "rot": False}
+        self.jog_t = time.time()
         self.track_drift = getattr(args, "track_drift", 0.0)   # arcsec/min
         self.track_t0 = None
         self.drift_accum = 0.0
@@ -121,6 +130,30 @@ class Mount:
                     self.true_az = (self.true_az + self.drift_accum) % 360.0
             else:
                 self.track_t0 = None
+
+            # ---- jog integration -------------------------------------------
+            now = time.time()
+            dt = now - self.jog_t
+            self.jog_t = now
+            if dt > 0:
+                for axis, v in self.jog.items():
+                    if v == 0.0:
+                        continue
+                    # A fast-jog stream that stopped arriving means the client
+                    # went away. Real hardware MAY keep going (nobody has
+                    # established that it stops), so the sim models the
+                    # PESSIMISTIC case only for the latched family and stops
+                    # the continuous one after 250 ms of silence -- which is
+                    # what lets a test tell "the server kept renewing" from
+                    # "the server stopped".
+                    if not self.jog_latched[axis] and now - self.jog_seen[axis] > 0.25:
+                        self.jog[axis] = 0.0
+                        continue
+                    if axis == "pan":
+                        self.true_az = (self.true_az + v * dt) % 360.0
+                    elif axis == "tilt":
+                        self.true_alt = max(-90.0, min(90.0, self.true_alt + v * dt))
+                    # rot has no effect on the reported alt/az frame here
 
     def goto(self, want_az_reported, want_alt_reported, track, done):
         """Slew to a commanded position. The command is in the mount's own
@@ -280,6 +313,57 @@ class Handler(socketserver.BaseRequestHandler):
                           f"true {mount.true_az:.4f}/{mount.true_alt:.4f} "
                           f"-> az_error {mount.az_error:.4f}", flush=True)
             self.send("530@ret:0;")
+        elif cmd in ("513", "514", "521"):
+            # Fast/continuous jog: speed:<signed>, magnitude 100..2500, and it
+            # must keep arriving to sustain motion. Calibration from the alpaca
+            # driver's measured table: raw 2500 ~= 8.92 deg/s.
+            axis = {"513": "pan", "514": "tilt", "521": "rot"}[cmd]
+            try:
+                raw = float(args.get("speed", 0))
+            except ValueError:
+                raw = 0.0
+            with mount.lock:
+                mount.jog[axis] = (raw / 2500.0) * 8.92
+                mount.jog_seen[axis] = time.time()
+                mount.jog_latched[axis] = False
+            self.send(f"{cmd}@ret:0;")
+        elif cmd in ("532", "533", "534"):
+            # Slow/latched jog: state:1 presses, state:0 releases, and a press
+            # with no release runs forever -- modelled faithfully, because that
+            # is the hazard the whole dead-man design exists to contain.
+            axis = {"532": "pan", "533": "tilt", "534": "rot"}[cmd]
+            state = args.get("state", "0")
+            key = args.get("key", "0")
+            try:
+                level = int(args.get("level", 1))
+            except ValueError:
+                level = 1
+            with mount.lock:
+                if state == "0":
+                    mount.jog[axis] = 0.0
+                    mount.jog_latched[axis] = False
+                else:
+                    sign = -1.0 if key == "1" else 1.0
+                    mount.jog[axis] = sign * level * 0.5      # deg/s per gear
+                    mount.jog_latched[axis] = True
+                    mount.jog_seen[axis] = time.time()
+            self.send(f"{cmd}@ret:0;")
+        elif cmd == "523":
+            # SP_GIMBAL_POS_RESET -- re-zero one axis.
+            with mount.lock:
+                if args.get("axis") == "1":
+                    mount.true_az = mount.az_error % 360.0
+                elif args.get("axis") == "2":
+                    mount.true_alt = 0.0
+            self.send("523@ret:0;")
+        elif cmd == "808":
+            # Registration. The real head answers it and starts counting the
+            # client for the wifi-power timer.
+            self.send("808@ret:0;")
+        elif cmd == "778":
+            self.send("778@capacity:82;charge:0;")
+        elif cmd == "775":
+            self.send("775@status:1;totalspace:62914560;freespace:41943040;usespace:20971520;")
         elif cmd == "284":
             self.send(f"284@mode:{mount.mode};track:{1 if mount.tracking else 0};")
 

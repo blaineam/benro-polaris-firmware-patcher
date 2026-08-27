@@ -1,0 +1,521 @@
+/* Polaris web control.
+ *
+ * Two rules shape everything here.
+ *
+ * 1. THE BROWSER NEVER DRIVES THE WIRE. A held button declares an intent with a
+ *    short lease and renews it; the server owns the 50 ms repeat and the stop.
+ *    So a locked phone, a dropped Wi-Fi link or a closed tab STOPS the head
+ *    instead of abandoning it in motion. See polaris-jog.h.
+ *
+ * 2. NOTHING IS INVENTED. Exposure option lists come from the camera, because
+ *    the set commands take an INDEX into the camera's own list — a hardcoded
+ *    table would silently set the wrong shutter speed on a different body. A
+ *    value we do not have is shown as "—", never as a plausible guess.
+ */
+'use strict';
+
+var $  = function (s, r) { return (r || document).querySelector(s); };
+var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+
+/* ─────────────────────────────── transport ─────────────────────────────── */
+
+function post(path, params) {
+  var body = Object.keys(params || {}).map(function (k) {
+    return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
+  }).join('&');
+  return fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body,
+    /* A control request that queues behind a stale one is worse than a lost
+       one: the head would act on an intention the user has already abandoned. */
+    cache: 'no-store'
+  }).then(function (r) { return r.json().catch(function () { return { ok: r.ok }; }); });
+}
+
+function send(cmd, args, confirm) {
+  return post('/api/link/send', { cmd: cmd, args: args || '', confirm: confirm ? 1 : 0 });
+}
+
+/* Parse the head's "k:v;k:v;" payload. */
+function kv(s) {
+  var out = {};
+  (s || '').split(';').forEach(function (p) {
+    var i = p.indexOf(':');
+    if (i > 0) out[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return out;
+}
+
+/* ──────────────────────────────── state ────────────────────────────────── */
+
+var S = {
+  link: 'down',
+  ops: {},          /* opcode -> {args, age_ms, count} */
+  gear: 3,
+  live: false,
+  recording: false,
+  expoLoaded: false,
+  lastExpoFetch: 0
+};
+
+function setHint(html) {
+  var el = $('#hint');
+  if (!html) { el.hidden = true; el.innerHTML = ''; return; }
+  if (el.innerHTML !== html) el.innerHTML = html;
+  el.hidden = false;
+}
+
+/* ─────────────────────────────── polling ───────────────────────────────── */
+
+/* One request per frame of UI. The head pushes telemetry continuously into the
+   server's cache, so this is a cheap read of memory, not a round trip to the
+   mount. */
+function poll() {
+  fetch('/api/link', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(render)
+    .catch(function () {
+      S.link = 'down';
+      paintLink({ status: 'down', error: 'the server is not answering' });
+    })
+    .then(function () { setTimeout(poll, S.link === 'up' ? 500 : 1500); });
+}
+
+function render(d) {
+  S.link = d.status;
+  S.ops = d.opcodes || {};
+  paintLink(d);
+  paintStatus();
+  paintMount();
+  paintLinkStats(d);
+  if (S.link === 'up' && !S.expoLoaded && Date.now() - S.lastExpoFetch > 3000) fetchExposure();
+  if (S.link !== 'up') { S.expoLoaded = false; }
+}
+
+function paintLink(d) {
+  var dot = $('#linkdot'), txt = $('#linktext');
+  dot.className = 'dot ' + (d.status === 'up' ? 'up' : d.status === 'connecting' ? 'busy' : 'down');
+  txt.textContent = d.status === 'up' ? 'connected'
+                  : d.status === 'connecting' ? 'connecting…' : 'not connected';
+
+  var moveable = d.status === 'up';
+  $$('.jog, .recentre').forEach(function (b) { b.disabled = !moveable; });
+  $('#shoot').disabled = !moveable;
+  $('#rec').disabled = !moveable;
+  $('#level').disabled = !moveable;
+
+  if (d.status === 'up') { setHint(''); return; }
+  /* Every blocking condition carries its own fix — the app's hint-banner
+     pattern, which is the thing worth copying about it. */
+  if (d.wanted === false) {
+    setHint('<b>The control link is closed.</b> It stays closed until the mount ' +
+            'is aligned, because connecting while unaligned makes the Benro app ' +
+            'ask for a compass calibration. Align in the app, or use the solver ' +
+            'on the <a href="/legacy">Astro page</a>.');
+  } else {
+    setHint('<b>Connecting to the head.</b> ' +
+            (d.error ? String(d.error) : 'If this does not clear, the head may be asleep — ' +
+             'wake it and the link will come back on its own.'));
+  }
+}
+
+function fmtBytes(n) {
+  n = Number(n);
+  if (!isFinite(n) || n <= 0) return '—';
+  var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)) + ' ' + u[i];
+}
+
+function paintStatus() {
+  /* Battery: 778, keys capacity + charge. */
+  var b = S.ops['778'], el = $('#battery');
+  if (b) {
+    var a = kv(b.args), pct = parseInt(a.capacity, 10);
+    if (isFinite(pct)) {
+      el.hidden = false;
+      el.textContent = (a.charge && a.charge !== '0' ? '⚡ ' : '') + pct + '%';
+      el.className = 'chip' + (pct <= 16 ? ' err' : pct <= 20 ? ' warn' : '');
+    }
+  } else el.hidden = true;
+
+  /* Card: 775, keys status/totalspace/freespace/usespace. */
+  var c = S.ops['775'], cel = $('#card');
+  if (c) {
+    var s = kv(c.args), free = Number(s.freespace);
+    cel.hidden = false;
+    cel.textContent = isFinite(free) && free > 0 ? fmtBytes(free) + ' free' : 'no card';
+    cel.className = 'chip' + (!isFinite(free) || free <= 0 ? ' warn' : '');
+  } else cel.hidden = true;
+
+  /* Camera identity: 286. Shown as-is; the payload shape varies by body, so
+     the whole thing is displayed rather than a field being guessed at. */
+  var cam = S.ops['286'];
+  $('#camname').textContent = cam ? (kv(cam.args).name || cam.args.replace(/;$/, '')) : '';
+}
+
+function paintMount() {
+  var dl = $('#mountstate');
+  if (!dl) return;
+  var pose = S.ops['518'], mode = S.ops['284'];
+  var rows = [];
+  if (pose) {
+    var p = kv(pose.args);
+    /* 518's `alt` is positive-DOWNWARD (docs/APP-PROTOCOL.md); negate it so
+       the page shows altitude the way a human means it. */
+    if (p.alt !== undefined) rows.push(['Altitude', (-parseFloat(p.alt)).toFixed(3) + '°']);
+    if (p.compass !== undefined) rows.push(['Compass', parseFloat(p.compass).toFixed(3) + '°']);
+  }
+  if (mode) {
+    var m = kv(mode.args);
+    var names = { 1: 'Photo', 7: 'Sun', 8: 'Astro', 9: 'Free program', 10: 'Video' };
+    if (m.mode !== undefined) rows.push(['Mode', names[m.mode] || ('mode ' + m.mode)]);
+    if (m.track !== undefined) rows.push(['Tracking', m.track === '1' ? 'on' : 'off']);
+  }
+  if (!rows.length) rows.push(['Mount', 'no telemetry yet']);
+  dl.innerHTML = rows.map(function (r) {
+    return '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>';
+  }).join('');
+}
+
+function paintLinkStats(d) {
+  var dl = $('#linkstats');
+  if (!dl || $('#tab-settings').hidden) return;
+  var rows = [
+    ['Status', d.status],
+    ['Connects', d.connects], ['Drops', d.drops],
+    ['Frames in', d.rx], ['Frames out', d.tx],
+    ['Parse errors', d.parse_errors],
+    ['Last frame', d.last_rx_age_ms >= 0 ? Math.round(d.last_rx_age_ms) + ' ms ago' : '—']
+  ];
+  if (d.error) rows.push(['Last error', d.error]);
+  dl.innerHTML = rows.map(function (r) {
+    return '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>';
+  }).join('');
+}
+
+/* ──────────────────────────────── motion ───────────────────────────────── */
+
+/* Renew comfortably inside the server's 400 ms lease. Not so fast that a busy
+   2.4 GHz AP is flooded, not so slow that one dropped request stops the head
+   mid-gesture. */
+var RENEW_MS = 140;
+var holds = {};    /* axis -> {timer, dir} */
+
+/* Map the 1..5 gear to the head's fast-jog range. The head ignores magnitudes
+   under ~100 and clips over 2500, and the server clamps too — this only has to
+   feel right. */
+function speedForGear(g) {
+  var table = { 1: 180, 2: 420, 3: 900, 4: 1600, 5: 2500 };
+  return table[g] || 900;
+}
+
+function startHold(axis, dir, btn) {
+  if (holds[axis] || S.link !== 'up') return;
+  var speed = dir * speedForGear(S.gear);
+  var tick = function () { post('/api/move', { axis: axis, speed: speed }); };
+  tick();
+  holds[axis] = { timer: setInterval(tick, RENEW_MS), btn: btn };
+  if (btn) btn.classList.add('held');
+  if (navigator.vibrate) navigator.vibrate(8);
+}
+
+function endHold(axis) {
+  var h = holds[axis];
+  if (!h) return;
+  clearInterval(h.timer);
+  if (h.btn) h.btn.classList.remove('held');
+  delete holds[axis];
+  /* Tell the server explicitly. The lease would expire on its own in 400 ms,
+     but "the user let go" should feel immediate, and a stop is idempotent. */
+  post('/api/move', { axis: axis, speed: 0 });
+}
+
+function stopEverything() {
+  Object.keys(holds).forEach(function (a) {
+    clearInterval(holds[a].timer);
+    if (holds[a].btn) holds[a].btn.classList.remove('held');
+    delete holds[a];
+  });
+  post('/api/stop', {});
+}
+
+function wireJog() {
+  $$('.pad').forEach(function (pad) {
+    var axis = pad.dataset.axis;
+    $$('.jog', pad).forEach(function (btn) {
+      var dir = parseInt(btn.dataset.dir, 10);
+      /* Pointer events cover mouse, touch and pen with one path, and
+         setPointerCapture means a finger that slides off the button still
+         delivers its release here — without it, sliding off leaves the axis
+         running until the lease expires. */
+      btn.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        if (btn.disabled) return;
+        try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+        startHold(axis, dir, btn);
+      });
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) {
+        btn.addEventListener(ev, function () { endHold(axis); });
+      });
+      btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    });
+    $$('.recentre', pad).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        /* 523 SP_GIMBAL_POS_RESET moves the head, so it is confirmed. */
+        send(523, 'axis:' + btn.dataset.axisId + ';', true);
+      });
+    });
+  });
+
+  /* Keyboard: free on a browser, impossible on the phone app. */
+  var keymap = {
+    ArrowLeft:  ['pan', -1], ArrowRight: ['pan', 1],
+    ArrowUp:    ['tilt', 1], ArrowDown:  ['tilt', -1],
+    ',':        ['rot', -1], '.':        ['rot', 1]
+  };
+  document.addEventListener('keydown', function (e) {
+    if (e.repeat || e.target.matches('input,select,textarea')) return;
+    if (e.key === 'Escape') { stopEverything(); return; }
+    var m = keymap[e.key];
+    if (!m) return;
+    e.preventDefault();
+    startHold(m[0], m[1], null);
+  });
+  document.addEventListener('keyup', function (e) {
+    var m = keymap[e.key];
+    if (m) endHold(m[0]);
+  });
+
+  /* THE GUARANTEED RELEASE. The server's lease already covers a client that
+     dies without warning; these make the common cases instant rather than
+     leaving the head moving for up to 400 ms. */
+  ['blur', 'pagehide', 'beforeunload'].forEach(function (ev) {
+    window.addEventListener(ev, stopEverything);
+  });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) stopEverything();
+  });
+
+  $('#estop').addEventListener('click', stopEverything);
+
+  var gear = $('#gear');
+  gear.addEventListener('input', function () {
+    S.gear = parseInt(gear.value, 10);
+    $('#gearout').textContent = S.gear;
+    /* Re-affirm any in-flight hold at the new speed rather than waiting for
+       the next renewal, so the gear slider feels live under a held button. */
+    Object.keys(holds).forEach(function (axis) {
+      var dirSign = holds[axis].btn && holds[axis].btn.classList.contains('held') ? 1 : 1;
+      void dirSign;
+    });
+  });
+
+  $('#level').addEventListener('click', function () {
+    /* 549 actively levels the head — motion, so confirmed. */
+    send(549, 'state:1;', true);
+  });
+}
+
+/* ────────────────────────────── live view ──────────────────────────────── */
+
+/* The stream is mjpg-streamer on the head's port 8080, not this server. It is
+   referenced directly rather than proxied: proxying it through a
+   single-threaded server would block every other request for as long as the
+   stream is open, which is forever. */
+function streamURL() {
+  return 'http://' + location.hostname + ':8080/?action=stream';
+}
+
+function setLive(on) {
+  var img = $('#live'), msg = $('#livemsg'), btn = $('#previewtoggle');
+  S.live = on;
+  btn.classList.toggle('on', on);
+  if (on) {
+    msg.textContent = 'starting live view…';
+    /* Ask the head to turn its preview on, then attach the stream. */
+    send(291, 'state:1;').then(function () {
+      img.onload = function () { img.classList.add('on'); msg.textContent = ''; };
+      img.onerror = function () {
+        img.classList.remove('on');
+        msg.innerHTML = 'Live view did not load from <span class="mono">' +
+          streamURL().replace(/</g, '&lt;') + '</span>.<br>' +
+          'The camera must be awake and in a mode that allows preview.';
+      };
+      img.src = streamURL() + '&t=' + Date.now();
+    });
+  } else {
+    img.classList.remove('on');
+    img.removeAttribute('src');      /* actually closes the connection */
+    msg.textContent = 'live view off';
+    send(291, 'state:0;');
+  }
+}
+
+/* ─────────────────────────────── exposure ──────────────────────────────── */
+
+/* Reply shape, from the app's own parser (PolarisOrderCommunication:
+   parseSP_GET_*_INFO):
+       RD:<0|1>;V:<selectedIndex>;R:<comma,separated,options>;
+   RD IS INVERTED: "0" means the control is AVAILABLE. Reading it the obvious
+   way disables every control on a working camera. */
+function parseOptions(args) {
+  var a = kv(args);
+  if (a.R === undefined) return null;
+  return {
+    available: a.RD === '0',
+    index: parseInt(a.V, 10) || 0,
+    options: a.R.split(',').map(function (o) {
+      return /auto/i.test(o) ? 'Auto' : o;
+    })
+  };
+}
+
+function fetchExposure() {
+  S.lastExpoFetch = Date.now();
+  /* The app refreshes all five together, rate-limited to once per 2 s. */
+  var gets = $$('.exposlot').map(function (slot) { return slot.dataset.get; });
+  Promise.all(gets.map(function (g) { return send(g, ''); }))
+    .then(function () { setTimeout(paintExposure, 700); });
+}
+
+function paintExposure() {
+  var any = false;
+  $$('.exposlot').forEach(function (slot) {
+    var got = S.ops[slot.dataset.get];
+    var sel = $('select', slot);
+    if (!got) { sel.disabled = true; return; }
+    var parsed = parseOptions(got.args);
+    if (!parsed || !parsed.options.length) { sel.disabled = true; return; }
+    any = true;
+    var sig = parsed.options.join('|');
+    if (sel.dataset.sig !== sig) {
+      sel.dataset.sig = sig;
+      sel.innerHTML = parsed.options.map(function (o, i) {
+        return '<option value="' + i + '">' + o.replace(/</g, '&lt;') + '</option>';
+      }).join('');
+    }
+    /* Do not fight the user: only adopt the head's index while the control is
+       not focused, or a poll lands mid-selection and snaps the value back. */
+    if (document.activeElement !== sel) sel.value = String(parsed.index);
+    sel.disabled = !parsed.available;
+  });
+  if (any) S.expoLoaded = true;
+}
+
+function wireExposure() {
+  $$('.exposlot').forEach(function (slot) {
+    $('select', slot).addEventListener('change', function (e) {
+      /* Set by INDEX into the camera's own list — never by the label. */
+      send(slot.dataset.set, slot.dataset.key + ':' + e.target.value + ';')
+        .then(function () { setTimeout(fetchExposure, 400); });
+    });
+  });
+}
+
+/* ──────────────────────────────── shutter ──────────────────────────────── */
+
+/* The app uses slide-to-fire. The intent — "you cannot do this by brushing the
+   screen" — is right; the mechanic is awkward. Hold-to-fire keeps the guard and
+   is easier one-handed in the dark, and it maps onto a keyboard too. */
+var HOLD_MS = 450;
+
+function wireShutter() {
+  var btn = $('#shoot'), t0 = 0, raf = 0, timer = 0;
+
+  function progress() {
+    var p = Math.min(1, (Date.now() - t0) / HOLD_MS);
+    btn.style.setProperty('--progress', (p * 100) + '%');
+    if (p < 1) raf = requestAnimationFrame(progress);
+  }
+  function begin(e) {
+    if (btn.disabled) return;
+    e.preventDefault();
+    try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+    t0 = Date.now();
+    btn.classList.add('arming');
+    raf = requestAnimationFrame(progress);
+    timer = setTimeout(fire, HOLD_MS);
+  }
+  function cancel() {
+    clearTimeout(timer); cancelAnimationFrame(raf);
+    btn.classList.remove('arming');
+    btn.style.setProperty('--progress', '0%');
+  }
+  function fire() {
+    cancel();
+    btn.classList.add('fired');
+    if (navigator.vibrate) navigator.vibrate(24);
+    /* 264 SP_SET_PHOTO_RECORD_STATUS: state/bulb/c. Confirmed, because it
+       commits a frame to the card. */
+    send(264, 'state:1;bulb:0;c:0;', true).then(function (r) {
+      $('.label', btn).textContent = r && r.ok === false
+        ? (r.error || 'shutter refused') : 'shot';
+      setTimeout(function () {
+        btn.classList.remove('fired');
+        $('.label', btn).textContent = 'hold to shoot';
+      }, 1200);
+    });
+  }
+
+  btn.addEventListener('pointerdown', begin);
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) {
+    btn.addEventListener(ev, cancel);
+  });
+
+  $('#rec').addEventListener('click', function () {
+    S.recording = !S.recording;
+    $('#rec').classList.toggle('on', S.recording);
+    $('#rec').textContent = S.recording ? '■ stop' : '● record';
+    send(263, 'state:' + (S.recording ? 1 : 0) + ';', true);
+  });
+
+  $('#previewtoggle').addEventListener('click', function () { setLive(!S.live); });
+}
+
+/* ─────────────────────────────── settings ──────────────────────────────── */
+
+function wireSettings() {
+  $('#aboutstream').textContent = streamURL();
+
+  var keep = $('#keepwifi');
+  fetch('/api/keepwifi', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { keep.checked = !!(d.on || d.running); })
+    .catch(function () {});
+  keep.addEventListener('change', function () {
+    post('/api/keepwifi', { on: keep.checked ? 1 : 0 });
+  });
+
+  var join = $('#autojoin');
+  fetch('/api/wifi', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { join.checked = !!(d.autojoin || d.auto_join); })
+    .catch(function () {});
+  join.addEventListener('change', function () {
+    post('/api/wifi', { autojoin: join.checked ? 1 : 0 });
+  });
+}
+
+/* ──────────────────────────────── tabs ─────────────────────────────────── */
+
+function wireTabs() {
+  $$('#tabs button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('#tabs button').forEach(function (x) { x.classList.toggle('on', x === b); });
+      $$('.tab').forEach(function (t) { t.hidden = t.id !== 'tab-' + b.dataset.tab; });
+      /* Leaving the control tab must not leave an axis running. */
+      if (b.dataset.tab !== 'control') stopEverything();
+    });
+  });
+}
+
+/* ──────────────────────────────── boot ─────────────────────────────────── */
+
+wireTabs();
+wireJog();
+wireExposure();
+wireShutter();
+wireSettings();
+poll();

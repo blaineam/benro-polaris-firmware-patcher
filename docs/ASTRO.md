@@ -159,6 +159,52 @@ against pgphoto's 7.03 s budget.
 
 ---
 
+## The control app
+
+`polaris-httpd` now serves a full control surface at `/` — live view, pan/tilt/
+rotation jog, the camera's own exposure lists, shutter and record, battery and
+card status, and the Wi-Fi settings. It is a recreation of what the Benro
+Connect phone app does, running on the head and served to any browser, so the
+phone stops being required equipment. The protocol behind it is documented in
+[`APP-PROTOCOL.md`](APP-PROTOCOL.md) (122 opcodes) and the app's own feature set
+in [`APP-FEATURES.md`](APP-FEATURES.md).
+
+Three things about it are worth knowing before using it in the field.
+
+**One connection, held open.** Everything reaches the head through a single
+registered TCP session (`polaris-link`), the way the phone app does, instead of
+running `polaris-mount` per request. That is what makes a joystick possible —
+telemetry arrives at ~30 Hz instead of a five-second cache — and it doubles as
+the radio keepalive, so `wifi-keepalive.sh` is redundant while the server runs.
+It refuses to connect until the mount is aligned, for the reason that script
+documents: registering while unaligned makes the Benro app demand a compass
+calibration. `POLARIS_LINK_FORCE=1` overrides it for bench work.
+
+**The stop button is on the server, not in your browser.** Fast jog has to be
+re-sent every 50 ms and *nobody has established that the head stops on its own
+when the stream stops*; slow jog latches until it is explicitly released. So the
+browser never drives the wire — it declares an intent with a 400 ms lease and
+the server owns the repeat and the stop. A phone that locks, a tab that closes
+or a Wi-Fi drop mid-slew therefore **stops** the head rather than abandoning it
+in motion. `Esc`, the STOP button, leaving the Control tab, or backgrounding the
+page all stop everything immediately.
+
+**Nothing is guessed.** Only opcodes with a payload documented in
+`APP-PROTOCOL.md` are reachable, by name, default-deny; anything that moves a
+motor or fires the shutter additionally needs an explicit confirm. `530`
+(multi-step alignment, which wedges the motors) and `542` (which *releases* the
+travel limits — note the inverted polarity) are deliberately not exposed.
+
+Timelapse, panorama, HDR and focus stacking are mapped in the protocol doc but
+are not wired yet: each is a multi-step sequence, and a half-understood one
+leaves the head part-way through a grid with the shutter armed.
+
+### Live view
+
+The stream is the head's own mjpg-streamer on **:8080**, referenced directly
+rather than proxied — proxying it through this single-threaded server would
+block every other request for as long as the stream is open.
+
 ## Web UI
 
 `http://<polaris ip>:8090/` — solve status, last solution (RA/Dec, roll, pixel

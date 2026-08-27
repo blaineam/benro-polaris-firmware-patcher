@@ -42,7 +42,7 @@ The APK is one shell hosting three device families:
 |---|---|---|
 | `com.snoppa.libra` | the app shell itself — welcome, home, device list, global settings | yes |
 | `com.snoppa.polaris` | **the Polaris tripod head** | yes, in full |
-| `com.snoppa.theta` | a different Snoppa product (a 360/gimbal camera) | **excluded** |
+| `com.snoppa.theta` | a different Benro/Snoppa device family — **not** a Ricoh Theta and not a 360 camera | **excluded** |
 | `com.snoppa.application` | shared infrastructure: sockets, ijkplayer, the embedded Sky Map star engine | included where the Polaris uses it |
 
 `libra` is the *applicationId*, not a separate device: `WelcomeActivity`,
@@ -57,6 +57,15 @@ own shooting-mode set (`com/snoppa/theta/dialog/SelectShootingModelDialog.java:1
 — photo, video, static time-lapse, HDR, focus stack) which is a strict subset of
 the Polaris's and is *not* what the Polaris firmware speaks. Nothing Polaris-only
 was dropped.
+
+Two caveats about "Theta", because the name misleads. It is a **Benro hardware
+family**, identified by the BLE name prefixes `theta_live_` and `theta_oms_`
+(`application/constant/theta/ThetaCMD.java:6-7`) — the second of those is the
+**Optical Matrix Sensor Module** that the Polaris's own Holy Grail mode depends
+on (§3.7), so the two products are not unrelated. And **some Theta copy leaks
+into Polaris screens**: the Polaris `"Shooting Tips"` sheet is written entirely
+in Theta's voice (§5.7). Where a Theta string is the *only* evidence for a claim,
+this document says so.
 
 ## How the app talks to the head
 
@@ -78,16 +87,21 @@ Polaris path needs any of that.
 
 Command vocabulary is `SP_*` methods on
 `polaris/singleton/PolarisOrderCommunication.java` (3,865 lines, ~175 commands),
-with opcodes in `application/constant/polaris/PolarisCMD.java`. This document
-names commands where they explain a behaviour; it is not a protocol reference —
-see `docs/HOW-IT-WORKS.md` and `docs/NETWORKING.md` for that layer.
+with opcodes in `application/constant/polaris/PolarisCMD.java`.
+
+**This document is the UX and feature layer, not a protocol reference.** It
+names commands only where they explain a behaviour. For the wire itself —
+framing, reply codes, the command index, sequencing and the danger list — see
+the companion **[`docs/APP-PROTOCOL.md`](APP-PROTOCOL.md)**, plus
+[`docs/HOW-IT-WORKS.md`](HOW-IT-WORKS.md) and
+[`docs/NETWORKING.md`](NETWORKING.md).
 
 ---
 
 # 1. Screen inventory
 
-The app has only **23 activities**, 7 of them Theta. The real screen surface is
-in **64 full-screen dialogs** under `com/snoppa/polaris/dialog/` plus **12
+The app declares only **22 activities** — 10 Polaris, 5 shell, 7 Theta. The real screen surface is
+in **64 full-screen dialogs** under `com/snoppa/polaris/dialog/` plus the **10
 swap-in mode panels** under `com/snoppa/polaris/layout/shootingmodel/`. Almost
 everything the user does happens as an overlay on the live-view screen, not as a
 navigation push. Plan the web app the same way: one persistent live-view page,

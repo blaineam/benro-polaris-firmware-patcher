@@ -1,4 +1,193 @@
-<!doctype html><html><head><meta charset=utf-8><title>Polaris</title></head>
-<body><h1>Polaris</h1><p id=s>loading…</p>
-<script>fetch('/api/link').then(r=>r.json()).then(o=>{document.getElementById('s').textContent='link: '+o.status})</script>
-</body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Polaris</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Polaris">
+<meta name="theme-color" content="#0b0e14">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!-- The link state is the one thing that is always true or always a lie, so it
+     lives above everything and is never hidden. -->
+<header id="bar">
+  <span id="linkdot" class="dot" title="control link"></span>
+  <strong id="linktext">connecting…</strong>
+  <span class="grow"></span>
+  <span id="battery" class="chip" hidden></span>
+  <span id="card" class="chip" hidden></span>
+  <button id="estop" class="estop" type="button" title="Stop all motion (Esc)">STOP</button>
+</header>
+
+<!-- A blocking condition always carries its own fix, the way the app's hint
+     banner does. Empty and hidden when there is nothing to say. -->
+<div id="hint" class="hint" hidden></div>
+
+<main>
+
+  <!-- ───────────────────────────── CONTROL ───────────────────────────── -->
+  <section id="tab-control" class="tab">
+
+    <div class="viewwrap">
+      <!-- Live view is the head's own MJPEG stream. Loaded lazily by app.js so
+           a browser that cannot reach :8080 shows a reason instead of a broken
+           image icon. -->
+      <img id="live" alt="">
+      <div id="livemsg" class="livemsg">live view off</div>
+      <div class="viewoverlay">
+        <button id="previewtoggle" class="ghost sm" type="button">live view</button>
+        <span class="grow"></span>
+        <span id="camname" class="tiny dim"></span>
+      </div>
+    </div>
+
+    <!-- Two single-axis pads rather than one free stick: the head is a 2-axis
+         mount and the app constrains its stick the same way. Hold to move,
+         release to stop; the release is guaranteed server-side by the lease. -->
+    <div class="pads">
+      <div class="pad" data-axis="tilt" aria-label="tilt">
+        <button class="jog up"   data-dir="1"  type="button" aria-label="tilt up">▲</button>
+        <button class="recentre" data-axis-id="2" type="button" title="re-zero tilt">◎</button>
+        <button class="jog down" data-dir="-1" type="button" aria-label="tilt down">▼</button>
+      </div>
+      <div class="pad wide" data-axis="pan" aria-label="pan">
+        <button class="jog left"  data-dir="-1" type="button" aria-label="pan left">◀</button>
+        <button class="recentre" data-axis-id="1" type="button" title="re-zero pan">◎</button>
+        <button class="jog right" data-dir="1"  type="button" aria-label="pan right">▶</button>
+      </div>
+      <div class="pad" data-axis="rot" aria-label="rotation">
+        <button class="jog ccw" data-dir="-1" type="button" aria-label="rotate anticlockwise">↺</button>
+        <button class="recentre" data-axis-id="3" type="button" title="re-zero rotation">◎</button>
+        <button class="jog cw"  data-dir="1"  type="button" aria-label="rotate clockwise">↻</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="gear">
+        speed
+        <input id="gear" type="range" min="1" max="5" value="3" step="1">
+        <output id="gearout">3</output>
+      </label>
+      <button id="level" class="ghost" type="button" title="level the head">auto level</button>
+    </div>
+
+    <!-- Exposure. Every option list is fetched from the camera: the set
+         commands take an INDEX into the camera's own list, so a hardcoded
+         table would silently set the wrong exposure on a different body. -->
+    <div id="expo" class="expo">
+      <div class="exposlot" data-get="268" data-set="261" data-key="s"><span class="lbl">shutter</span><select disabled></select></div>
+      <div class="exposlot" data-get="275" data-set="276" data-key="fNum"><span class="lbl">aperture</span><select disabled></select></div>
+      <div class="exposlot" data-get="265" data-set="258" data-key="iso"><span class="lbl">ISO</span><select disabled></select></div>
+      <div class="exposlot" data-get="267" data-set="260" data-key="ev"><span class="lbl">EV</span><select disabled></select></div>
+      <div class="exposlot" data-get="266" data-set="259" data-key="wb"><span class="lbl">WB</span><select disabled></select></div>
+    </div>
+
+    <div class="shutterrow">
+      <button id="shoot" class="shutter" type="button">
+        <span class="ring"></span><span class="label">hold to shoot</span>
+      </button>
+      <button id="rec" class="ghost rec" type="button">● record</button>
+    </div>
+  </section>
+
+  <!-- ──────────────────────────── PROGRAMS ───────────────────────────── -->
+  <section id="tab-programs" class="tab" hidden>
+    <p class="dim pad-note">
+      Timelapse, panorama, HDR and focus stacking run <b>on the head</b>, so a
+      programme keeps going whether or not this page is open — which the phone
+      app cannot do.
+    </p>
+    <div class="soon">
+      <h3>Not wired yet</h3>
+      <p class="dim">
+        The protocol for these is mapped in <code>docs/APP-PROTOCOL.md</code>
+        (271 panorama, 272 timelapse, 269 HDR, 270 focus stack — each a
+        <code>step:</code> sub-command sequence). They are deliberately not
+        exposed until each step's payload has been exercised against hardware:
+        a half-understood panorama sequence leaves the head part-way through a
+        grid with the shutter armed.
+      </p>
+    </div>
+  </section>
+
+  <!-- ────────────────────────────── ASTRO ────────────────────────────── -->
+  <section id="tab-astro" class="tab" hidden>
+    <div class="card">
+      <h3>Plate solving &amp; alignment</h3>
+      <p class="dim">
+        The solver, auto-alignment, guiding and the Alpaca/LX200 bridges keep
+        their existing controls for now.
+      </p>
+      <p><a class="btn" href="/legacy">Open the solver dashboard</a></p>
+      <p class="tiny dim">
+        This is the field-tested page these tools have always used. It becomes a
+        panel here once the new surface has been used in the dark.
+      </p>
+    </div>
+    <div class="card">
+      <h3>Mount</h3>
+      <dl id="mountstate" class="kv"><dt>reading…</dt><dd></dd></dl>
+    </div>
+  </section>
+
+  <!-- ───────────────────────────── SETTINGS ──────────────────────────── -->
+  <section id="tab-settings" class="tab" hidden>
+
+    <div class="card">
+      <h3>Wi-Fi</h3>
+      <label class="switch">
+        <input id="autojoin" type="checkbox">
+        <span>Join my network at power-up</span>
+      </label>
+      <p class="tiny dim">
+        The head keeps its own access point and also joins your network, so it
+        is reachable without switching Wi-Fi. Both radios share one channel —
+        joining forces the AP onto your network's channel.
+      </p>
+      <label class="switch">
+        <input id="keepwifi" type="checkbox">
+        <span>Keep Wi-Fi awake</span>
+      </label>
+      <p class="tiny dim">
+        Sixty seconds after the last client disconnects the head powers its
+        radio down and the network disappears. Holding the control link open
+        prevents that, at the cost of battery — and, while the mount is not
+        aligned, of making the Benro app ask for a compass calibration.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Control link</h3>
+      <dl id="linkstats" class="kv"></dl>
+      <p class="tiny dim">
+        One connection to the head, held open and shared by this page, the
+        solver and the Alpaca bridge.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>About</h3>
+      <dl class="kv">
+        <dt>Live view</dt><dd id="aboutstream" class="mono"></dd>
+        <dt>Solver dashboard</dt><dd><a href="/legacy">/legacy</a></dd>
+      </dl>
+    </div>
+  </section>
+</main>
+
+<nav id="tabs">
+  <button class="on" data-tab="control">Control</button>
+  <button data-tab="programs">Programs</button>
+  <button data-tab="astro">Astro</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -2,6 +2,34 @@
 
 ## Unreleased (branch `astro-plate-solving`) — solver built, motors untouched
 
+### Added — a web control app that replaces the phone
+
+- **`polaris-httpd` now serves the Benro Connect control surface at `/`**: live
+  view, pan/tilt/rotation jog with speed gears and re-centre, the camera's own
+  exposure lists (shutter/aperture/ISO/EV/WB), shutter and record, battery and
+  card status, and the Wi-Fi settings — on any browser, with no phone. 41 KB of
+  source, **13 KB embedded** in the binary (gzipped at build time, served with
+  `Content-Encoding`), so it costs almost nothing on the SD card. The existing
+  solver dashboard is unchanged and moved to `/legacy`.
+- **`polaris-link`** — one long-lived registered connection to the head, shared
+  by the page, the solver and the Alpaca bridge, replacing a `polaris-mount`
+  fork per request. Telemetry at ~30 Hz instead of a five-second cache; a
+  joystick is not buildable on the old path. It is also the radio keepalive, so
+  `wifi-keepalive.sh` is redundant while the server runs.
+- **`polaris-jog` — the dead man lives on the server.** Fast jog must be
+  re-sent every 50 ms and nobody has established that the head stops when the
+  stream stops; slow jog latches until explicitly released. So the browser only
+  declares an intent with a 400 ms lease and the server owns both the repeat and
+  the stop: a locked phone, a closed tab or a Wi-Fi drop mid-slew **stops** the
+  head instead of leaving it running.
+- **`docs/APP-PROTOCOL.md`** (122 opcodes, every claim cited to the decompiled
+  app) and **`docs/APP-FEATURES.md`** (the app's screens, programs and the
+  traps in porting them).
+- The mount simulator learned jog, re-centre, registration, battery and card,
+  so the whole control loop is testable with no hardware attached.
+
+### Fixed
+
 ### Fixed — real-sky session, 2026-08-19
 
 - **Plate solving failed on every real frame because the focal length was

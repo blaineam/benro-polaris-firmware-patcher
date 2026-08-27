@@ -1,0 +1,330 @@
+/* Polaris web control — dark by default and by necessity: this gets used at
+   night, outdoors, next to a camera whose operator is dark-adapted. Nothing
+   here is brighter than it needs to be, and the one saturated colour is
+   reserved for "this is moving". */
+
+:root {
+  --bg:    #0b0e14;
+  --card:  #151a23;
+  --card2: #1b2230;
+  --line:  #232c3d;
+  --fg:    #e6e6e6;
+  --dim:   #8b93a7;
+  --acc:   #5aa9e6;
+  --ok:    #4caf50;
+  --warn:  #e0a852;
+  --err:   #e05252;
+  --live:  #e05252;   /* motion + record only */
+  --r:     12px;
+  --tap:   52px;      /* never smaller: gloved hands, in the dark */
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-direction: column;
+  overscroll-behavior: none;
+  /* A control surface must not rubber-band or text-select under a held
+     button — both make a hold feel broken on a phone. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ───────────────────────────── status bar ───────────────────────────── */
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: max(10px, env(safe-area-inset-top)) 12px 10px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+#bar strong { font-size: 13px; font-weight: 600; }
+.grow { flex: 1 1 auto; }
+
+.dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--dim);
+  flex: 0 0 auto;
+  transition: background .2s;
+}
+.dot.up   { background: var(--ok); }
+.dot.busy { background: var(--warn); }
+.dot.down { background: var(--err); }
+
+.chip {
+  font-size: 12px;
+  color: var(--dim);
+  background: var(--card2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.chip.warn { color: var(--warn); border-color: #4a3a20; }
+.chip.err  { color: var(--err);  border-color: #4a2424; }
+
+/* Always reachable, never ambiguous. Red is spent here and on motion. */
+.estop {
+  font: 600 12px/1 inherit;
+  letter-spacing: .06em;
+  color: #fff;
+  background: #7a1f1f;
+  border: 1px solid #a33;
+  border-radius: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+.estop:active { background: #a33; }
+
+/* ─────────────────────────────── hint ───────────────────────────────── */
+
+.hint {
+  margin: 0;
+  padding: 10px 14px;
+  background: #2a2214;
+  border-bottom: 1px solid #4a3a20;
+  color: var(--warn);
+  font-size: 13px;
+}
+.hint b { color: #f0c98a; }
+.hint a, .hint button.linky {
+  color: var(--acc); background: none; border: 0; padding: 0;
+  font: inherit; text-decoration: underline; cursor: pointer;
+}
+
+/* ─────────────────────────────── layout ─────────────────────────────── */
+
+main { flex: 1 1 auto; overflow-y: auto; padding: 12px; padding-bottom: 20px; }
+.tab { display: flex; flex-direction: column; gap: 12px; max-width: 760px; margin: 0 auto; }
+/* `display` on a class beats the UA's [hidden] rule, so every hidden tab would
+   render underneath the visible one. Restate it. */
+.tab[hidden], [hidden] { display: none !important; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 14px;
+}
+.card h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); }
+.dim { color: var(--dim); }
+.tiny { font-size: 12px; line-height: 1.45; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.pad-note { margin: 0; font-size: 13px; }
+
+/* ────────────────────────────── live view ───────────────────────────── */
+
+.viewwrap {
+  position: relative;
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+  aspect-ratio: 3 / 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#live { width: 100%; height: 100%; object-fit: contain; display: none; }
+#live.on { display: block; }
+.livemsg { position: absolute; color: var(--dim); font-size: 13px; text-align: center; padding: 0 20px; }
+.viewoverlay {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  background: linear-gradient(transparent, rgba(0,0,0,.65));
+}
+
+/* ──────────────────────────────── pads ─────────────────────────────── */
+
+/* Three pads of three 52px targets do not fit across a phone: at 375px the
+   rotation pad was pushed off-screen entirely and the page scrolled sideways.
+   Tilt and pan (the two axes anyone reaches for) share the first row; rotation,
+   which is an astro-tracking axis rather than a framing one, takes the second. */
+.pads {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas: "tilt pan" "rot rot";
+  gap: 8px;
+}
+.pad[data-axis="tilt"] { grid-area: tilt; }
+.pad[data-axis="pan"]  { grid-area: pan; }
+.pad[data-axis="rot"]  { grid-area: rot; }
+.pad {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 8px;
+}
+.pad { min-width: 0; }   /* let the grid shrink them rather than overflow */
+
+.jog, .recentre {
+  min-width: var(--tap); min-height: var(--tap);
+  font-size: 19px; line-height: 1;
+  color: var(--fg);
+  background: var(--card2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+  touch-action: none;      /* a held button must not scroll the page */
+  display: flex; align-items: center; justify-content: center;
+}
+.jog:active, .jog.held { background: var(--live); border-color: var(--live); color: #fff; }
+.recentre { font-size: 15px; color: var(--dim); min-width: 40px; min-height: 40px; }
+.recentre:active { color: var(--fg); }
+.jog[disabled], .recentre[disabled] { opacity: .35; cursor: not-allowed; }
+
+/* ────────────────────────────── controls ───────────────────────────── */
+
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gear {
+  display: flex; align-items: center; gap: 10px;
+  flex: 1 1 220px;
+  font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim);
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 10px 14px;
+}
+.gear input { flex: 1 1 auto; accent-color: var(--acc); }
+.gear output { font-variant-numeric: tabular-nums; color: var(--fg); font-size: 14px; min-width: 1.2em; }
+
+.ghost {
+  min-height: 44px;
+  color: var(--fg); background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 0 16px; font: inherit; cursor: pointer;
+}
+.ghost:active { background: var(--card2); }
+.ghost.sm { min-height: 34px; padding: 0 12px; font-size: 13px; }
+.ghost[disabled] { opacity: .4; cursor: not-allowed; }
+.ghost.on { border-color: var(--acc); color: var(--acc); }
+.ghost.rec.on { border-color: var(--live); color: var(--live); }
+
+.btn {
+  display: inline-block; min-height: 44px; line-height: 42px;
+  padding: 0 18px; border-radius: 10px;
+  background: var(--card2); border: 1px solid var(--line);
+  color: var(--fg); text-decoration: none;
+}
+
+/* ────────────────────────────── exposure ───────────────────────────── */
+
+.expo { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.exposlot {
+  display: flex; flex-direction: column; gap: 5px;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 9px 11px;
+}
+.exposlot .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); }
+.exposlot select {
+  appearance: none;
+  min-height: 38px;
+  background: var(--card2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 0 10px; font: inherit; cursor: pointer;
+}
+.exposlot select:disabled { opacity: .4; }
+
+/* ─────────────────────────────── shutter ───────────────────────────── */
+
+.shutterrow { display: flex; gap: 10px; align-items: stretch; }
+.shutter {
+  flex: 1 1 auto;
+  min-height: 62px;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  background: var(--card); color: var(--fg);
+  border: 1px solid var(--line); border-radius: var(--r);
+  font: inherit; cursor: pointer;
+  touch-action: none;
+  position: relative; overflow: hidden;
+}
+.shutter .ring {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 3px solid var(--dim); flex: 0 0 auto;
+}
+.shutter.arming .ring { border-color: var(--warn); }
+.shutter.fired  .ring { border-color: var(--live); background: var(--live); }
+/* The hold-to-fire progress, drawn as a fill rather than a spinner so it reads
+   at a glance in the dark. */
+.shutter::after {
+  content: ""; position: absolute; left: 0; bottom: 0; height: 3px;
+  width: var(--progress, 0%); background: var(--warn);
+  transition: width .05s linear;
+}
+.ghost.rec { flex: 0 0 auto; }
+
+/* ──────────────────────────────── misc ─────────────────────────────── */
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; font-size: 13px; }
+.kv dt { color: var(--dim); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+.switch { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
+.switch input { width: 20px; height: 20px; accent-color: var(--acc); }
+
+.soon { background: var(--card); border: 1px dashed var(--line); border-radius: var(--r); padding: 14px; }
+.soon h3 { margin: 0 0 6px; font-size: 14px; color: var(--dim); }
+.soon p { margin: 0; font-size: 13px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--acc); }
+
+/* ──────────────────────────────── tabs ─────────────────────────────── */
+
+#tabs {
+  display: flex;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#tabs button {
+  flex: 1 1 0;
+  min-height: var(--tap);
+  background: none; border: 0; border-top: 2px solid transparent;
+  color: var(--dim); font: inherit; font-size: 13px; cursor: pointer;
+}
+#tabs button.on { color: var(--acc); border-top-color: var(--acc); }
+
+/* Once there is room, the three pads sit in a row again. */
+@media (min-width: 560px) {
+  .pads {
+    grid-template-columns: 1fr 1.6fr 1fr;
+    grid-template-areas: "tilt pan rot";
+  }
+}
+
+/* Wider screens: the view and the controls sit side by side rather than the
+   controls being pushed below the fold. */
+@media (min-width: 860px) {
+  .tab { max-width: 1100px; }
+  #tab-control:not([hidden]) {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr;
+    grid-template-areas: "view pads" "view gear" "expo expo" "shoot shoot";
+    align-items: start;
+  }
+  .viewwrap { grid-area: view; }
+  .pads     { grid-area: pads; }
+  .row      { grid-area: gear; }
+  .expo     { grid-area: expo; }
+  .shutterrow { grid-area: shoot; }
+}
+
+/* Short phones: the live view is the first thing to give up height, so the
+   controls stay reachable without scrolling in the field. */
+@media (max-height: 780px) and (max-width: 560px) {
+  .viewwrap { aspect-ratio: auto; height: 34vh; }
+  main { padding: 8px; }
+  .tab { gap: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
