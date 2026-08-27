@@ -328,3 +328,62 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ─────────────────────────────── programs ──────────────────────────────── */
+
+.segbar { display: flex; gap: 6px; margin-bottom: 12px; }
+.seg {
+  flex: 1 1 0; min-height: 42px;
+  background: var(--card); color: var(--dim);
+  border: 1px solid var(--line); border-radius: 10px;
+  font: inherit; cursor: pointer;
+}
+.seg.on { color: var(--acc); border-color: var(--acc); }
+
+.progpanel { display: flex; flex-direction: column; gap: 12px; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field > label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+.fieldrow { display: flex; align-items: center; gap: 8px; }
+.field input[type="number"], .field select {
+  flex: 1 1 auto; min-width: 0;
+  min-height: 44px;
+  background: var(--card2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 0 12px; font: inherit;
+}
+.field .unit { color: var(--dim); font-size: 13px; min-width: 1.5em; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+.derived { margin: 0; padding-top: 4px; border-top: 1px solid var(--line); }
+.derived dd { color: var(--fg); }
+
+.preview { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.framebox {
+  display: block; margin-top: 6px;
+  white-space: pre-wrap; word-break: break-all;
+  color: var(--acc); font-size: 11px; line-height: 1.5;
+}
+
+/* The one button that commits a programme is heavier than a ghost, but not the
+   motion red -- it is deliberate, not an emergency. */
+.startbtn {
+  min-height: 52px;
+  background: var(--card2); color: var(--fg);
+  border: 1px solid var(--acc); border-radius: var(--r);
+  font: inherit; font-size: 15px; cursor: pointer;
+}
+.startbtn:active { background: var(--card); }
+.startbtn.armed { border-color: var(--warn); color: var(--warn); }
+.startbtn[disabled] { opacity: .4; cursor: not-allowed; border-color: var(--line); }
+
+/* Progress. Green while running; the fill is honest -- indeterminate stripes
+   when the run is unlimited or the count is unknown, a real bar otherwise. */
+.progbar { height: 8px; background: var(--card2); border-radius: 999px; overflow: hidden; margin: 6px 0 10px; }
+#progfill { display: block; height: 100%; width: 0; background: var(--acc); transition: width .4s ease; }
+#progfill.indeterminate {
+  width: 40% !important;
+  background: linear-gradient(90deg, transparent, var(--acc), transparent);
+  animation: slide 1.3s linear infinite;
+}
+#progfill.stale { background: var(--warn); }
+@keyframes slide { from { transform: translateX(-120%); } to { transform: translateX(320%); } }

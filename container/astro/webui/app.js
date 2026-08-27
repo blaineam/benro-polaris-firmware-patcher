@@ -498,6 +498,235 @@ function wireSettings() {
   });
 }
 
+/* ─────────────────────────────── programs ──────────────────────────────── */
+
+/* Timelapse and panorama are started here but RUN ON THE HEAD; the server owns
+   the progress poll, so this page only reads /api/prog. It refreshes fast while
+   a run is live and slowly otherwise, and it is safe to leave and come back to.
+
+   Two guards from the protocol research shape the flow:
+     * every start MOVES the mount and fires the shutter, so it is a two-tap
+       arm-then-confirm, never a single tap that could fire on a brush;
+     * the panorama start payload is INFERRED (the binding method would not
+       decompile), so panorama previews the exact frame first and says so. */
+
+var progTimer = 0;
+
+function progGet() {
+  return fetch('/api/prog', { cache: 'no-store' }).then(function (r) { return r.json(); });
+}
+
+function fmtDuration(sec) {
+  sec = Math.round(sec);
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  return (h ? h + ':' : '') + pad(m) + ':' + pad(s);
+}
+
+/* ---- timelapse panel ---- */
+
+function lapseParams() {
+  var shots = $('#tl-shots').value.trim();
+  return {
+    interval: parseFloat($('#tl-interval').value) || 0,
+    shots: shots === '' ? -1 : parseInt(shots, 10),
+    bulb: parseFloat($('#tl-bulb').value) || 0,
+    fps: parseInt($('#tl-fps').value, 10) || 24
+  };
+}
+
+function paintLapseDerived() {
+  var p = lapseParams();
+  var shoot = $('#tl-shoot'), video = $('#tl-video');
+  if (p.shots === -1 || !(p.interval > 0)) {
+    shoot.textContent = '∞'; video.textContent = '∞';
+    return;
+  }
+  /* (shots-1)*interval — the gaps, not the frames; matches the head. */
+  shoot.textContent = '≥ ' + fmtDuration((p.shots - 1) * p.interval);
+  video.textContent = fmtDuration(Math.ceil(p.shots / p.fps));
+}
+
+/* ---- panorama panel ---- */
+
+function panoParams() {
+  return {
+    cols: parseInt($('#pa-cols').value, 10) || 0,
+    rows: parseInt($('#pa-rows').value, 10) || 0,
+    hangle: parseFloat($('#pa-hangle').value) || 0,
+    vangle: parseFloat($('#pa-vangle').value) || 0,
+    startdir: parseInt($('#pa-startdir').value, 10),
+    perspot: parseInt($('#pa-perspot').value, 10) || 1,
+    interval: parseInt($('#pa-interval').value, 10) || 0,
+    isp: $('#pa-isp').checked ? 1 : 0
+  };
+}
+
+function paintPanoDerived() {
+  var p = panoParams();
+  $('#pa-coverage').textContent =
+    (p.hangle * p.cols).toFixed(1) + '° × ' + (p.vangle * p.rows).toFixed(1) + '°';
+  $('#pa-total').textContent = String(p.cols * p.rows * p.perspot);
+  /* A parameter edit invalidates any preview shown for the old numbers. */
+  var btn = $('#pa-start');
+  if (btn.dataset.armed === '1') {
+    btn.dataset.armed = '0';
+    btn.classList.remove('armed');
+    btn.textContent = 'Preview panorama';
+    $('#pa-preview').hidden = true;
+  }
+}
+
+/* ---- start flows ---- */
+
+function armLapse() {
+  var btn = $('#tl-start');
+  if (btn.dataset.armed === '1') {
+    /* second tap: commit */
+    post('/api/prog/lapse', Object.assign(lapseParams(), { confirm: 1 })).then(function (r) {
+      btn.dataset.armed = '0'; btn.classList.remove('armed');
+      btn.textContent = 'Start timelapse';
+      if (r && r.ok === false) setHint('<b>Timelapse refused.</b> ' + (r.error || ''));
+      progRefresh();
+    });
+    return;
+  }
+  btn.dataset.armed = '1';
+  btn.classList.add('armed');
+  btn.textContent = 'Tap again to start — this fires the shutter';
+  setTimeout(function () {
+    if (btn.dataset.armed === '1') {
+      btn.dataset.armed = '0'; btn.classList.remove('armed');
+      btn.textContent = 'Start timelapse';
+    }
+  }, 4000);
+}
+
+function armPano() {
+  var btn = $('#pa-start');
+  if (btn.dataset.armed !== '1') {
+    /* first tap: fetch and show the exact frame, then arm. */
+    post('/api/prog/pano', panoParams()).then(function (r) {
+      if (!r || r.valid === false) {
+        $('#pa-preview').hidden = true;
+        setHint('<b>Panorama parameters are out of range.</b> ' + ((r && r.error) || ''));
+        return;
+      }
+      setHint('');
+      $('#pa-frame').textContent = r.frame;
+      $('#pa-preview').hidden = false;
+      btn.dataset.armed = '1';
+      btn.classList.add('armed');
+      btn.textContent = 'Send this — ' + r.shots + ' frames, starts the sweep';
+    });
+    return;
+  }
+  /* second tap: commit */
+  post('/api/prog/pano', Object.assign(panoParams(), { confirm: 1 })).then(function (r) {
+    btn.dataset.armed = '0'; btn.classList.remove('armed');
+    btn.textContent = 'Preview panorama';
+    $('#pa-preview').hidden = true;
+    if (r && r.ok === false) setHint('<b>Panorama refused.</b> ' + (r.error || ''));
+    progRefresh();
+  });
+}
+
+/* ---- the running view ---- */
+
+function paintProg(d) {
+  var run = $('#progrun'), pick = $('#progpick');
+  var running = d && d.kind && d.kind !== 'none';
+  run.hidden = !running;
+  pick.hidden = !!running;
+  if (!running) return;
+
+  $('#progrun-title').textContent = d.kind === 'panorama' ? 'Panorama running' : 'Timelapse running';
+
+  var fill = $('#progfill');
+  var known = !d.unlimited && typeof d.remaining === 'number' && d.remaining >= 0 && d.total > 0;
+  fill.classList.toggle('indeterminate', !known);
+  fill.classList.toggle('stale', !!d.stale);
+  if (known) fill.style.width = (100 * (d.total - d.remaining) / d.total) + '%';
+
+  var line;
+  if (d.unlimited) {
+    line = (typeof d.taken === 'number' ? d.taken : '—') + ' frames · ∞ · ' + fmtDuration(d.elapsed_s) + ' elapsed';
+  } else if (known) {
+    line = (d.total - d.remaining) + ' of ' + d.total + ' frames · ' + fmtDuration(d.elapsed_s) + ' elapsed';
+  } else {
+    line = fmtDuration(d.elapsed_s) + ' elapsed · waiting on the head';
+  }
+  $('#progrun-line').textContent = line;
+
+  var note = $('#progrun-note');
+  if (d.stale) {
+    note.hidden = false;
+    note.innerHTML = 'The head has not reported progress recently. The run may have ' +
+      'finished, or the camera may have stalled — this cannot tell which, so it will not guess.';
+  } else note.hidden = true;
+
+  /* Controls: cancel always; panorama also pause/resume. Rebuilt only when the
+     set changes, so a poll does not blow away a button mid-press. */
+  var want = d.kind === 'panorama'
+    ? 'cancel,' + (d.paused ? 'resume' : 'pause')
+    : 'cancel';
+  var ctl = $('#progrun-controls');
+  if (ctl.dataset.set !== want) {
+    ctl.dataset.set = want;
+    ctl.innerHTML = '';
+    if (d.kind === 'panorama') {
+      var pz = document.createElement('button');
+      pz.className = 'ghost';
+      pz.textContent = d.paused ? 'Resume' : 'Pause';
+      pz.onclick = function () { post('/api/prog/pano/pause', { paused: d.paused ? 0 : 1 }).then(progRefresh); };
+      ctl.appendChild(pz);
+    }
+    var cx = document.createElement('button');
+    cx.className = 'ghost';
+    cx.style.borderColor = 'var(--err)';
+    cx.style.color = 'var(--err)';
+    cx.textContent = 'Stop programme';
+    cx.onclick = function () { post('/api/prog/cancel', {}).then(progRefresh); };
+    ctl.appendChild(cx);
+  }
+}
+
+function progRefresh() { return progGet().then(paintProg); }
+
+/* Poll cadence follows what is happening: 1 s while a run is live so the count
+   moves, 4 s otherwise so an idle Programs tab is quiet. Only runs while the
+   tab is visible. */
+function progPoll() {
+  clearTimeout(progTimer);
+  if ($('#tab-programs').hidden) return;
+  progGet().then(function (d) {
+    paintProg(d);
+    var running = d && d.kind && d.kind !== 'none';
+    progTimer = setTimeout(progPoll, running ? 1000 : 4000);
+  }).catch(function () { progTimer = setTimeout(progPoll, 4000); });
+}
+
+function wirePrograms() {
+  $$('.seg').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('.seg').forEach(function (x) { x.classList.toggle('on', x === b); });
+      $$('.progpanel').forEach(function (pnl) { pnl.hidden = pnl.dataset.prog !== b.dataset.prog; });
+    });
+  });
+
+  ['#tl-interval', '#tl-shots', '#tl-bulb', '#tl-fps'].forEach(function (sel) {
+    $(sel).addEventListener('input', paintLapseDerived);
+  });
+  $('#tl-inf').addEventListener('click', function () { $('#tl-shots').value = ''; paintLapseDerived(); });
+  $('#tl-start').addEventListener('click', armLapse);
+  paintLapseDerived();
+
+  ['#pa-cols', '#pa-rows', '#pa-hangle', '#pa-vangle', '#pa-startdir', '#pa-perspot', '#pa-interval']
+    .forEach(function (sel) { $(sel).addEventListener('input', paintPanoDerived); });
+  $('#pa-start').addEventListener('click', armPano);
+  paintPanoDerived();
+}
+
 /* ──────────────────────────────── tabs ─────────────────────────────────── */
 
 function wireTabs() {
@@ -507,6 +736,7 @@ function wireTabs() {
       $$('.tab').forEach(function (t) { t.hidden = t.id !== 'tab-' + b.dataset.tab; });
       /* Leaving the control tab must not leave an axis running. */
       if (b.dataset.tab !== 'control') stopEverything();
+      if (b.dataset.tab === 'programs') progPoll(); else clearTimeout(progTimer);
     });
   });
 }
@@ -518,4 +748,5 @@ wireJog();
 wireExposure();
 wireShutter();
 wireSettings();
+wirePrograms();
 poll();

@@ -25,8 +25,22 @@
 - **`docs/APP-PROTOCOL.md`** (122 opcodes, every claim cited to the decompiled
   app) and **`docs/APP-FEATURES.md`** (the app's screens, programs and the
   traps in porting them).
-- The mount simulator learned jog, re-centre, registration, battery and card,
-  so the whole control loop is testable with no hardware attached.
+- **Timelapse (272) and panorama (271) programmes.** Both run head-side; the
+  server owns the progress poll (`polaris-prog`), so a run keeps going and keeps
+  being watchable with no browser connected — the one capability the phone app
+  structurally cannot have. The Programs tab starts them (two-tap
+  arm-then-confirm, since both fire the shutter), shows live progress with an
+  honest bar (a real fill when the count is known, indeterminate when unlimited,
+  amber when the head goes quiet), and offers cancel plus panorama pause/resume
+  and a live per-position interval. Timelapse shows derived shooting/video
+  durations as explicit lower bounds. `test_prog.c`, 39 assertions on the wire.
+- **Panorama's start payload is treated as inference, not fact** — its binding
+  method failed to decompile — so `/api/prog/pano` without a confirm returns the
+  exact frame that would be sent and the UI shows it, labelled as unverified,
+  before anything reaches the motors.
+- The mount simulator learned jog, re-centre, registration, battery, card, and
+  now runs timelapse/panorama with a real frame countdown, so the whole control
+  loop — motion through programmes — is testable with no hardware attached.
 
 ### Fixed
 

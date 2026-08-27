@@ -36,6 +36,7 @@
 
 #include "polaris-link.h"
 #include "polaris-jog.h"
+#include "polaris-prog.h"
 #include "webui.h"
 
 #define PORT_DEFAULT   8080
@@ -2105,6 +2106,135 @@ static void handle(int fd) {
         return;
     }
 
+    /* ---------------------------------------------------------- programmes */
+
+    /* Timelapse and panorama run ON THE HEAD once started; the server owns the
+     * progress poll so a run stays observable with no client connected (see
+     * polaris-prog.h). Both MOVE MOTORS, so both are gated on confirm=1. */
+    if (!strcmp(path, "/api/prog/lapse")) {
+        char iv[24]="", sh[24]="", bl[24]="", fp[24]="", conf[8]="";
+        lapse_params_t lp; char err[160]="", out[512]; int n;
+        if (strcmp(method, "POST") && strcmp(method, "PUT")) { respond(fd, 405, "text/plain", "POST only\n", 10); return; }
+        if (!param(qs,"interval",iv,sizeof iv) && body) param(body,"interval",iv,sizeof iv);
+        if (!param(qs,"shots",sh,sizeof sh) && body) param(body,"shots",sh,sizeof sh);
+        if (!param(qs,"bulb",bl,sizeof bl) && body) param(body,"bulb",bl,sizeof bl);
+        if (!param(qs,"fps",fp,sizeof fp) && body) param(body,"fps",fp,sizeof fp);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        lp.interval_s = atof(iv);
+        lp.shots = sh[0] ? atol(sh) : -1;
+        lp.bulb_s = atof(bl);
+        lp.fps = fp[0] ? atoi(fp) : 24;
+        if (!(conf[0]=='1' || !strcmp(conf,"true"))) {
+            /* No preview step for timelapse -- the guard is the confirm and the
+             * derived-duration readout the UI shows before you press it. */
+            respond(fd, 409, "application/json",
+                "{\"ok\":false,\"error\":\"timelapse moves the mount and fires the shutter; resend with confirm=1\"}", 92);
+            return;
+        }
+        if (prog_start_lapse(&lp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m));
+            return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
+        respond_json(fd, out);
+        return;
+    }
+
+    /* Panorama. Because the START payload is inference (see polaris-prog.h), a
+     * GET here (or POST without confirm) returns the EXACT frame that would be
+     * sent, so a human can read it before committing. confirm=1 sends it. */
+    if (!strcmp(path, "/api/prog/pano")) {
+        char cols[16]="", rows[16]="", ha[24]="", va[24]="", sd[8]="", ps[8]="", iv[8]="", bl[24]="", isp[8]="", conf[8]="";
+        pano_params_t pp; char err[160]="", out[1024]; int n;
+        if (!param(qs,"cols",cols,sizeof cols) && body) param(body,"cols",cols,sizeof cols);
+        if (!param(qs,"rows",rows,sizeof rows) && body) param(body,"rows",rows,sizeof rows);
+        if (!param(qs,"hangle",ha,sizeof ha) && body) param(body,"hangle",ha,sizeof ha);
+        if (!param(qs,"vangle",va,sizeof va) && body) param(body,"vangle",va,sizeof va);
+        if (!param(qs,"startdir",sd,sizeof sd) && body) param(body,"startdir",sd,sizeof sd);
+        if (!param(qs,"perspot",ps,sizeof ps) && body) param(body,"perspot",ps,sizeof ps);
+        if (!param(qs,"interval",iv,sizeof iv) && body) param(body,"interval",iv,sizeof iv);
+        if (!param(qs,"bulb",bl,sizeof bl) && body) param(body,"bulb",bl,sizeof bl);
+        if (!param(qs,"isp",isp,sizeof isp) && body) param(body,"isp",isp,sizeof isp);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        pp.h_num = cols[0] ? atoi(cols) : 0;
+        pp.v_num = rows[0] ? atoi(rows) : 0;
+        pp.h_angle = atof(ha);
+        pp.v_angle = atof(va);
+        pp.start_dir = sd[0] ? atoi(sd) : 1;
+        pp.per_spot = ps[0] ? atoi(ps) : 1;
+        pp.interval_s = iv[0] ? atoi(iv) : 0;
+        pp.bulb_s = atof(bl);
+        pp.isp = (isp[0]=='1' || !strcmp(isp,"true")) ? 1 : 0;
+
+        if (!(conf[0]=='1' || !strcmp(conf,"true"))) {
+            char frame[PLINK_ARGS_MAX], fesc[PLINK_ARGS_MAX*2], m[900];
+            if (prog_check_pano(&pp, err, sizeof err) != 0) {
+                json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"valid\":false,\"error\":\"%s\"}", out);
+                respond(fd, 200, "application/json", m, strlen(m));
+                return;
+            }
+            prog_pano_preview(&pp, frame, sizeof frame);
+            json_escape(frame, fesc, sizeof fesc);
+            /* `inferred` is the whole reason this endpoint exists: the UI shows
+             * the frame and says the binding is a guess until hardware confirms. */
+            snprintf(m, sizeof m,
+                "{\"ok\":true,\"valid\":true,\"preview\":true,\"inferred\":true,"
+                "\"shots\":%ld,\"frame\":\"%s\"}",
+                (long)pp.h_num*pp.v_num*pp.per_spot, fesc);
+            respond(fd, 200, "application/json", m, strlen(m));
+            return;
+        }
+        if (prog_start_pano(&pp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m));
+            return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
+        respond_json(fd, out);
+        return;
+    }
+
+    /* Progress. Cheap read of server memory; the poll to the head runs in the
+     * event loop, not here. */
+    if (!strcmp(path, "/api/prog")) {
+        char out[512];
+        prog_status_json(out, sizeof out);
+        respond_json(fd, out);
+        return;
+    }
+
+    if (!strcmp(path, "/api/prog/cancel")) {
+        prog_cancel();
+        respond_json(fd, "{\"ok\":true}");
+        return;
+    }
+
+    if (!strcmp(path, "/api/prog/pano/pause")) {
+        char v[8]=""; int paused;
+        if (!param(qs,"paused",v,sizeof v) && body) param(body,"paused",v,sizeof v);
+        paused = (v[0]=='1' || !strcmp(v,"true"));
+        if (prog_pano_pause(paused) != 0) { respond(fd, 409, "application/json", "{\"ok\":false,\"error\":\"no panorama running\"}", 46); return; }
+        respond_json(fd, "{\"ok\":true}");
+        return;
+    }
+
+    if (!strcmp(path, "/api/prog/pano/interval")) {
+        char v[8]=""; long iv;
+        if (!param(qs,"seconds",v,sizeof v) && body) param(body,"seconds",v,sizeof v);
+        if (!parse_long_strict(v, &iv)) { respond_400(fd, "seconds must be a number"); return; }
+        if (prog_pano_interval((int)iv) != 0) { respond(fd, 409, "application/json", "{\"ok\":false,\"error\":\"no panorama running\"}", 46); return; }
+        respond_json(fd, "{\"ok\":true}");
+        return;
+    }
+
     /* What the UI is allowed to send, so it can grey out what it cannot do
      * instead of discovering it with a 403 mid-gesture. */
     if (!strcmp(path, "/api/link/opcodes")) {
@@ -2807,6 +2937,8 @@ int main(int argc, char **argv) {
          * 250 ms is plenty and keeps an idle server idle. */
         {
             double due = jog_next_deadline_ms();
+            double pdue = prog_next_deadline_ms();
+            if (pdue >= 0 && (due < 0 || pdue < due)) due = pdue;
             double ms = (due >= 0 && due < 250.0) ? due : 250.0;
             if (ms < 1.0) ms = 1.0;
             tv.tv_sec = 0;
@@ -2820,6 +2952,7 @@ int main(int argc, char **argv) {
         plink_pump();
         telemetry_poll();
         jog_tick();
+        prog_tick();
         if (FD_ISSET(sfd, &rf)) {
             int c = accept(sfd, NULL, NULL);
             /* CLOSE-ON-EXEC. Anything we launch with system() forks a shell

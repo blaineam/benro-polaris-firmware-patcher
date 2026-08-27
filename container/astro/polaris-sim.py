@@ -96,6 +96,11 @@ class Mount:
         self.jog_seen = {"pan": 0.0, "tilt": 0.0, "rot": 0.0}
         self.jog_latched = {"pan": False, "tilt": False, "rot": False}
         self.jog_t = time.time()
+        # A running capture programme (272 timelapse / 271 panorama): the sim
+        # counts frames down on the SAME clock the app polls, so the whole
+        # progress loop is exercisable with no hardware. `prog_total<0` = a
+        # timelapse's unlimited default, which never reaches zero.
+        self.prog = None          # None | dict(cmd, remaining, total, per_s, t0)
         self.track_drift = getattr(args, "track_drift", 0.0)   # arcsec/min
         self.track_t0 = None
         self.drift_accum = 0.0
@@ -130,6 +135,16 @@ class Mount:
                     self.true_az = (self.true_az + self.drift_accum) % 360.0
             else:
                 self.track_t0 = None
+
+            # ---- programme countdown ---------------------------------------
+            if self.prog is not None:
+                el = time.time() - self.prog["t0"]
+                shot = int(el / self.prog["per_s"]) if self.prog["per_s"] > 0 else 0
+                if self.prog["total"] >= 0:
+                    self.prog["remaining"] = max(0, self.prog["total"] - shot)
+                    if self.prog["remaining"] == 0:
+                        self.prog = None      # finished
+                # unlimited: remaining stays a sentinel that never hits 0
 
             # ---- jog integration -------------------------------------------
             now = time.time()
@@ -364,6 +379,57 @@ class Handler(socketserver.BaseRequestHandler):
             self.send("778@capacity:82;charge:0;")
         elif cmd == "775":
             self.send("775@status:1;totalspace:62914560;freespace:41943040;usespace:20971520;")
+        elif cmd == "272":
+            step = args.get("step")
+            if step == "2":
+                # step 2 carries "para:<interval>,<count>"
+                para = args.get("para", "0,0").split(",")
+                try:
+                    interval = float(para[0]); count = int(para[1])
+                except (ValueError, IndexError):
+                    interval, count = 1.0, -1
+                with mount.lock:
+                    mount.prog = {"cmd": "272", "per_s": max(0.2, interval),
+                                  "total": count, "remaining": count if count >= 0 else -1,
+                                  "t0": time.time()}
+            elif step == "4":
+                # remaining-count poll: reply, and the app re-asks
+                r = -1
+                with mount.lock:
+                    if mount.prog and mount.prog["cmd"] == "272":
+                        r = mount.prog["remaining"]
+                self.send(f"272@ret:{r};")
+            elif step == "7":
+                with mount.lock:
+                    mount.prog = None
+                self.send("272@ret:0;")
+        elif cmd == "271":
+            step = args.get("step")
+            if step == "2":
+                num = 0
+                for kvp in args.get("para", "").split(","):
+                    pass
+                try:
+                    num = int(args.get("num", "0"))
+                except ValueError:
+                    num = 0
+                with mount.lock:
+                    # ~2 s per frame is plausible and keeps the demo brisk
+                    mount.prog = {"cmd": "271", "per_s": 2.0, "total": num,
+                                  "remaining": num, "t0": time.time()}
+                self.send("271@ret:0;")
+            elif step == "3":
+                r = -1
+                with mount.lock:
+                    if mount.prog and mount.prog["cmd"] == "271":
+                        r = mount.prog["remaining"]
+                self.send(f"271@ret:{r};")
+            elif step in ("6",):
+                with mount.lock:
+                    mount.prog = None
+                self.send("271@ret:0;")
+            elif step in ("12", "13"):
+                self.send(f"271@ret:0;")
         elif cmd == "284":
             self.send(f"284@mode:{mount.mode};track:{1 if mount.tracking else 0};")
 

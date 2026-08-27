@@ -99,20 +99,127 @@
   <!-- ──────────────────────────── PROGRAMS ───────────────────────────── -->
   <section id="tab-programs" class="tab" hidden>
     <p class="dim pad-note">
-      Timelapse, panorama, HDR and focus stacking run <b>on the head</b>, so a
-      programme keeps going whether or not this page is open — which the phone
-      app cannot do.
+      Timelapse and panorama run <b>on the head</b>, so a programme keeps going —
+      and keeps being watchable here — whether or not this page stays open, which
+      the phone app cannot do.
     </p>
-    <div class="soon">
-      <h3>Not wired yet</h3>
-      <p class="dim">
-        The protocol for these is mapped in <code>docs/APP-PROTOCOL.md</code>
-        (271 panorama, 272 timelapse, 269 HDR, 270 focus stack — each a
-        <code>step:</code> sub-command sequence). They are deliberately not
-        exposed until each step's payload has been exercised against hardware:
-        a half-understood panorama sequence leaves the head part-way through a
-        grid with the shutter armed.
-      </p>
+
+    <!-- Live progress, shown only while something runs. Replaces the whole
+         picker so there is one clear state on screen at a time. -->
+    <div id="progrun" class="card" hidden>
+      <h3 id="progrun-title">running</h3>
+      <div class="progbar"><span id="progfill"></span></div>
+      <p id="progrun-line" class="mono"></p>
+      <p id="progrun-note" class="tiny dim" hidden></p>
+      <div class="row" id="progrun-controls"></div>
+    </div>
+
+    <!-- The chooser, hidden while a programme runs. -->
+    <div id="progpick">
+      <div class="segbar" role="tablist">
+        <button class="seg on" data-prog="lapse">Timelapse</button>
+        <button class="seg" data-prog="pano">Panorama</button>
+      </div>
+
+      <!-- Timelapse -->
+      <div class="card progpanel" data-prog="lapse">
+        <div class="field">
+          <label for="tl-interval">Interval between frames</label>
+          <div class="fieldrow">
+            <input id="tl-interval" type="number" min="0.5" max="3600" step="0.5" value="4">
+            <span class="unit">s</span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="tl-shots">Frames</label>
+          <div class="fieldrow">
+            <input id="tl-shots" type="number" min="1" max="100000" step="1" placeholder="∞">
+            <button id="tl-inf" class="ghost sm" type="button">∞ unlimited</button>
+          </div>
+          <p class="tiny dim">Blank or ∞ runs until you stop it or the card fills — the app's own default.</p>
+        </div>
+        <div class="field">
+          <label for="tl-bulb">Bulb exposure <span class="dim">(0 = camera's own shutter)</span></label>
+          <div class="fieldrow">
+            <input id="tl-bulb" type="number" min="0" max="3600" step="0.5" value="0">
+            <span class="unit">s</span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="tl-fps">Video frame rate</label>
+          <div class="fieldrow">
+            <select id="tl-fps">
+              <option>24</option><option>25</option><option>30</option><option>60</option>
+            </select>
+            <span class="unit">fps</span>
+          </div>
+        </div>
+        <dl class="kv derived">
+          <dt>Shooting time</dt><dd id="tl-shoot">—</dd>
+          <dt>Finished video</dt><dd id="tl-video">—</dd>
+        </dl>
+        <p class="tiny dim">
+          These are lower bounds — the head reports no allowance for the shutter
+          or the camera writing each frame, so a real run always takes at least
+          this long.
+        </p>
+        <button id="tl-start" class="startbtn" type="button">Start timelapse</button>
+      </div>
+
+      <!-- Panorama -->
+      <div class="card progpanel" data-prog="pano" hidden>
+        <div class="grid2">
+          <div class="field">
+            <label for="pa-cols">Columns</label>
+            <input id="pa-cols" type="number" min="1" max="360" step="1" value="6">
+          </div>
+          <div class="field">
+            <label for="pa-rows">Rows</label>
+            <input id="pa-rows" type="number" min="1" max="180" step="1" value="3">
+          </div>
+          <div class="field">
+            <label for="pa-hangle">Step between columns</label>
+            <div class="fieldrow"><input id="pa-hangle" type="number" min="0.1" max="90" step="0.1" value="30"><span class="unit">°</span></div>
+          </div>
+          <div class="field">
+            <label for="pa-vangle">Step between rows</label>
+            <div class="fieldrow"><input id="pa-vangle" type="number" min="0" max="90" step="0.1" value="20"><span class="unit">°</span></div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="pa-startdir">Start corner</label>
+          <select id="pa-startdir">
+            <option value="1">Upper-left</option>
+            <option value="2">Upper-right</option>
+            <option value="3">Lower-left</option>
+            <option value="4">Lower-right</option>
+            <option value="0">Centre</option>
+          </select>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="pa-perspot">Frames per position</label>
+            <input id="pa-perspot" type="number" min="1" max="99" step="1" value="1">
+          </div>
+          <div class="field">
+            <label for="pa-interval">Interval per position</label>
+            <div class="fieldrow"><input id="pa-interval" type="number" min="0" max="20" step="1" value="0"><span class="unit">s</span></div>
+          </div>
+        </div>
+        <label class="switch"><input id="pa-isp" type="checkbox" checked><span>Stitch in the head (auto-synthesis)</span></label>
+        <dl class="kv derived">
+          <dt>Coverage</dt><dd id="pa-coverage">—</dd>
+          <dt>Total frames</dt><dd id="pa-total">—</dd>
+        </dl>
+        <div id="pa-preview" class="preview" hidden>
+          <p class="tiny dim">This is the exact command that will be sent. Its field
+            layout is confirmed from the app; the binding of the stitch/limit
+            flags is <b>inferred</b> and not yet verified on hardware — watch the
+            first run.</p>
+          <code id="pa-frame" class="framebox"></code>
+        </div>
+        <button id="pa-start" class="startbtn" type="button">Preview panorama</button>
+      </div>
     </div>
   </section>
 

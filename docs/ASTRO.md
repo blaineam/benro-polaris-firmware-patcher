@@ -195,9 +195,20 @@ motor or fires the shutter additionally needs an explicit confirm. `530`
 (multi-step alignment, which wedges the motors) and `542` (which *releases* the
 travel limits — note the inverted polarity) are deliberately not exposed.
 
-Timelapse, panorama, HDR and focus stacking are mapped in the protocol doc but
-are not wired yet: each is a multi-step sequence, and a half-understood one
-leaves the head part-way through a grid with the shutter armed.
+**Timelapse and panorama are wired** (the Programs tab). Both run on the head,
+and because the server owns the progress poll they keep running — and keep being
+watchable here — with no browser connected, which the phone app cannot do. Each
+start moves the mount and fires the shutter, so it is a two-tap arm-then-confirm.
+
+Panorama carries one honest caveat: its start payload is INFERRED. The field
+order and units are read straight from the app, but the method that binds the
+stitch/limit flags would not decompile (docs/APP-FEATURES.md, panorama pitfall
+14), so the UI shows the exact frame it will send and says the binding is a
+guess until it is confirmed on hardware — watch the first run. Timelapse has no
+such caveat; its payload is read directly from the app's layout classes.
+
+HDR (280) and focus stacking (270) are mapped in the protocol doc but not wired:
+same multi-step shape, still to be exercised against hardware.
 
 ### Live view
 
