@@ -90,6 +90,15 @@ static int spawn_fake_mount(pid_t *child) {
          * the junk guard must not choke on. */
         write(c, "284@mode:8;track:1;#517@yaw:2.83;pitch:-0.49;roll:0.0;#", 55);
 
+        /* Heartbeat echoes INTERLEAVED with telemetry, which is what the wire
+         * actually looks like once both sides are pulsing: "h#" carries no '@'
+         * and must be consumed, not left to silt up the buffer or to corrupt
+         * the opcode of the frame behind it. */
+        /* Deliberately a DIFFERENT opcode from the split-frame case above:
+         * reusing 518 here overwrote the value that assertion checks, and the
+         * test failed for sequencing rather than for parsing. */
+        write(c, "h#286@bat:87;temp:19.5;#h#h#284@mode:8;track:1;#", 48);
+
         /* Answer a request-style opcode so plink_request() has something to
          * correlate. 284 is asked for and also pushed, which is the case that
          * catches "matched a stale message". */
@@ -187,6 +196,25 @@ int main(int argc, char **argv) {
        "parses two frames delivered in one read");
     if (plink_get(284))
         ok(plink_arg_num(plink_get(284)->args, "mode", -1) == 8, "mode parsed from the batched frame");
+
+    /* ---- heartbeat tokens interleaved with frames ---- */
+    {
+        int spins = 0;
+        while (spins++ < 200) { plink_pump(); usleep(5000); }
+        ok(plink_stats()->parse_errors == 0,
+           "interleaved h# pulses do not corrupt the frame parser");
+        /* 286 is a frame OUR fake emits behind a pulse. An external peer sends
+         * its own opcodes on its own schedule, so there the honest check is
+         * that the parser kept working at all -- asserting the fake's payload
+         * against polaris-sim fails for the peer, not for the code. */
+        if (own_peer)
+            ok(plink_get(286) != NULL &&
+               plink_arg_num(plink_get(286)->args, "bat", -1) == 87,
+               "the frame behind an h# pulse parsed with the right opcode");
+        else
+            ok(plink_get(518) != NULL && plink_stats()->rx_msgs > 0,
+               "peer telemetry still parsing after pulses were sent");
+    }
 
     /* ---- request/response correlation ---- */
     {

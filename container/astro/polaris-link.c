@@ -62,6 +62,7 @@ static size_t g_txlen = 0;
 static double g_next_try_ms = 0;
 static double g_backoff_ms  = BACKOFF_MIN;
 static double g_last_reg_ms = 0;
+static double g_last_hb_ms  = 0;
 
 static plink_slot_t  g_slots[PLINK_SLOTS];
 static int           g_nslots = 0;
@@ -197,11 +198,28 @@ int plink_send(int cmd, int type, const char *args) {
 
 /* ------------------------------------------------------------------- read */
 
+/* The heartbeat the app sends: the two-byte token "h#" on a 5 s timer, echoed
+ * back by the head as "h#". We send it because the app does and it is free;
+ * we do NOT use missed echoes as a death signal (see PLINK_SILENCE_MS). */
+#define HEARTBEAT_MS 5000.0
+
+/* "h#" carries no '@', so the frame parser would leave it in the buffer to be
+ * discarded as a prefix when the next real frame lands. That self-heals while
+ * telemetry is flowing and quietly fills the buffer over hours if it is not.
+ * Consume the tokens explicitly instead. */
+static void rx_eat_pulses(void) {
+    while (g_rxlen >= 2 && g_rx[0] == 'h' && g_rx[1] == '#') {
+        memmove(g_rx, g_rx + 2, g_rxlen - 2);
+        g_rxlen -= 2;
+    }
+}
+
 /* Pull every complete "<cmd>@<args>#" out of the buffer. Mirrors
  * polaris-mount.c's conn_recv so both agree on framing, including its junk
  * guard: a buffer that fills without yielding a frame is garbage, and keeping
  * it would wedge the parser forever. */
 static void rx_parse(void) {
+    rx_eat_pulses();
     for (;;) {
         char *at = NULL, *hash = NULL, *p;
         for (p = g_rx; p < g_rx + g_rxlen; p++) {
@@ -237,6 +255,7 @@ static void rx_parse(void) {
             memmove(g_rx, hash + 1, g_rxlen - used);
             g_rxlen -= used;
         }
+        rx_eat_pulses();
     }
 }
 
@@ -370,6 +389,11 @@ void plink_pump(void) {
         g_stats.up_since_ms = now;
         g_stats.last_error[0] = 0;
         g_backoff_ms = BACKOFF_MIN;
+        g_last_hb_ms = now;
+        /* Stamp the rx clock at connect: otherwise a link that has just come up
+         * and not yet been spoken to looks like it has been silent since the
+         * epoch, and the watchdog tears it down immediately. */
+        g_stats.last_rx_ms = now;
         register_link();
         return;
     }
@@ -378,6 +402,20 @@ void plink_pump(void) {
     if (rx_once() != 0) { drop(NULL); g_want_open = 1; return; }
     tx_drain();
     if (now - g_last_reg_ms > REREGISTER_MS) register_link();
+    if (now - g_last_hb_ms > HEARTBEAT_MS) {
+        g_last_hb_ms = now;
+        if (tx_queue("h#", 2) == 0) tx_drain();
+    }
+    /* Total silence means the head is gone even though the socket is still
+     * open -- a wifi drop leaves TCP believing everything is fine for minutes.
+     * A control surface must find that out in seconds, because the operator is
+     * standing there pressing a jog button that is doing nothing. */
+    if (g_stats.last_rx_ms != 0.0 && now - g_stats.last_rx_ms > PLINK_SILENCE_MS) {
+        snprintf(g_stats.last_error, sizeof g_stats.last_error,
+                 "no traffic from the head for %.0f s", PLINK_SILENCE_MS / 1000.0);
+        drop(NULL);
+        g_want_open = 1;
+    }
 }
 
 int plink_request(int cmd, int type, const char *args,

@@ -35,6 +35,7 @@
 #include <ctype.h>
 
 #include "polaris-link.h"
+#include "polaris-jog.h"
 #include "webui.h"
 
 #define PORT_DEFAULT   8080
@@ -1965,6 +1966,63 @@ static void handle(int fd) {
         return;
     }
 
+    /* ------------------------------------------------------------- motion */
+
+    /* Hold-to-move. The BROWSER DOES NOT DRIVE THE WIRE: it declares an intent
+     * with a short lease and re-affirms while a control is held, and the server
+     * owns both the 50 ms fast-jog repeat and the stop. See polaris-jog.h --
+     * the head is not known to stop on its own when a client goes away, so the
+     * dead man has to live on this side. */
+    if (!strcmp(path, "/api/move")) {
+        char ax[8] = "", sp[16] = "", gr[16] = "";
+        long speed = 0, gear = 0;
+        jog_axis_t axis;
+        char out[512];
+        int n;
+        if (strcmp(method, "POST") && strcmp(method, "PUT")) {
+            respond(fd, 405, "text/plain", "POST only\n", 10); return;
+        }
+        if (!param(qs, "axis", ax, sizeof ax) && body) param(body, "axis", ax, sizeof ax);
+        if (!param(qs, "speed", sp, sizeof sp) && body) param(body, "speed", sp, sizeof sp);
+        if (!param(qs, "gear", gr, sizeof gr) && body) param(body, "gear", gr, sizeof gr);
+        if      (!strcmp(ax, "pan"))  axis = JOG_PAN;
+        else if (!strcmp(ax, "tilt")) axis = JOG_TILT;
+        else if (!strcmp(ax, "rot"))  axis = JOG_ROT;
+        else { respond_400(fd, "axis must be pan, tilt or rot"); return; }
+        if (sp[0] && !parse_long_strict(sp, &speed)) { respond_400(fd, "speed must be a number"); return; }
+        if (gr[0] && !parse_long_strict(gr, &gear))  { respond_400(fd, "gear must be a number"); return; }
+        if (plink_status() != PLINK_UP) {
+            const char *msg = "{\"ok\":false,\"error\":\"control link is down\"}";
+            respond(fd, 503, "application/json", msg, strlen(msg));
+            return;
+        }
+        if (jog_set(axis, (int)speed, (int)gear) != 0) {
+            const char *msg = "{\"ok\":false,\"error\":\"jog refused\"}";
+            respond(fd, 502, "application/json", msg, strlen(msg));
+            return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"lease_ms\":%.0f,\"jog\":", JOG_LEASE_MS);
+        n += jog_status_json(out + n, (int)sizeof out - n);
+        snprintf(out + n, sizeof out - n, "}");
+        respond_json(fd, out);
+        return;
+    }
+
+    /* Stop everything. Deliberately answers 200 even with the link down: the
+     * caller asked for motion to end, and "there is no link" means it already
+     * has. A UI that treats stop as failable will show a scary error at the
+     * exact moment the user is trying to make something stop. */
+    if (!strcmp(path, "/api/stop")) {
+        char out[512];
+        int n;
+        jog_stop_all();
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"jog\":");
+        n += jog_status_json(out + n, (int)sizeof out - n);
+        snprintf(out + n, sizeof out - n, "}");
+        respond_json(fd, out);
+        return;
+    }
+
     /* What the UI is allowed to send, so it can grey out what it cannot do
      * instead of discovering it with a 403 mid-gesture. */
     if (!strcmp(path, "/api/link/opcodes")) {
@@ -2660,13 +2718,25 @@ int main(int argc, char **argv) {
          * forever waiting on an fd that no longer exists. */
         lfd = plink_fd();
         if (lfd >= 0) { FD_SET(lfd, &rf); if (lfd > mx) mx = lfd; }
-        tv.tv_sec = 0; tv.tv_usec = 250000;
+        /* Sleep until the next thing that needs doing. While an axis is
+         * moving that is the 50 ms fast-jog repeat (or, sooner, the moment a
+         * lease expires and the axis must be STOPPED -- being late with a stop
+         * is the one deadline here with a physical consequence). Otherwise
+         * 250 ms is plenty and keeps an idle server idle. */
+        {
+            double due = jog_next_deadline_ms();
+            double ms = (due >= 0 && due < 250.0) ? due : 250.0;
+            if (ms < 1.0) ms = 1.0;
+            tv.tv_sec = 0;
+            tv.tv_usec = (long)(ms * 1000.0);
+        }
         if (select(mx + 1, &rf, NULL, NULL, &tv) < 0) {
             if (errno == EINTR) continue;
             break;
         }
         link_reconcile();
         plink_pump();
+        jog_tick();
         if (FD_ISSET(sfd, &rf)) {
             int c = accept(sfd, NULL, NULL);
             /* CLOSE-ON-EXEC. Anything we launch with system() forks a shell

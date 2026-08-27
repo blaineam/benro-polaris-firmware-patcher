@@ -42,13 +42,19 @@
 #include <stddef.h>
 #include <time.h>
 
-/* The wire is "1&<cmd>&<type>&<k>:<v>;...#" out, "<cmd>@<k>:<v>;...#" back.
- * `type` is the app's own message class: the device log renders our frames as
- *     rcv msg from App[5]: type:2; code:808; val:type:0;
- * Registration is type 2; ordinary control is type 3. Anything else is
- * untested — pass it through rather than guessing a default. */
-#define PLINK_TYPE_REGISTER 2
-#define PLINK_TYPE_CONTROL  3
+/* The wire is "1&<cmd>&<sub>&<k>:<v>;...#" out, "<cmd>@<k>:<v>;...#" back.
+ *
+ * The third field is a SUBSYSTEM SELECTOR (1..4), not a constant and not a
+ * message class — docs/APP-PROTOCOL.md has the per-opcode values, and the
+ * exceptions are real: 520 and 526 use 2 despite being 5xx. Most control
+ * opcodes use 3 and registration uses 2, so those get names here, but callers
+ * pass the value explicitly because guessing it for a new opcode is how a
+ * command goes to the wrong subsystem and is silently ignored. */
+#define PLINK_SUB_REGISTER 2
+#define PLINK_SUB_CONTROL  3
+/* Kept as the old names so existing callers still read correctly. */
+#define PLINK_TYPE_REGISTER PLINK_SUB_REGISTER
+#define PLINK_TYPE_CONTROL  PLINK_SUB_CONTROL
 
 /* Opcodes this file needs by name. The full catalogue lives in
  * docs/APP-PROTOCOL.md; the link layer is deliberately ignorant of meaning and
@@ -136,6 +142,14 @@ typedef struct {
 } plink_stats_t;
 
 const plink_stats_t *plink_stats(void);
+
+/* Milliseconds of total silence from the head before the link is treated as
+ * dead and torn down for a reconnect. Deliberately NOT driven by unanswered
+ * heartbeats: the app tears down after 5 missed `h#` echoes, but neither
+ * polaris-mount nor the alpaca driver sends `h#` at all and both hold long
+ * sessions, so "the head echoes our pulse" is an assumption this link refuses
+ * to bet the connection on. Absence of ALL traffic is unambiguous. */
+#define PLINK_SILENCE_MS 30000.0
 
 /* Monotonic milliseconds — exported because callers time things against the
  * same clock the slots are stamped with. */
