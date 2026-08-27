@@ -709,6 +709,10 @@ function progPoll() {
   if ($('#tab-programs').hidden) return;
   progGet().then(function (d) {
     paintProg(d);
+    /* Refresh the Holy Grail runtime brightness while its panel is the one
+       showing (config, not a run — so it lives outside the run status). */
+    var gp = $('.progpanel[data-prog="grail"]');
+    if (gp && !gp.hidden && !$('#progpick').hidden) hgFetchStatus(false);
     var running = d && d.kind && d.kind !== 'none';
     progTimer = setTimeout(progPoll, running ? 1000 : 4000);
   }).catch(function () { progTimer = setTimeout(progPoll, 4000); });
@@ -817,6 +821,7 @@ function wirePrograms() {
     b.addEventListener('click', function () {
       $$('.seg').forEach(function (x) { x.classList.toggle('on', x === b); });
       $$('.progpanel').forEach(function (pnl) { pnl.hidden = pnl.dataset.prog !== b.dataset.prog; });
+      if (b.dataset.prog === 'grail') hgOnShow();   /* load lists + brightness */
     });
   });
 
@@ -1210,6 +1215,157 @@ function wireSun() {
   sunRender();
 }
 
+/* ────────────────────────── holy grail ─────────────────────────────────── */
+
+/* The day->night exposure ramp. NOT a run — it uploads a target-brightness
+   curve + optional exposure limits the head applies during a timelapse/
+   path-lapse, metering via the external accessory. Curve nodes live here; the
+   axis ranges come from the camera's own lists so nothing is invented. */
+var hgCurve = [{ dmin: 0, ev: 0 }];   /* node 0 is the mandatory anchor */
+
+function hgInvalidate() {
+  var b = $('#hg-apply');
+  b.dataset.armed = '0'; b.classList.remove('armed');
+  b.textContent = 'Preview ramp config'; $('#hg-preview').hidden = true;
+}
+
+function hgRenderNodes() {
+  var ol = $('#hg-nodes');
+  ol.innerHTML = hgCurve.map(function (n, i) {
+    var h = Math.floor(n.dmin / 60), m = n.dmin % 60;
+    var t = i === 0 ? 'start' : (h + ':' + (m < 10 ? '0' : '') + m);
+    var evTxt = (n.ev > 0 ? '+' : '') + n.ev.toFixed(1) + ' EV';
+    var anchor = i === 0 ? ' <span class="dim">(anchor)</span>' : '';
+    var rm = i === 0 ? '' : ' <button class="linkbtn" data-hg-rm="' + i + '">remove</button>';
+    return '<li>' + t + ' → ' + evTxt + anchor + rm + '</li>';
+  }).join('');
+  $$('#hg-nodes [data-hg-rm]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      hgCurve.splice(parseInt(b.dataset.hgRm, 10), 1);
+      hgInvalidate(); hgRenderNodes();
+    });
+  });
+}
+
+/* Fill a <select> from a camera option list (an opcode's cached R: list). mode
+   'index' sends the list POSITION (shutter handles are 268 indices); 'value'
+   parses the leading number from the label (ISO integers, aperture f-numbers).
+   In 'value' mode non-numeric entries (the camera's "Auto") are dropped and, if
+   `cap` is given, values above it too — the app does exactly this for Holy Grail
+   ISO (Auto filtered, capped at 6400; features pitfall 15). */
+function hgFill(sel, opcode, mode, cap) {
+  var el = $(sel); if (!el) return;
+  var slot = S.ops[opcode], list = slot ? kv(slot.args).R : '';
+  var prev = el.value, html = '';
+  if (!list) { el.innerHTML = '<option value="">— open Control tab —</option>'; return; }
+  list.split(',').forEach(function (label, i) {
+    if (mode === 'value') {
+      var v = parseFloat(label);
+      if (!(v > 0)) return;                 /* drop "Auto" / non-numeric */
+      if (cap && v > cap) return;           /* ISO capped */
+      html += '<option value="' + v + '">' + label + '</option>';
+    } else {
+      html += '<option value="' + i + '">' + label + '</option>';
+    }
+  });
+  el.innerHTML = html || '<option value="">— open Control tab —</option>';
+  if (prev) el.value = prev;
+}
+
+function hgFillAll() {
+  hgFill('#hg-s0', '268', 'index'); hgFill('#hg-s1', '268', 'index');
+  hgFill('#hg-s2', '268', 'index'); hgFill('#hg-s3', '268', 'index');
+  hgFill('#hg-iso-lo', '265', 'value', 6400); hgFill('#hg-iso-hi', '265', 'value', 6400);
+  hgFill('#hg-f-lo', '275', 'value'); hgFill('#hg-f-hi', '275', 'value');
+}
+
+/* Ask the head for its grail state + runtime brightness. `syncEnable` mirrors
+   the head's enable flag into the checkbox — done only on panel-open, never on
+   the background poll, so it can't fight the user mid-toggle. */
+function hgFetchStatus(syncEnable) {
+  return post('/api/prog/grail/status', {}).then(function (r) {
+    if (!r) return;
+    if (syncEnable && typeof r.enabled === 'boolean') $('#hg-enable').checked = r.enabled;
+    var b = r.brightness ? kv(r.brightness).brightness : '';
+    $('#hg-brightness').textContent = (b !== undefined && b !== '') ? b : '— (no accessory)';
+  }).catch(function () {});
+}
+
+/* On panel-open: (re)load the camera lists into the axis selects and sync state.
+   Brightness needs the external accessory, and its reply lands a poll late, so
+   it converges over the Programs-tab poll rather than appearing instantly. */
+function hgOnShow() { hgFillAll(); hgFetchStatus(true); }
+
+function hgParams() {
+  var p = {
+    enable: $('#hg-enable').checked ? 1 : 0,
+    curve: hgCurve.map(function (n) { return n.dmin + '/' + n.ev; }).join(',')
+  };
+  if ($('#hg-s-en').checked) {
+    p.s_en = 1;
+    p.shutter = [$('#hg-s0').value, $('#hg-s1').value, $('#hg-s2').value, $('#hg-s3').value].join(',');
+  }
+  if ($('#hg-iso-en').checked) { p.iso_en = 1; p.iso_lo = $('#hg-iso-lo').value; p.iso_hi = $('#hg-iso-hi').value; }
+  if ($('#hg-f-en').checked)   { p.f_en = 1;   p.f_lo = $('#hg-f-lo').value;   p.f_hi = $('#hg-f-hi').value; }
+  if ($('#hg-prio-en').checked) p.priority = '0,1,2';   /* S -> ISO -> F */
+  return p;
+}
+
+function wireGrail() {
+  hgRenderNodes();
+
+  $('#hg-node-add').addEventListener('click', function () {
+    var dmin = Math.round((parseInt($('#hg-node-min').value, 10) || 0) / 30) * 30;
+    var ev = Math.round((parseFloat($('#hg-node-ev').value) || 0) * 2) / 2;
+    if (dmin < 0) dmin = 0; if (dmin > 1440) dmin = 1440;
+    if (ev < -5) ev = -5; if (ev > 5) ev = 5;
+    /* replace any point at the same offset, else insert in time order */
+    hgCurve = hgCurve.filter(function (n) { return n.dmin !== dmin; });
+    hgCurve.push({ dmin: dmin, ev: ev });
+    hgCurve.sort(function (a, b) { return a.dmin - b.dmin; });
+    hgInvalidate(); hgRenderNodes();
+  });
+
+  $('#hg-node-reset').addEventListener('click', function () {
+    hgCurve = [{ dmin: 0, ev: 0 }]; hgInvalidate(); hgRenderNodes();
+  });
+
+  ['#hg-enable', '#hg-s-en', '#hg-iso-en', '#hg-f-en', '#hg-prio-en',
+   '#hg-s0', '#hg-s1', '#hg-s2', '#hg-s3', '#hg-iso-lo', '#hg-iso-hi', '#hg-f-lo', '#hg-f-hi']
+    .forEach(function (sel) { var el = $(sel); if (el) el.addEventListener('change', hgInvalidate); });
+
+  $('#hg-off').addEventListener('click', function () {
+    post('/api/prog/grail/off', {}).then(function (r) {
+      $('#hg-enable').checked = false;
+      setHint(r && r.ok === false ? '<b>Holy Grail:</b> ' + (r.error || '') : '');
+      hgInvalidate();
+    });
+  });
+
+  var apply = $('#hg-apply');
+  apply.addEventListener('click', function () {
+    var params = hgParams();
+    if (apply.dataset.armed !== '1') {
+      post('/api/prog/grail', params).then(function (r) {
+        if (r && r.valid === false) { setHint('<b>Holy Grail:</b> ' + (r.error || '')); return; }
+        setHint('');
+        $('#hg-frame').textContent = r.frame;
+        $('#hg-preview').hidden = false;
+        apply.dataset.armed = '1'; apply.classList.add('armed');
+        apply.textContent = 'Upload ramp config';
+      });
+      return;
+    }
+    post('/api/prog/grail', Object.assign(params, { confirm: 1 })).then(function (r) {
+      apply.dataset.armed = '0'; apply.classList.remove('armed');
+      apply.textContent = 'Preview ramp config';
+      $('#hg-preview').hidden = true;
+      if (r && r.ok === false) setHint('<b>Holy Grail refused.</b> ' + (r.error || ''));
+      else setHint('');
+    });
+  });
+}
+
 /* ──────────────────────────────── tabs ─────────────────────────────────── */
 
 function wireTabs() {
@@ -1237,4 +1393,5 @@ wireAstro();
 wirePlc();
 wirePathlapse();
 wireSun();
+wireGrail();
 poll();

@@ -76,10 +76,25 @@
   **browser's** clock, not the device's (the Polaris clock is not UTC), and the
   times are serialised as the app's `yyyy,MM,dd,HH,mm,ss` local wall-clock. Both
   payloads are read from the app's own builders, not inferred; both preview the
-  exact frame before the two-tap confirm. **That is every shooting programme the
-  head exposes now wired** — timelapse, path-lapse, panorama, HDR, focus stack,
-  sun and astro — plus the FREE PROGRAM timeline; only Holy Grail's day-to-night
-  ramp is left.
+  exact frame before the two-tap confirm.
+- **HOLY GRAIL (305) — the day-to-night exposure ramp.** The last one, and the
+  odd one out: it is **not a run** but a configuration. It uploads a target
+  brightness curve and, optionally, the three exposure-axis ranges the head
+  follows *while a timelapse or path-lapse runs*, ramping exposure from daylight
+  into night. The whole 305 batch fires the way the app's does when its sheet
+  closes — `SET_GRAIL_MODEL`, the opt-in `SET_PRIORITY`/`SET_ISO`/`SET_F`/
+  `SET_SHUTTER`, then the `nodeCnt;para:<Δmin>/<ev>` curve. Two honest caveats,
+  both surfaced in the UI: the ramp **meters through an external Optical Matrix
+  Sensor Module accessory**, so without it the head cannot ramp; and while the
+  step→field shapes are read from the decompile, the axis-value encodings (F is
+  `%.1f`, shutter a 268 index) and the priority codes are **inferred**, so every
+  305 batch is previewed before it is sent, exactly like panorama. Axis ranges
+  are picked from the camera's *own* lists (ISO with the app's Auto-filter and
+  6400 cap), the curve anchor at offset 0 is mandatory, and the runtime
+  brightness readback filters out the shared-slot SET acks so it never shows a
+  stale value as a reading. **That is every programme the Benro Connect app
+  exposes now wired** — timelapse, path-lapse, panorama, HDR, focus stack, sun,
+  astro, the FREE PROGRAM timeline and the Holy Grail ramp.
 - **A real heisenbug caught by ASan before it shipped:** `absorb_reply`'s
   per-kind `seen[]` array was sized `[PROG_FOCUS+1]` and indexed by a kind that
   grew past it — a global-buffer-overflow that corrupted an adjacent global. It
@@ -91,9 +106,10 @@
   camera option lists, the astro control opcodes (mode/AHRS/yaw/half/pose), and
   now runs every programme with a real countdown — timelapse and path-lapse off a
   shared 272 model (the authoritative total taken from `SEND_END`'s `photoCnt`),
-  HDR and SUN via a pushed completion — so the whole control loop, motion through
-  every programme, is testable with no hardware attached. `test_prog.c` is 114
-  assertions.
+  HDR and SUN via a pushed completion, and it acks the Holy Grail 305 config
+  batch and answers its brightness poll — so the whole control loop, motion
+  through every programme, is testable with no hardware attached. `test_prog.c`
+  is 134 assertions.
 
 ### Fixed
 

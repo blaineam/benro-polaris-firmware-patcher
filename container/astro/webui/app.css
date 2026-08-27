@@ -416,3 +416,15 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .switch.inline { flex: 0 0 auto; }
 .keylist { margin: 0; padding-left: 22px; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
 .keylist li { font-variant-numeric: tabular-nums; }
+
+/* Holy Grail — the optional exposure-limits / priority block and its selects. */
+.hg-adv { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.hg-adv summary { cursor: pointer; font-size: 13px; color: var(--fg); padding: 2px 0; }
+.hg-adv > .field, .hg-adv > .switch, .hg-adv > p { margin-top: 10px; }
+.hg-mini { gap: 8px; }
+.mini { display: flex; flex-direction: column; gap: 3px; font-size: 11px;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--dim); }
+.mini select { min-height: 40px; background: var(--card2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; font: inherit; }
+.linkbtn { background: none; border: 0; color: var(--acc); font: inherit;
+  font-size: 12px; cursor: pointer; padding: 0 0 0 6px; }

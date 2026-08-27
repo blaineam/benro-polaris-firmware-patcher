@@ -110,6 +110,7 @@ class Mount:
         self.track_target = None               # (ra, dec) held while tracking
         self.slewing = False
         self.mode = 8                          # Astro
+        self.grail = False                     # Holy Grail ramp configured on
         self.aligned = False
         self.t0 = time.time()
         self.moves = 0
@@ -549,6 +550,24 @@ class Handler(socketserver.BaseRequestHandler):
                 self.send("271@ret:0;")
             elif step in ("12", "13"):
                 self.send(f"271@ret:0;")
+        elif cmd == "305":
+            # HOLY GRAIL — the day->night exposure ramp CONFIG (not a run). The
+            # head stores what it is sent and, WITH the Optical Matrix Sensor
+            # Module accessory, meters and ramps. The sim has no accessory, so it
+            # acks every SET_ and answers the brightness poll with a placeholder.
+            step = args.get("step")
+            if step == "1":                       # SET_GRAIL_MODEL
+                with mount.lock:
+                    mount.grail = args.get("state", "0") == "1"
+                self.send("305@step:1;ret:0;")
+            elif step in ("3", "5", "7", "9", "11"):   # SET_PRIORITY/ISO/F/SHUTTER/CURVE
+                self.send(f"305@step:{step};ret:0;")
+            elif step == "13":                    # GET_BRIGHTNESS_RUNTIME
+                # A real value needs the OMS accessory; 0.0 stands in for "no
+                # reading" so the readback path is exercisable.
+                self.send("305@step:13;brightness:0.0;")
+            elif step in ("2", "4", "6", "8", "10", "12"):   # GET_*
+                self.send(f"305@step:{step};ret:0;")
         elif cmd == "284":
             self.send(f"284@mode:{mount.mode};track:{1 if mount.tracking else 0};")
 

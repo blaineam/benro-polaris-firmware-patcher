@@ -493,6 +493,73 @@ int main(void) {
         ok(saw("1&277&2&step:2;"), "cancel sends the SUN cancel step");
     }
 
+    /* ---- HOLY GRAIL: the day->night exposure ramp CONFIG (305) ---- */
+    reset();
+    {
+        grail_params_t gp; char err2[160], prev[3072];
+        memset(&gp, 0, sizeof gp);
+        gp.enable = 1;
+        /* a small sunset->night curve: 0 EV now, -2 at 30 min, -4.5 at 60 */
+        gp.n_nodes = 3;
+        gp.node[0].dmin = 0;  gp.node[0].ev = 0;
+        gp.node[1].dmin = 30; gp.node[1].ev = -2;
+        gp.node[2].dmin = 60; gp.node[2].ev = -4.5;
+        gp.iso_en = 1; gp.iso_lo = 100; gp.iso_hi = 6400;
+        gp.f_en = 1;   gp.f_lo = 2.8;   gp.f_hi = 8;
+        gp.s_en = 1;   gp.s[0] = 0; gp.s[1] = 3; gp.s[2] = 8; gp.s[3] = 12;
+        gp.set_priority = 1;
+        gp.priority[0] = GRAIL_AXIS_SHUTTER;
+        gp.priority[1] = GRAIL_AXIS_ISO;
+        gp.priority[2] = GRAIL_AXIS_F;
+
+        ok(prog_grail_check(&gp, err2, sizeof err2) == 0, "a well-formed ramp config validates");
+
+        prog_grail_preview(&gp, prev, sizeof prev);
+        ok(strstr(prev, "1&305&2&step:1;state:1;") != NULL, "SET_GRAIL_MODEL enables the ramp");
+        ok(strstr(prev, "step:3;priority:0,1,2;") != NULL, "priority order is S,ISO,F");
+        ok(strstr(prev, "step:5;state:1;iso:100,6400;") != NULL, "ISO range rides step 5");
+        ok(strstr(prev, "step:7;state:1;f:2.8,8.0;") != NULL, "aperture is %.1f f-numbers on step 7");
+        ok(strstr(prev, "step:9;state:1;s:0,3,8,12;") != NULL, "the four nested shutter handles ride step 9");
+        ok(strstr(prev, "step:11;nodeCnt:3;para:0/0,30/-2,60/-4.5;") != NULL,
+           "the curve is nodeCnt + <dmin>/<ev> nodes");
+
+        ok(prog_grail_apply(&gp, err2, sizeof err2) == 0, "the config uploads");
+        pump(80);
+        ok(saw("1&305&2&step:1;state:1;"), "the enable reaches the head");
+        ok(saw("1&305&2&step:11;nodeCnt:3;"), "the curve reaches the head");
+        ok(prog_grail_enabled(), "the ramp reads as enabled");
+        ok(prog_running() == PROG_NONE, "Holy Grail is config, not a run — nothing is \"running\"");
+
+        reset();
+        { char br[128]; prog_grail_brightness(br, sizeof br); }
+        pump(40);
+        ok(saw("1&305&2&step:13;"), "reading brightness polls GET_BRIGHTNESS_RUNTIME");
+
+        reset();
+        ok(prog_grail_disable(err2, sizeof err2) == 0, "the ramp disables");
+        pump(40);
+        ok(saw("1&305&2&step:1;state:0;"), "disable sends SET_GRAIL_MODEL state:0");
+        ok(!prog_grail_enabled(), "and reads as disabled");
+    }
+
+    /* ---- Holy Grail validation ---- */
+    {
+        grail_params_t gp; char err2[160];
+        memset(&gp, 0, sizeof gp);
+        gp.enable = 1; gp.n_nodes = 1; gp.node[0].dmin = 30;     /* anchor not at 0 */
+        ok(prog_grail_check(&gp, err2, sizeof err2) != 0 && strstr(err2, "offset 0"),
+           "a curve whose first point is not the 0 anchor is refused");
+        gp.node[0].dmin = 0; gp.node[0].ev = 9;                  /* EV out of range */
+        ok(prog_grail_check(&gp, err2, sizeof err2) != 0 && strstr(err2, "EV"),
+           "an out-of-range target EV is refused");
+        gp.node[0].ev = 0; gp.iso_en = 1; gp.iso_lo = 100; gp.iso_hi = 12800;
+        ok(prog_grail_check(&gp, err2, sizeof err2) != 0 && strstr(err2, "6400"),
+           "ISO above 6400 is refused");
+        gp.iso_hi = 6400; gp.s_en = 1; gp.s[0] = 5; gp.s[1] = 2; /* handles not nested */
+        ok(prog_grail_check(&gp, err2, sizeof err2) != 0 && strstr(err2, "nest"),
+           "shutter handles that do not nest are refused");
+    }
+
     /* ---- a lost link ends the run rather than reporting phantom progress ---- */
     plink_close();
     prog_tick();

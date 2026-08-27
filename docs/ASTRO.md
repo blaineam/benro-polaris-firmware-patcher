@@ -292,9 +292,37 @@ schedule the shoot hours off. The window is sent as the app's
 `yyyy,MM,dd,HH,mm,ss` local wall-clock, `sun:0` for sunrise and `sun:1` for
 sunset.
 
-That is every shooting programme the head exposes now driven from the browser —
-timelapse, path-lapse, panorama, HDR, focus stack, sun and astro — alongside the
-FREE PROGRAM timeline. Only Holy Grail's day-to-night exposure ramp is left.
+### HOLY GRAIL — the day-to-night exposure ramp
+
+The last programme, and the odd one out: **it is not a run, it is a
+configuration.** It uploads a target-brightness curve — and, optionally, the
+three exposure-axis ranges — that the head then follows *while a timelapse or
+path-lapse runs*, ramping exposure smoothly from daylight into night. So the
+Holy Grail tab configures the ramp; you start the actual capture from Timelapse
+or Path-lapse.
+
+Two caveats are load-bearing, and the UI states both:
+
+1. **The ramp meters through an external accessory.** The head reads ambient
+   light from the *Optical Matrix Sensor Module*, not from the images; without
+   that accessory it cannot ramp. A web app can upload the curve the head will
+   follow, but it cannot replace the sensor.
+2. **The axis-value and priority encodings are inferred.** The 305 step→field
+   shapes are read from the decompile (`SET_GRAIL_MODEL`, `SET_PRIORITY`,
+   `SET_ISO`, `SET_F` as `%.1f`, `SET_SHUTTER`, and the `nodeCnt;para:<Δmin>/<ev>`
+   curve), but whether the shutter handles are indices and what integers name the
+   priority axes are best-guesses. So — exactly like panorama — the whole 305
+   batch is previewed before it is sent, and the exposure limits are picked from
+   the camera's *own* lists (ISO with the app's Auto-filter and 6400 cap) so
+   nothing is invented.
+
+The curve's offset-0 anchor is mandatory, offsets snap to 30-minute lines and EV
+to 0.5 over a 24 h span, and the runtime-brightness readback ignores the SET acks
+that share the 305 reply slot so it never shows a stale value as a live reading.
+
+That is every programme the Benro Connect app exposes now driven from the browser
+— timelapse, path-lapse, panorama, HDR, focus stack, sun, astro, the FREE
+PROGRAM timeline and the Holy Grail ramp.
 
 ### Live view
 

@@ -752,6 +752,156 @@ int prog_start_sun(const sun_params_t *p, char *err, size_t errcap) {
     return 0;
 }
 
+/* ------------------------------------------------------------ holy grail */
+
+/* Holy Grail is NOT a run and never touches `g` -- it uploads the day->night
+ * exposure ramp the head applies during a timelapse/path-lapse, and the
+ * metering it ramps toward comes from the external Optical Matrix Sensor Module,
+ * not from us. So it has no progress, no dead-man, and no confirm gate: the
+ * preview is the safety, exactly as for panorama's inferred bits. */
+static int g_grail_on;
+
+int prog_grail_enabled(void) { return g_grail_on; }
+
+/* The curve frame can be the longest one (up to 49 nodes), so it is built on its
+ * own and its length checked against the wire limit -- a truncated curve is a
+ * malformed frame the head silently drops. snprintf returns the INTENDED length,
+ * so a return >= cap means it would not fit. */
+static int grail_curve_frame(const grail_params_t *p, char *out, size_t cap) {
+    int i, n = 0;
+    n += snprintf(out + n, cap - n, "step:%d;nodeCnt:%d;para:",
+                  GRAIL_STEP_SET_CURVE, p->n_nodes);
+    for (i = 0; i < p->n_nodes; i++) {
+        char ev[24];
+        fmt_num(ev, sizeof ev, p->node[i].ev);
+        n += snprintf(out + n, n < (int)cap ? cap - n : 0, "%s%d/%s",
+                      i ? "," : "", p->node[i].dmin, ev);
+    }
+    n += snprintf(out + n, n < (int)cap ? cap - n : 0, ";");
+    return n;
+}
+
+int prog_grail_check(const grail_params_t *p, char *err, size_t errcap) {
+    int i;
+    char c[PLINK_ARGS_MAX];
+    if (!p) return fail(err, errcap, "no parameters");
+    /* The curve is the load-bearing part. Node 0 is the mandatory anchor at
+     * offset 0 (the app auto-creates it at 0 EV if missing); offsets increase
+     * and stay within the 24 h span; EV within the app's -5..+5 grid. */
+    if (p->n_nodes < 1 || p->n_nodes > GRAIL_MAX_NODES)
+        return fail(err, errcap, "the brightness curve needs 1..49 points");
+    if (p->node[0].dmin != 0)
+        return fail(err, errcap, "the first curve point must sit at offset 0 (the mandatory anchor)");
+    for (i = 0; i < p->n_nodes; i++) {
+        if (p->node[i].dmin < 0 || p->node[i].dmin > 1440)
+            return fail(err, errcap, "curve offsets span 0..1440 minutes (24 hours)");
+        if (i > 0 && p->node[i].dmin <= p->node[i-1].dmin)
+            return fail(err, errcap, "curve offsets must increase");
+        if (!(p->node[i].ev >= -5.0 && p->node[i].ev <= 5.0))
+            return fail(err, errcap, "target EV is -5.0..+5.0");
+    }
+    if (grail_curve_frame(p, c, sizeof c) >= (int)sizeof c)
+        return fail(err, errcap, "the brightness curve has too many points to send in one frame; use fewer");
+    /* Axis ranges, when present, must be ordered; ISO is capped at 6400 (the app
+     * enforces this regardless of the camera). */
+    if (p->iso_en || p->iso_lo || p->iso_hi) {
+        if (p->iso_lo < 1 || p->iso_hi < p->iso_lo)
+            return fail(err, errcap, "ISO range must be low<=high and positive");
+        if (p->iso_hi > 6400)
+            return fail(err, errcap, "Holy Grail caps ISO at 6400");
+    }
+    if (p->f_en || p->f_lo > 0 || p->f_hi > 0) {
+        if (!(p->f_lo > 0) || p->f_hi < p->f_lo)
+            return fail(err, errcap, "aperture range must be low<=high and positive");
+    }
+    if (p->s_en &&
+        !(p->s[0] <= p->s[1] && p->s[1] <= p->s[2] && p->s[2] <= p->s[3]))
+        return fail(err, errcap,
+            "shutter handles must nest: safe-low <= span-low <= span-high <= safe-high");
+    return 0;
+}
+
+/* Build the ordered batch of arg-frames (without the 1&305&2& envelope) the way
+ * the app fires them when its sheet closes: enable, then the opt-in priority and
+ * axis ranges, then the curve. Assumes prog_grail_check has passed. `frames`
+ * holds up to 6 rows. Returns the count. */
+static int grail_frames(const grail_params_t *p, char frames[][PLINK_ARGS_MAX]) {
+    int n = 0;
+    snprintf(frames[n++], PLINK_ARGS_MAX, "step:%d;state:%d;",
+             GRAIL_STEP_SET_MODEL, p->enable ? 1 : 0);
+    if (p->set_priority)
+        snprintf(frames[n++], PLINK_ARGS_MAX, "step:%d;priority:%d,%d,%d;",
+                 GRAIL_STEP_SET_PRIORITY, p->priority[0], p->priority[1], p->priority[2]);
+    if (p->iso_en || p->iso_lo || p->iso_hi)
+        snprintf(frames[n++], PLINK_ARGS_MAX, "step:%d;state:%d;iso:%ld,%ld;",
+                 GRAIL_STEP_SET_ISO, p->iso_en ? 1 : 0, p->iso_lo, p->iso_hi);
+    if (p->f_en || p->f_lo > 0 || p->f_hi > 0)
+        snprintf(frames[n++], PLINK_ARGS_MAX, "step:%d;state:%d;f:%.1f,%.1f;",
+                 GRAIL_STEP_SET_F, p->f_en ? 1 : 0, p->f_lo, p->f_hi);
+    if (p->s_en)
+        snprintf(frames[n++], PLINK_ARGS_MAX, "step:%d;state:1;s:%d,%d,%d,%d;",
+                 GRAIL_STEP_SET_SHUTTER, p->s[0], p->s[1], p->s[2], p->s[3]);
+    grail_curve_frame(p, frames[n++], PLINK_ARGS_MAX);
+    return n;
+}
+
+int prog_grail_preview(const grail_params_t *p, char *out, size_t outcap) {
+    char frames[6][PLINK_ARGS_MAX];
+    int i, nf, n = 0;
+    if (!p) { if (outcap) out[0] = 0; return 0; }
+    nf = grail_frames(p, frames);
+    for (i = 0; i < nf; i++)
+        n += snprintf(out + n, outcap - n, "%s1&%d&2&%s#",
+                      i ? "\n" : "", PROG_CMD_GRAIL, frames[i]);
+    return n;
+}
+
+int prog_grail_apply(const grail_params_t *p, char *err, size_t errcap) {
+    char frames[6][PLINK_ARGS_MAX];
+    int i, nf;
+    if (prog_grail_check(p, err, errcap) != 0) return -1;
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    nf = grail_frames(p, frames);
+    for (i = 0; i < nf; i++)
+        if (plink_send(PROG_CMD_GRAIL, 2, frames[i]) != 0)
+            return fail(err, errcap, "could not upload the Holy Grail configuration");
+    g_grail_on = p->enable ? 1 : 0;
+    fprintf(stderr, "[prog] holy grail %s: %d frames uploaded\n",
+            p->enable ? "ON" : "OFF", nf);
+    return 0;
+}
+
+int prog_grail_disable(char *err, size_t errcap) {
+    char frame[32];
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    snprintf(frame, sizeof frame, "step:%d;state:0;", GRAIL_STEP_SET_MODEL);
+    if (plink_send(PROG_CMD_GRAIL, 2, frame) != 0)
+        return fail(err, errcap, "could not disable Holy Grail");
+    g_grail_on = 0;
+    return 0;
+}
+
+int prog_grail_brightness(char *out, size_t outcap) {
+    const plink_slot_t *s;
+    char frame[32];
+    /* Ask for a fresh runtime brightness; the reply lands on a later poll and is
+     * cached under 305, so what we return now is the most recent value (empty
+     * until the head -- with its accessory -- answers at all). */
+    if (plink_status() == PLINK_UP) {
+        snprintf(frame, sizeof frame, "step:%d;", GRAIL_STEP_GET_BRIGHTNESS_RT);
+        plink_send(PROG_CMD_GRAIL, 2, frame);
+    }
+    /* Every 305 reply -- the SET acks included -- lands in the SAME 305 cache
+     * slot, so only trust it as brightness when it actually carries a brightness
+     * field. Otherwise it is a stale ack and we report "unknown" (empty). The
+     * fresh step:13 reply arrives on a later poll, so a polling UI converges. */
+    s = plink_get(PROG_CMD_GRAIL);
+    if (s && strstr(s->args, "brightness"))
+        return snprintf(out, outcap, "%s", s->args);
+    if (outcap) out[0] = 0;
+    return 0;
+}
+
 /* ---------------------------------------------------------------- control */
 
 void prog_cancel(void) {

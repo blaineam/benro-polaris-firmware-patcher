@@ -2532,6 +2532,105 @@ static void handle(int fd) {
         respond_json(fd, out); return;
     }
 
+    /* -------------------------------------------------- holy grail (305) */
+
+    /* Configure the day->night exposure ramp. NOT a run: it uploads the target
+     * brightness curve and the three axis ranges the head applies during a
+     * timelapse/path-lapse, and the ramp meters through the external Optical
+     * Matrix Sensor Module accessory (docs/APP-FEATURES.md 3.7). No motor and no
+     * shutter, so there is no confirm gate -- but the axis-value and priority
+     * encodings are inferred, so a POST without confirm returns the exact 305
+     * batch to read first; confirm=1 uploads it. `/off` disables the ramp;
+     * `/status` reports the enable flag and the last runtime brightness. */
+    if (!strcmp(path, "/api/prog/grail")) {
+        char en[8]="", pr[32]="", isoen[8]="", isolo[16]="", isohi[16]="",
+             fen[8]="", flo[16]="", fhi[16]="", sen[8]="", sh[64]="",
+             curve[2048]="", conf[8]="";
+        grail_params_t gp; char err[160]="", out[512]; int n;
+        memset(&gp, 0, sizeof gp);
+        if (!param(qs,"enable",en,sizeof en) && body) param(body,"enable",en,sizeof en);
+        if (!param(qs,"priority",pr,sizeof pr) && body) param(body,"priority",pr,sizeof pr);
+        if (!param(qs,"iso_en",isoen,sizeof isoen) && body) param(body,"iso_en",isoen,sizeof isoen);
+        if (!param(qs,"iso_lo",isolo,sizeof isolo) && body) param(body,"iso_lo",isolo,sizeof isolo);
+        if (!param(qs,"iso_hi",isohi,sizeof isohi) && body) param(body,"iso_hi",isohi,sizeof isohi);
+        if (!param(qs,"f_en",fen,sizeof fen) && body) param(body,"f_en",fen,sizeof fen);
+        if (!param(qs,"f_lo",flo,sizeof flo) && body) param(body,"f_lo",flo,sizeof flo);
+        if (!param(qs,"f_hi",fhi,sizeof fhi) && body) param(body,"f_hi",fhi,sizeof fhi);
+        if (!param(qs,"s_en",sen,sizeof sen) && body) param(body,"s_en",sen,sizeof sen);
+        if (!param(qs,"shutter",sh,sizeof sh) && body) param(body,"shutter",sh,sizeof sh);
+        if (!param(qs,"curve",curve,sizeof curve) && body) param(body,"curve",curve,sizeof curve);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+
+        gp.enable = (en[0]=='1'||!strcmp(en,"true")) ? 1 : 0;
+        if (pr[0] &&                                     /* "a,b,c" -> opt-in */
+            sscanf(pr, "%d,%d,%d", &gp.priority[0], &gp.priority[1], &gp.priority[2]) == 3)
+            gp.set_priority = 1;
+        gp.iso_en = (isoen[0]=='1'||!strcmp(isoen,"true")) ? 1 : 0;
+        gp.iso_lo = isolo[0] ? atol(isolo) : 0;
+        gp.iso_hi = isohi[0] ? atol(isohi) : 0;
+        gp.f_en = (fen[0]=='1'||!strcmp(fen,"true")) ? 1 : 0;
+        gp.f_lo = atof(flo); gp.f_hi = atof(fhi);
+        gp.s_en = (sen[0]=='1'||!strcmp(sen,"true")) ? 1 : 0;
+        if (sh[0]) sscanf(sh, "%d,%d,%d,%d", &gp.s[0], &gp.s[1], &gp.s[2], &gp.s[3]);
+        {   /* curve: "dmin/ev,dmin/ev,..." */
+            char *save = NULL, *tok;
+            gp.n_nodes = 0;
+            for (tok = strtok_r(curve, ",", &save); tok && gp.n_nodes < GRAIL_MAX_NODES;
+                 tok = strtok_r(NULL, ",", &save)) {
+                int dm; double ev;
+                if (sscanf(tok, "%d/%lf", &dm, &ev) == 2) {
+                    gp.node[gp.n_nodes].dmin = dm;
+                    gp.node[gp.n_nodes].ev = ev;
+                    gp.n_nodes++;
+                }
+            }
+        }
+        /* The line-0 anchor is mandatory; default it if the client sent none. */
+        if (gp.n_nodes == 0) { gp.node[0].dmin = 0; gp.node[0].ev = 0; gp.n_nodes = 1; }
+
+        if (!(conf[0]=='1'||!strcmp(conf,"true"))) {
+            char frame[3072], fesc[4096], m[4300];
+            if (prog_grail_check(&gp, err, sizeof err) != 0) {
+                json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"valid\":false,\"error\":\"%s\"}", out);
+                respond(fd, 200, "application/json", m, strlen(m)); return;
+            }
+            prog_grail_preview(&gp, frame, sizeof frame);
+            json_escape(frame, fesc, sizeof fesc);
+            /* `inferred` flags that the axis-value and priority encodings are a
+             * best guess (like panorama) so the UI can say so before it sends. */
+            snprintf(m, sizeof m,
+                "{\"ok\":true,\"valid\":true,\"preview\":true,\"inferred\":true,"
+                "\"nodes\":%d,\"frame\":\"%s\"}", gp.n_nodes, fesc);
+            respond(fd, 200, "application/json", m, strlen(m)); return;
+        }
+        if (prog_grail_apply(&gp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"enabled\":%s}",
+                     prog_grail_enabled() ? "true" : "false");
+        respond(fd, 200, "application/json", out, (size_t)n); return;
+    }
+    if (!strcmp(path, "/api/prog/grail/off")) {
+        char err[160]="", out[256], m[256];
+        if (prog_grail_disable(err, sizeof err) != 0) {
+            json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        respond_json(fd, "{\"ok\":true,\"enabled\":false}"); return;
+    }
+    if (!strcmp(path, "/api/prog/grail/status")) {
+        char br[PLINK_ARGS_MAX], bresc[PLINK_ARGS_MAX*2], out[1200];
+        prog_grail_brightness(br, sizeof br);
+        json_escape(br, bresc, sizeof bresc);
+        snprintf(out, sizeof out, "{\"enabled\":%s,\"brightness\":\"%s\"}",
+                 prog_grail_enabled() ? "true" : "false", bresc);
+        respond_json(fd, out); return;
+    }
+
     /* What the UI is allowed to send, so it can grey out what it cannot do
      * instead of discovering it with a 403 mid-gesture. */
     if (!strcmp(path, "/api/link/opcodes")) {

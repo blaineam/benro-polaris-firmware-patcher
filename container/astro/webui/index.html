@@ -124,6 +124,7 @@
         <button class="seg" data-prog="plc">Program</button>
         <button class="seg" data-prog="pathlapse">Path-lapse</button>
         <button class="seg" data-prog="sun">Sun</button>
+        <button class="seg" data-prog="grail">Holy Grail</button>
       </div>
 
       <!-- Timelapse -->
@@ -408,6 +409,83 @@
           <code id="sun-frame" class="framebox"></code>
         </div>
         <button id="sun-start-btn" class="startbtn" type="button">Preview sun lapse</button>
+      </div>
+
+      <!-- HOLY GRAIL: the day->night exposure ramp (configuration, not a run) -->
+      <div class="card progpanel" data-prog="grail" hidden>
+        <p class="tiny dim">
+          <b>Day-to-night exposure ramp.</b> This doesn't shoot on its own — it
+          uploads a target-brightness curve the head follows <b>while a Timelapse
+          or Path-lapse runs</b>, ramping exposure from daylight into night. The
+          head meters the light with the external <b>Optical Matrix Sensor
+          Module</b> accessory; without it, it can't ramp. The exposure-limit and
+          priority encodings are inferred, so the exact commands are shown for you
+          to read before they're sent.
+        </p>
+
+        <label class="switch"><input id="hg-enable" type="checkbox"><span>Enable the ramp</span></label>
+
+        <div class="field">
+          <label>Target brightness curve <span class="dim">(target EV over time, from the start)</span></label>
+          <ol id="hg-nodes" class="keylist"></ol>
+          <div class="grid2">
+            <div class="field">
+              <label for="hg-node-min">Minutes from start <span class="dim">(0 = the anchor)</span></label>
+              <div class="fieldrow"><input id="hg-node-min" type="number" min="0" max="1440" step="30" value="30"><span class="unit">min</span></div>
+            </div>
+            <div class="field">
+              <label for="hg-node-ev">Target EV</label>
+              <div class="fieldrow"><input id="hg-node-ev" type="number" min="-5" max="5" step="0.5" value="-1.5"><span class="unit">EV</span></div>
+            </div>
+          </div>
+          <div class="markrow">
+            <button id="hg-node-add" class="ghost" type="button">Add point</button>
+            <button id="hg-node-reset" class="ghost" type="button">Reset curve</button>
+          </div>
+          <p class="tiny dim">The point at 0 is the mandatory anchor — set its EV in the list. Offsets snap to 30 min, EV to 0.5, over 24 h.</p>
+        </div>
+
+        <details class="hg-adv">
+          <summary>Exposure limits &amp; priority <span class="dim">(optional)</span></summary>
+          <p class="tiny dim">Ranges are picked from your camera's own lists — open the Control tab once so they load. ISO is capped at 6400.</p>
+          <div class="field">
+            <label class="switch"><input id="hg-s-en" type="checkbox"><span>Limit shutter <span class="dim">(safe span ⊃ working span)</span></span></label>
+            <div class="grid2 hg-mini">
+              <label class="mini"><span>Safe low</span><select id="hg-s0"></select></label>
+              <label class="mini"><span>Span low</span><select id="hg-s1"></select></label>
+              <label class="mini"><span>Span high</span><select id="hg-s2"></select></label>
+              <label class="mini"><span>Safe high</span><select id="hg-s3"></select></label>
+            </div>
+          </div>
+          <div class="field">
+            <label class="switch"><input id="hg-iso-en" type="checkbox"><span>Limit ISO</span></label>
+            <div class="grid2 hg-mini">
+              <label class="mini"><span>Low</span><select id="hg-iso-lo"></select></label>
+              <label class="mini"><span>High</span><select id="hg-iso-hi"></select></label>
+            </div>
+          </div>
+          <div class="field">
+            <label class="switch"><input id="hg-f-en" type="checkbox"><span>Limit aperture</span></label>
+            <div class="grid2 hg-mini">
+              <label class="mini"><span>Low</span><select id="hg-f-lo"></select></label>
+              <label class="mini"><span>High</span><select id="hg-f-hi"></select></label>
+            </div>
+          </div>
+          <label class="switch"><input id="hg-prio-en" type="checkbox"><span>Send axis priority — Shutter → ISO → Aperture <span class="dim">(the app's default; codes inferred)</span></span></label>
+        </details>
+
+        <dl class="kv derived">
+          <dt>Runtime brightness <span class="dim">(needs the accessory)</span></dt><dd id="hg-brightness">—</dd>
+        </dl>
+
+        <div id="hg-preview" class="preview" hidden>
+          <p class="tiny dim">The exact 305 batch that will be uploaded — encodings inferred, read before sending:</p>
+          <code id="hg-frame" class="framebox"></code>
+        </div>
+        <div class="markrow">
+          <button id="hg-off" class="ghost" type="button">Turn ramp off</button>
+          <button id="hg-apply" class="startbtn" type="button">Preview ramp config</button>
+        </div>
       </div>
     </div>
   </section>

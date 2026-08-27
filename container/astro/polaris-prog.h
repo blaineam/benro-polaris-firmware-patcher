@@ -47,6 +47,7 @@
 #define PROG_CMD_HDR        280
 #define PROG_CMD_PLC        283   /* FREE PROGRAM -- the keyframe timeline    */
 #define PROG_CMD_SUN        277   /* SUN -- scheduled sunrise/sunset lapse    */
+#define PROG_CMD_GRAIL      305   /* HOLY GRAIL -- the day->night exposure ramp */
 
 /* PATH-LAPSE is mode 5 but rides the SAME opcode as timelapse (272); its
  * per-point step 2 carries a gimbal pose. So it is a lapse with waypoints, not
@@ -58,6 +59,33 @@
 #define SUN_STEP_START       1
 #define SUN_STEP_CANCEL      2
 #define SUN_STEP_END         3
+
+/* HOLY GRAIL steps (305, POC:1272-1356). NOT a run: it CONFIGURES the
+ * day->night exposure ramp that the head then applies during a timelapse /
+ * path-lapse. The app fires all the SET_ steps at once when its config sheet
+ * closes (features pitfall 12). The odd/even split is set/get; we send the sets
+ * and, for brightness, poll a get. */
+#define GRAIL_STEP_SET_MODEL      1   /* state:<0|1>                          */
+#define GRAIL_STEP_GET_MODEL      2
+#define GRAIL_STEP_SET_PRIORITY   3   /* priority:<a>,<b>,<c> (axis order)    */
+#define GRAIL_STEP_GET_PRIORITY   4
+#define GRAIL_STEP_SET_ISO        5   /* state:<0|1>;iso:<lo>,<hi>            */
+#define GRAIL_STEP_GET_ISO        6
+#define GRAIL_STEP_SET_F          7   /* state:<0|1>;f:<lo>,<hi> (%.1f)       */
+#define GRAIL_STEP_GET_F          8
+#define GRAIL_STEP_SET_SHUTTER    9   /* state:<0|1>;s:<a>,<b>,<c>,<d>        */
+#define GRAIL_STEP_GET_SHUTTER   10
+#define GRAIL_STEP_SET_CURVE     11   /* nodeCnt:<n>;para:<Dmin>/<ev>,...     */
+#define GRAIL_STEP_GET_BRIGHTNESS    12
+#define GRAIL_STEP_GET_BRIGHTNESS_RT 13
+
+/* The three ramp axes, in the order the priority list identifies them. The
+ * numeric CODES the head expects for `priority:<a>,<b>,<c>` are not pinned by
+ * the decompile (only that the default order is S -> ISO -> F); these are our
+ * best inference and priority is opt-in, previewed, never sent blind. */
+#define GRAIL_AXIS_SHUTTER   0
+#define GRAIL_AXIS_ISO       1
+#define GRAIL_AXIS_F         2
 
 /* 283 SP_PLC steps (POC:745-765). Uploads a keyframe timeline across three
  * independent tracks (photo events, camera params, motion pose), then replays
@@ -173,6 +201,34 @@ typedef struct {
     long   end_unix;         /* window end (>= start + 3 min)                  */
 } sun_params_t;
 
+/* One node of the Holy Grail TARGET-BRIGHTNESS curve: a target EV at a time
+ * offset from the run's start. The app snaps offsets to 30-minute lines and EV
+ * to 0.5 steps over a 24 h span; the wire node is `<Dmin>/<ev>`. */
+typedef struct {
+    int    dmin;             /* minutes from start (0..1440, 30-min lines)     */
+    double ev;              /* target EV, -5.0..+5.0                          */
+} grail_node_t;
+#define GRAIL_MAX_NODES 49   /* 49 lines at 30 min = 24 h                      */
+
+/* Holy Grail configuration. This is NOT a run -- it uploads the ramp the head
+ * applies during a timelapse/path-lapse, and the metering it ramps to comes
+ * from the external Optical Matrix Sensor Module accessory, NOT the images
+ * (features 3.7). Axis ranges are opt-in; the confident core is the enable flag
+ * plus the curve. Axis values are the camera's OWN list values (ISO integers, F
+ * as %.1f f-numbers, shutter as indices into the 268 list) so nothing is
+ * invented; the shutter encoding and the priority codes are the inferred bits. */
+typedef struct {
+    int    enable;                 /* SET_GRAIL_MODEL state                    */
+    int    set_priority;           /* send SET_PRIORITY? (opt-in)              */
+    int    priority[3];            /* axis order, GRAIL_AXIS_* codes           */
+    int    iso_en; long iso_lo, iso_hi;      /* SET_ISO (<=6400)               */
+    int    f_en;   double f_lo, f_hi;        /* SET_F (%.1f f-numbers)         */
+    int    s_en;   int   s[4];               /* SET_SHUTTER (268 indices,
+                                              * safe-low..span-low..span-high..safe-high) */
+    int    n_nodes;
+    grail_node_t node[GRAIL_MAX_NODES];      /* SET_CURVE                      */
+} grail_params_t;
+
 /* One motion keyframe of a FREE PROGRAM: a head pose held at a moment in the
  * timeline. Poses are captured live from the head (517, radians), so what you
  * fly to is exactly what is stored -- no coordinate maths, no drift. */
@@ -249,6 +305,23 @@ int prog_start_pathlapse(const pathlapse_params_t *p, char *err, size_t errcap);
 int prog_check_sun(const sun_params_t *p, long now_unix, char *err, size_t errcap);
 int prog_sun_preview(const sun_params_t *p, char *out, size_t outcap);
 int prog_start_sun(const sun_params_t *p, char *err, size_t errcap);
+
+/* HOLY GRAIL: configure the day->night exposure ramp. `apply` sends the whole
+ * batch the way the app does (SET_MODEL, optional PRIORITY/ISO/F/SHUTTER, then
+ * the CURVE); `preview` renders that exact batch without sending; `check`
+ * validates. `disable` turns the ramp off (SET_MODEL state:0). `brightness`
+ * asks the head for its current runtime brightness (needs the accessory).
+ * These MOVE NO MOTORS and fire NO shutter -- they upload config the head uses
+ * during whatever timelapse/path-lapse you then run -- so the confirm gate the
+ * motion programmes carry is unnecessary here; the preview stands in for it. */
+int prog_grail_check  (const grail_params_t *p, char *err, size_t errcap);
+int prog_grail_preview(const grail_params_t *p, char *out, size_t outcap);
+int prog_grail_apply  (const grail_params_t *p, char *err, size_t errcap);
+int prog_grail_disable(char *err, size_t errcap);
+int prog_grail_enabled(void);
+/* Send GET_BRIGHTNESS_RUNTIME (step 13) and return the cached reply args, or an
+ * empty string if the head has not answered (no accessory). */
+int prog_grail_brightness(char *out, size_t outcap);
 
 /* Render the exact frame a pano start WOULD send, without sending it. This
  * exists because the pano start payload is inference — see the header comment.
