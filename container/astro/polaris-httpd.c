@@ -37,6 +37,7 @@
 #include "polaris-link.h"
 #include "polaris-jog.h"
 #include "polaris-prog.h"
+#include "polaris-astro.h"
 #include "webui.h"
 
 #define PORT_DEFAULT   8080
@@ -1814,6 +1815,8 @@ static void telemetry_poll(void) {
         last_fast = now;
         plink_send(778, 2, "");     /* battery: capacity + charging      */
         plink_send(775, 2, "");     /* card: status + free/total/used    */
+        plink_send(517, 3, "");     /* mechanical pose (radians) -- for
+                                     * FREE PROGRAM keyframe capture     */
     }
     if (now - last_slow > 30000.0) {
         last_slow = now;
@@ -2313,6 +2316,115 @@ static void handle(int fd) {
         if (prog_pano_interval((int)iv) != 0) { respond(fd, 409, "application/json", "{\"ok\":false,\"error\":\"no panorama running\"}", 46); return; }
         respond_json(fd, "{\"ok\":true}");
         return;
+    }
+
+    /* -------------------------------------------------------------- astro */
+
+    /* The astro session: mode 8 + the AHRS heartbeat, held open server-side so
+     * neither lapses when the browser is away. Compass alignment is the browser
+     * stand-in for the phone magnetometer; the solver on /legacy is the precise
+     * path. See polaris-astro.h. */
+    if (!strcmp(path, "/api/astro/enter")) {
+        char err[160]="", out[256];
+        if (astro_enter(g_lat, g_lon, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 503, "application/json", m, strlen(m)); return;
+        }
+        respond_json(fd, "{\"ok\":true}"); return;
+    }
+    if (!strcmp(path, "/api/astro/leave")) {
+        astro_leave();
+        respond_json(fd, "{\"ok\":true}"); return;
+    }
+    if (!strcmp(path, "/api/astro/align")) {
+        char v[24]="", err[160]="", out[256];
+        if (!param(qs,"compass",v,sizeof v) && body) param(body,"compass",v,sizeof v);
+        if (!v[0]) { respond_400(fd, "compass (degrees) required"); return; }
+        if (astro_align(atof(v), err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        respond_json(fd, "{\"ok\":true}"); return;
+    }
+    if (!strcmp(path, "/api/astro/track")) {
+        char on[8]="", rate[8]="", half[8]="", err[160]="", out[256];
+        if (!param(qs,"on",on,sizeof on) && body) param(body,"on",on,sizeof on);
+        if (!param(qs,"rate",rate,sizeof rate) && body) param(body,"rate",rate,sizeof rate);
+        if (!param(qs,"half",half,sizeof half) && body) param(body,"half",half,sizeof half);
+        if (astro_track((on[0]=='1'||!strcmp(on,"true")) ? 1 : 0,
+                        rate[0] ? atoi(rate) : 0,
+                        (half[0]=='1'||!strcmp(half,"true")) ? 1 : 0,
+                        err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        respond_json(fd, "{\"ok\":true}"); return;
+    }
+    if (!strcmp(path, "/api/astro")) {
+        char out[512];
+        astro_status_json(out, sizeof out);
+        respond_json(fd, out); return;
+    }
+
+    /* --------------------------------------------------- free program (283) */
+
+    /* Fly the head with the jog, capture its pose as a keyframe, repeat, then
+     * play. Keyframes are held server-side between captures. */
+    if (!strcmp(path, "/api/prog/plc/key")) {
+        char v[16]="", err[160]="", out[256];
+        double t;
+        if (!param(qs,"t",v,sizeof v) && body) param(body,"t",v,sizeof v);
+        t = atof(v);
+        { int n = prog_plc_add_key(t, err, sizeof err);
+          if (n < 0) { char m[256]; json_escape(err, out, sizeof out);
+              snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+              respond(fd, 409, "application/json", m, strlen(m)); return; }
+          snprintf(out, sizeof out, "{\"ok\":true,\"keys\":%d}", n);
+          respond_json(fd, out); return; }
+    }
+    if (!strcmp(path, "/api/prog/plc/clear")) {
+        prog_plc_clear();
+        respond_json(fd, "{\"ok\":true,\"keys\":0}"); return;
+    }
+    if (!strcmp(path, "/api/prog/plc")) {
+        char pi[16]="", pc[16]="", hold[8]="", appt[16]="", conf[8]="";
+        plc_params_t pp; char err[160]="", out[2048]; int n;
+        memset(&pp, 0, sizeof pp);
+        if (!param(qs,"photo_interval",pi,sizeof pi) && body) param(body,"photo_interval",pi,sizeof pi);
+        if (!param(qs,"photo_count",pc,sizeof pc) && body) param(body,"photo_count",pc,sizeof pc);
+        if (!param(qs,"hold",hold,sizeof hold) && body) param(body,"hold",hold,sizeof hold);
+        if (!param(qs,"appointment",appt,sizeof appt) && body) param(body,"appointment",appt,sizeof appt);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        /* Pull the captured keyframes back out via the module's own store. */
+        pp.n_keys = prog_plc_key_count_export(pp.keys, PLC_MAX_KEYS);
+        pp.photo_interval_s = atof(pi);
+        pp.photo_count = pc[0] ? atol(pc) : -1;
+        pp.hold = (hold[0]=='1'||!strcmp(hold,"true")) ? 1 : 0;
+        pp.appointment_unix = appt[0] ? atol(appt) : 0;
+        if (!(conf[0]=='1'||!strcmp(conf,"true"))) {
+            char frame[2048], fesc[3072], m[3300];
+            if (prog_check_plc(&pp, err, sizeof err) != 0) {
+                json_escape(err, out, sizeof out);
+                snprintf(m, sizeof m, "{\"ok\":false,\"valid\":false,\"error\":\"%s\"}", out);
+                respond(fd, 200, "application/json", m, strlen(m)); return;
+            }
+            prog_plc_preview(&pp, frame, sizeof frame);
+            json_escape(frame, fesc, sizeof fesc);
+            snprintf(m, sizeof m, "{\"ok\":true,\"valid\":true,\"preview\":true,\"keys\":%d,\"frame\":\"%s\"}", pp.n_keys, fesc);
+            respond(fd, 200, "application/json", m, strlen(m)); return;
+        }
+        if (prog_start_plc(&pp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
+        respond_json(fd, out); return;
     }
 
     /* What the UI is allowed to send, so it can grey out what it cannot do
@@ -3018,7 +3130,9 @@ int main(int argc, char **argv) {
         {
             double due = jog_next_deadline_ms();
             double pdue = prog_next_deadline_ms();
+            double adue = astro_next_deadline_ms();
             if (pdue >= 0 && (due < 0 || pdue < due)) due = pdue;
+            if (adue >= 0 && (due < 0 || adue < due)) due = adue;
             double ms = (due >= 0 && due < 250.0) ? due : 250.0;
             if (ms < 1.0) ms = 1.0;
             tv.tv_sec = 0;
@@ -3033,6 +3147,7 @@ int main(int argc, char **argv) {
         telemetry_poll();
         jog_tick();
         prog_tick();
+        astro_tick();
         if (FD_ISSET(sfd, &rf)) {
             int c = accept(sfd, NULL, NULL);
             /* CLOSE-ON-EXEC. Anything we launch with system() forks a shell

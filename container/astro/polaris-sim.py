@@ -102,6 +102,7 @@ class Mount:
         # timelapse's unlimited default, which never reaches zero.
         self.prog = None          # None | dict(cmd, remaining, total, per_s, t0)
         self.push_q = []          # unsolicited frames for the handler to flush
+        self.aligned = False
         self.track_drift = getattr(args, "track_drift", 0.0)   # arcsec/min
         self.track_t0 = None
         self.drift_accum = 0.0
@@ -435,6 +436,22 @@ class Handler(socketserver.BaseRequestHandler):
                 self.send(f"270@step:{step};ret:0;")
         elif cmd == "311":
             self.send("311@ret:0;")   # focus adjust ack
+        elif cmd == "285":            # set mode
+            try: mount.mode = int(args.get("mode", "1"))
+            except ValueError: pass
+            self.send(f"285@mode:{mount.mode};ret:0;")
+        elif cmd == "520":            # AHRS state
+            self.send("520@ret:0;")
+        elif cmd == "527":            # set yaw / compass alignment
+            with mount.lock:
+                mount.aligned = True
+            self.send("527@ret:0;")
+        elif cmd == "536":            # half-speed flag
+            self.send("536@ret:0;")
+        elif cmd == "517":            # mechanical pose, radians
+            with mount.lock:
+                az, alt = mount.reported()
+            self.send(f"517@yaw:{az*DEG:.6f};pitch:{-alt*DEG:.6f};roll:0.000000;")
         elif cmd == "272":
             step = args.get("step")
             if step == "2":

@@ -65,9 +65,19 @@ static prog_wire_t wire_for(prog_kind_t k) {
         /* HDR is PUSH-driven: the head sends step:5;ret:<remaining> and step:3
          * on completion, so we poll nothing. */
         case PROG_HDR:   return (prog_wire_t){ PROG_CMD_HDR, "", "ret", NULL, "3" };
+        /* FREE PROGRAM polls RUNTIME (step 5); its ret is the appointment state
+         * (0 ended, -1 failed, 2 started), not a frame count, so there is no
+         * remaining number to read -- completion is the pushed/answered 0. */
+        case PROG_PLC:   return (prog_wire_t){ PROG_CMD_PLC, "step:5;", "ret", NULL, "0" };
         default:         return (prog_wire_t){ 0, "", "", NULL, NULL };
     }
 }
+
+/* FREE PROGRAM keyframes live here between "add key" calls and "start", so the
+ * user can fly the head, capture a pose, fly again, capture again. Separate
+ * from the running state (`g`) because they are built BEFORE a run. */
+static plc_key_t  g_keys[PLC_MAX_KEYS];
+static int        g_nkeys;
 
 /* ------------------------------------------------------------------ util */
 
@@ -79,8 +89,14 @@ static int fail(char *err, size_t cap, const char *msg) {
 /* The head wants plain decimals. "%g" would emit 1e+06 for a long unlimited
  * run's derived values and the parser on the other side is a substring scan. */
 static void fmt_num(char *out, size_t cap, double v) {
-    if (v == floor(v) && fabs(v) < 1e9) snprintf(out, cap, "%ld", (long)v);
-    else                                snprintf(out, cap, "%.3f", v);
+    if (v == floor(v) && fabs(v) < 1e9) { snprintf(out, cap, "%ld", (long)v); return; }
+    /* Enough precision for a radian pose (~5 decimals ≈ 0.0006°) without the
+     * trailing-zero noise of a fixed %f -- the head does Float.parseFloat, so a
+     * minimal decimal is both smaller on the wire and easier to read in a log. */
+    snprintf(out, cap, "%.5f", v);
+    { char *e = out + strlen(out) - 1;
+      while (e > out && *e == '0') *e-- = 0;
+      if (e > out && *e == '.') *e = 0; }
 }
 
 /* Read the camera's live selection for one exposure axis out of the link
@@ -416,6 +432,138 @@ int prog_start_focus(const focus_params_t *p, char *err, size_t errcap) {
     return 0;
 }
 
+/* --------------------------------------------------------- free program */
+
+void prog_plc_clear(void) { g_nkeys = 0; }
+int  prog_plc_key_count(void) { return g_nkeys; }
+
+/* Copy the captured keyframes into a caller buffer for a start/preview. Returns
+ * the count actually copied. Kept separate from the params struct so the HTTP
+ * layer, which assembles the rest of the params from the request, does not have
+ * to know how the keys are stored. */
+int prog_plc_key_count_export(plc_key_t *out, int cap) {
+    int i, n = g_nkeys < cap ? g_nkeys : cap;
+    for (i = 0; i < n; i++) out[i] = g_keys[i];
+    return n;
+}
+
+int prog_plc_add_key(double t_s, char *err, size_t errcap) {
+    const plink_slot_t *s = plink_get(517);   /* current pose, radians */
+    plc_key_t *k;
+    if (g_nkeys >= PLC_MAX_KEYS) return fail(err, errcap, "no room for more keyframes");
+    if (!s) return fail(err, errcap, "the head has not reported its pose yet");
+    if (t_s < 0) return fail(err, errcap, "time cannot be negative");
+    k = &g_keys[g_nkeys];
+    k->t_s = t_s;
+    /* 517 reports yaw/pitch/roll in radians; store them verbatim -- the whole
+     * point of capturing live is that no frame conversion is needed. */
+    k->pan  = plink_arg_num(s->args, "yaw", 0);
+    k->tilt = plink_arg_num(s->args, "pitch", 0);
+    k->roll = plink_arg_num(s->args, "roll", 0);
+    g_nkeys++;
+    return g_nkeys;
+}
+
+int prog_check_plc(const plc_params_t *p, char *err, size_t errcap) {
+    int i;
+    if (!p) return fail(err, errcap, "no parameters");
+    if (p->n_keys < 2) return fail(err, errcap, "a programme needs at least two motion keyframes");
+    if (p->n_keys > PLC_MAX_KEYS) return fail(err, errcap, "too many keyframes");
+    /* Times must strictly increase: two keys at the same instant have no
+     * interpolation between them and a decreasing time reverses the timeline. */
+    for (i = 1; i < p->n_keys; i++)
+        if (!(p->keys[i].t_s > p->keys[i-1].t_s))
+            return fail(err, errcap, "keyframe times must increase");
+    if (p->photo_interval_s < 0 || p->photo_interval_s > 3600)
+        return fail(err, errcap, "photo interval must be 0..3600 seconds");
+    if (p->photo_count != -1 && (p->photo_count < 0 || p->photo_count > 100000))
+        return fail(err, errcap, "photo count out of range");
+    return 0;
+}
+
+/* Build the timeline frames without sending. Returns bytes written; the frames
+ * are newline-separated so the preview reads as the upload it is. */
+int prog_plc_preview(const plc_params_t *p, char *out, size_t outcap) {
+    int i, n = 0;
+    char pan[24], tilt[24], roll[24], tm[24];
+    double last_t = 0;
+    if (!p) { if (outcap) out[0] = 0; return 0; }
+    n += snprintf(out + n, outcap - n, "1&%d&2&step:1;#", PROG_CMD_PLC);
+    /* Photo track (item 1), if any photos are wanted. */
+    if (p->photo_interval_s > 0) {
+        fmt_num(tm, sizeof tm, p->photo_interval_s);
+        n += snprintf(out + n, outcap - n,
+            "\n1&%d&2&step:2;item:1;point:1;time:0;para:%ld,%s;#",
+            PROG_CMD_PLC, p->photo_count, tm);
+    }
+    /* Motion track (item 3), one frame per keyframe. mode:0 linear / mode:1
+     * hold -- the app's isLineModel==false is the linear case. */
+    for (i = 0; i < p->n_keys; i++) {
+        fmt_num(pan,  sizeof pan,  p->keys[i].pan);
+        fmt_num(tilt, sizeof tilt, p->keys[i].tilt);
+        fmt_num(roll, sizeof roll, p->keys[i].roll);
+        fmt_num(tm,   sizeof tm,   p->keys[i].t_s);
+        n += snprintf(out + n, outcap - n,
+            "\n1&%d&2&step:2;item:3;point:%d;time:%s;para:%s,%s,%s;mode:%d;#",
+            PROG_CMD_PLC, i + 1, tm, pan, tilt, roll, p->hold ? 1 : 0);
+        last_t = p->keys[i].t_s;
+    }
+    /* END_POINT carries the per-track counts and the last time. item2 (camera
+     * params) is unused here, so its count is 0. */
+    fmt_num(tm, sizeof tm, last_t);
+    n += snprintf(out + n, outcap - n,
+        "\n1&%d&2&step:3;item1:%d,%s;item2:0,%s;item3:%d,%s;#",
+        PROG_CMD_PLC,
+        p->photo_interval_s > 0 ? 1 : 0, tm,
+        tm, p->n_keys, tm);
+    return n;
+}
+
+int prog_start_plc(const plc_params_t *p, char *err, size_t errcap) {
+    int i;
+    char frame[PLINK_ARGS_MAX], tm[24], pan[24], tilt[24], roll[24];
+    double last_t;
+    if (prog_check_plc(p, err, errcap) != 0) return -1;
+    if (plink_status() != PLINK_UP) return fail(err, errcap, "control link is down");
+    if (g.kind != PROG_NONE) return fail(err, errcap, "a programme is already running");
+
+    plink_send(PROG_CMD_PLC, 2, "step:1;");
+    if (p->photo_interval_s > 0) {
+        fmt_num(tm, sizeof tm, p->photo_interval_s);
+        snprintf(frame, sizeof frame, "step:2;item:1;point:1;time:0;para:%ld,%s;",
+                 p->photo_count, tm);
+        plink_send(PROG_CMD_PLC, 2, frame);
+    }
+    for (i = 0; i < p->n_keys; i++) {
+        fmt_num(pan,  sizeof pan,  p->keys[i].pan);
+        fmt_num(tilt, sizeof tilt, p->keys[i].tilt);
+        fmt_num(roll, sizeof roll, p->keys[i].roll);
+        fmt_num(tm,   sizeof tm,   p->keys[i].t_s);
+        snprintf(frame, sizeof frame,
+                 "step:2;item:3;point:%d;time:%s;para:%s,%s,%s;mode:%d;",
+                 i + 1, tm, pan, tilt, roll, p->hold ? 1 : 0);
+        plink_send(PROG_CMD_PLC, 2, frame);
+    }
+    last_t = p->keys[p->n_keys - 1].t_s;
+    fmt_num(tm, sizeof tm, last_t);
+    snprintf(frame, sizeof frame, "step:3;item1:%d,%s;item2:0,%s;item3:%d,%s;",
+             p->photo_interval_s > 0 ? 1 : 0, tm, tm, p->n_keys, tm);
+    plink_send(PROG_CMD_PLC, 2, frame);
+
+    /* A scheduled start rides step 4; otherwise it begins on END_POINT. */
+    if (p->appointment_unix > 0) {
+        snprintf(frame, sizeof frame, "step:4;time:%ld;", p->appointment_unix);
+        plink_send(PROG_CMD_PLC, 2, frame);
+    }
+
+    fprintf(stderr, "[prog] free-program start: %d keys over %.1f s%s\n",
+            p->n_keys, last_t, p->appointment_unix ? " (scheduled)" : "");
+    /* No frame count -- progress is the appointment state, so total is unknown. */
+    begin(PROG_PLC, -1, "free-program");
+    g.remaining = -1;
+    return 0;
+}
+
 /* ---------------------------------------------------------------- control */
 
 void prog_cancel(void) {
@@ -426,6 +574,7 @@ void prog_cancel(void) {
         /* Focus: cancel the run, or the preview (step 10) if that is what is
          * live -- the sentinel in `paused` tells them apart. */
         case PROG_FOCUS: plink_send(PROG_CMD_FOCUS, 2, g.paused == 2 ? "step:10;" : "step:6;"); break;
+        case PROG_PLC:   plink_send(PROG_CMD_PLC,   2, "step:6;"); break;
         default: break;
     }
     memset(&g, 0, sizeof g);
@@ -458,7 +607,7 @@ int prog_pano_interval(int seconds) {
 static void absorb_reply(void) {
     prog_wire_t w = wire_for(g.kind);
     const plink_slot_t *s = plink_get(w.cmd);
-    static unsigned long seen[PROG_FOCUS + 1];
+    static unsigned long seen[PROG_PLC + 1];
     double v;
     char step[8] = "";
     if (!s || s->count == seen[g.kind]) return;
@@ -543,7 +692,8 @@ int prog_status_json(char *out, int cap) {
     const char *kind = g.kind == PROG_LAPSE ? "timelapse"
                      : g.kind == PROG_PANO  ? "panorama"
                      : g.kind == PROG_HDR   ? "hdr"
-                     : g.kind == PROG_FOCUS ? "focus" : "none";
+                     : g.kind == PROG_FOCUS ? "focus"
+                     : g.kind == PROG_PLC   ? "program" : "none";
     n += snprintf(out + n, cap - n, "{\"kind\":\"%s\"", kind);
     if (g.kind == PROG_NONE) return n + snprintf(out + n, cap - n, "}");
 

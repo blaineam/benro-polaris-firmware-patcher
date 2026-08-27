@@ -395,3 +395,14 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 .markrow { display: flex; gap: 8px; }
 .markrow .ghost, .markrow .startbtn { flex: 1 1 0; }
 .ghost.marked { border-color: var(--ok); color: var(--ok); }
+
+/* astro + free-program */
+.alignmethod { padding: 12px 0; border-top: 1px solid var(--line); }
+.alignmethod:first-of-type { border-top: 0; padding-top: 4px; }
+.alignhead { font-size: 14px; margin-bottom: 4px; }
+.seg-inline { display: flex; align-items: center; gap: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 12px; flex: 1 1 auto; }
+.seg-inline select { flex: 1 1 auto; min-height: 38px; background: var(--card2); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font: inherit; }
+.switch.inline { flex: 0 0 auto; }
+.keylist { margin: 0; padding-left: 22px; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+.keylist li { font-variant-numeric: tabular-nums; }

@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -109,6 +110,11 @@ static int spawn_head(pid_t *child, int *wirefd) {
             if (strstr(b, "1&280&2&step:1;")) {
                 write(c, "280@step:5;ret:2;#", 18);
             }
+            /* FREE PROGRAM runtime poll (283 step 5) -> appointment state 2. */
+            if (strstr(b, "1&283&2&step:5;"))
+                write(c, "283@step:5;ret:2;#", 18);
+            /* Always keep a current pose available so plc key-capture works. */
+            write(c, "517@yaw:0.5;pitch:-0.2;roll:0.0;#", 33);
             write(c, "518@compass:1.0;alt:-1.0;#", 26);
         }
     }
@@ -124,6 +130,8 @@ int main(void) {
     int port;
     char err[160], buf[512];
 
+    setvbuf(stdout, NULL, _IONBF, 0);   /* so a forked fake head cannot inherit
+                                         * unflushed assertion output and double it */
     signal(SIGPIPE, SIG_IGN);
     port = spawn_head(&child, &g_wire);
     printf("[*] fake head on :%d\n", port);
@@ -324,6 +332,60 @@ int main(void) {
         ok(strstr(st, "\"preview\":true") != NULL, "status flags it as a preview, not a real run");
         prog_cancel(); pump(60);
         ok(saw("1&270&2&step:10;"), "cancelling a preview sends step 10, not step 6");
+    }
+
+    /* ---- FREE PROGRAM: capture poses, build the timeline, run ---- */
+    reset();
+    {
+        plc_params_t pp; char err2[160], prev[1024];
+        prog_plc_clear();
+        pump(120);   /* let a 517 pose land */
+        ok(prog_plc_add_key(0, err2, sizeof err2) == 1, "first keyframe captures the current pose");
+        ok(prog_plc_add_key(5, err2, sizeof err2) == 2, "second keyframe at t=5");
+        ok(prog_plc_key_count() == 2, "two keyframes held before the run");
+
+        memset(&pp, 0, sizeof pp);
+        /* copy the captured keys out via the preview path */
+        pp.n_keys = 2;
+        pp.keys[0].t_s = 0; pp.keys[0].pan = 0.5; pp.keys[0].tilt = -0.2; pp.keys[0].roll = 0;
+        pp.keys[1].t_s = 5; pp.keys[1].pan = 1.0; pp.keys[1].tilt = -0.1; pp.keys[1].roll = 0;
+        pp.photo_interval_s = 2; pp.photo_count = -1; pp.hold = 0;
+
+        prog_plc_preview(&pp, prev, sizeof prev);
+        ok(strstr(prev, "1&283&2&step:1;") != NULL, "the timeline opens with START");
+        ok(strstr(prev, "step:2;item:1;point:1;time:0;para:-1,2;") != NULL,
+           "the photo track rides item:1 with interval and count");
+        ok(strstr(prev, "step:2;item:3;point:1;time:0;para:0.5,-0.2,0;mode:0;") != NULL,
+           "a motion keyframe rides item:3 with the pose in RADIANS and linear interpolation");
+        ok(strstr(prev, "step:2;item:3;point:2;time:5;") != NULL, "the second keyframe is point 2 at t=5");
+        ok(strstr(prev, "step:3;item1:1,5;item2:0,5;item3:2,5;") != NULL,
+           "END_POINT carries the per-track counts and the last time");
+
+        ok(prog_start_plc(&pp, err2, sizeof err2) == 0, "free program starts");
+        pump(120);
+        ok(saw("1&283&2&step:1;"), "START reaches the head");
+        ok(saw("1&283&2&step:2;item:3;point:2;"), "both motion keyframes are uploaded");
+        ok(saw("1&283&2&step:3;item1:1,5;"), "END_POINT is sent");
+        {
+            char st[512]; prog_status_json(st, sizeof st);
+            ok(strstr(st, "\"kind\":\"program\"") != NULL, "status reports the program");
+        }
+        reset(); pump(1500);
+        ok(saw("1&283&2&step:5;"), "the program polls RUNTIME (step 5)");
+        prog_cancel(); pump(60);
+        ok(saw("1&283&2&step:6;"), "cancel sends step 6");
+    }
+
+    /* ---- free program validation ---- */
+    {
+        plc_params_t pp; char err2[160];
+        memset(&pp, 0, sizeof pp);
+        pp.n_keys = 1; pp.keys[0].t_s = 0;
+        ok(prog_check_plc(&pp, err2, sizeof err2) != 0 && strstr(err2, "two"),
+           "a single keyframe is refused");
+        pp.n_keys = 2; pp.keys[1].t_s = 0;   /* not increasing */
+        ok(prog_check_plc(&pp, err2, sizeof err2) != 0 && strstr(err2, "increase"),
+           "non-increasing keyframe times are refused");
     }
 
     /* ---- a lost link ends the run rather than reporting phantom progress ---- */

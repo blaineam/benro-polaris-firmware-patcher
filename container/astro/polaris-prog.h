@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT
  *
  * polaris-prog — the capture programmes: timelapse (272), panorama (271),
- *                HDR (280) and focus stacking (270).
+ *                HDR (280), focus stacking (270), and the FREE PROGRAM
+ *                keyframe timeline (283).
  *
  * WHY THE SERVER OWNS THESE
  * -------------------------
@@ -43,6 +44,17 @@
 #define PROG_CMD_PANO       271
 #define PROG_CMD_LAPSE      272
 #define PROG_CMD_HDR        280
+#define PROG_CMD_PLC        283   /* FREE PROGRAM -- the keyframe timeline    */
+
+/* 283 SP_PLC steps (POC:745-765). Uploads a keyframe timeline across three
+ * independent tracks (photo events, camera params, motion pose), then replays
+ * it. MOVES MOTORS. */
+#define PLC_STEP_START       1
+#define PLC_STEP_POINT       2   /* one keyframe; item: selects the track     */
+#define PLC_STEP_END         3   /* item1/item2/item3 counts + last time      */
+#define PLC_STEP_APPOINTMENT 4   /* scheduled start: time:<unix or offset>    */
+#define PLC_STEP_RUNTIME     5   /* progress poll; ret: appointment state     */
+#define PLC_STEP_CANCEL      6
 
 /* Focus stack (270). Racking the lens between two limits is SETUP done before
  * the run: mark the near limit, rack, mark the far limit, then start. */
@@ -77,7 +89,8 @@ typedef enum {
     PROG_LAPSE,
     PROG_PANO,
     PROG_HDR,
-    PROG_FOCUS
+    PROG_FOCUS,
+    PROG_PLC
 } prog_kind_t;
 
 typedef struct {
@@ -120,6 +133,27 @@ typedef struct {
     int isp;         /* stitch all-in-focus in the head                        */
 } focus_params_t;
 
+/* One motion keyframe of a FREE PROGRAM: a head pose held at a moment in the
+ * timeline. Poses are captured live from the head (517, radians), so what you
+ * fly to is exactly what is stored -- no coordinate maths, no drift. */
+typedef struct {
+    double t_s;              /* time from the start of the run, seconds        */
+    double pan, tilt, roll;  /* pose in RADIANS, as the head reports it        */
+} plc_key_t;
+#define PLC_MAX_KEYS 32
+
+typedef struct {
+    plc_key_t keys[PLC_MAX_KEYS];
+    int    n_keys;
+    /* Photo track: a frame every `photo_interval_s`, `photo_count` total
+     * (-1 = as many as the move lasts). 0 interval = no photos, just motion. */
+    double photo_interval_s;
+    long   photo_count;
+    int    hold;             /* 1 = hold/step between keys, 0 = linear (the
+                              *     app's isLineModel==false is the linear one) */
+    long   appointment_unix; /* 0 = start now; else a scheduled start time     */
+} plc_params_t;
+
 /* Start a programme. Returns 0 on success, -1 with `err` filled otherwise
  * (link down, another programme already running, or a parameter out of range).
  * Both MOVE MOTORS; the HTTP layer gates them behind an explicit confirm. */
@@ -142,6 +176,19 @@ int prog_check_focus  (const focus_params_t *p, char *err, size_t errcap);
 int prog_focus_mark(int which);
 /* A dry preview traverse between the marked limits (270 step 8). */
 int prog_focus_preview(const focus_params_t *p, char *err, size_t errcap);
+
+/* FREE PROGRAM. Capture the head's CURRENT pose as the next motion keyframe at
+ * time `t_s` -- the app flies the head and reads 517, and so do we, which is
+ * why the stored pose needs no coordinate transform. Returns the key count, or
+ * -1 (full, or the pose is not yet known). */
+int prog_plc_add_key(double t_s, char *err, size_t errcap);
+void prog_plc_clear(void);
+int prog_plc_key_count(void);
+int prog_plc_key_count_export(plc_key_t *out, int cap);
+/* Render the whole timeline that WOULD be uploaded, for review before running. */
+int prog_plc_preview(const plc_params_t *p, char *out, size_t outcap);
+int prog_check_plc(const plc_params_t *p, char *err, size_t errcap);
+int prog_start_plc(const plc_params_t *p, char *err, size_t errcap);
 
 /* Render the exact frame a pano start WOULD send, without sending it. This
  * exists because the pano start payload is inference — see the header comment.

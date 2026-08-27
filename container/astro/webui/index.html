@@ -121,6 +121,7 @@
         <button class="seg" data-prog="pano">Panorama</button>
         <button class="seg" data-prog="hdr">HDR</button>
         <button class="seg" data-prog="focus">Focus stack</button>
+        <button class="seg" data-prog="plc">Program</button>
       </div>
 
       <!-- Timelapse -->
@@ -281,26 +282,142 @@
           <button id="fs-start" class="startbtn" type="button">Start focus stack</button>
         </div>
       </div>
+
+      <!-- FREE PROGRAM: a keyframe timeline you fly by hand -->
+      <div class="card progpanel" data-prog="plc" hidden>
+        <p class="tiny dim">
+          A programmable move: fly the head to a position with the Control jog,
+          capture it as a keyframe, fly to the next, capture again. The head then
+          walks the whole path on its own — and, being head-side, it runs whether
+          or not this page stays open. Optionally shoot a frame every so often
+          along the way.
+        </p>
+        <div class="field">
+          <label>Keyframes</label>
+          <ol id="plc-keys" class="keylist"><li class="dim">none yet — jog the head, then capture a pose</li></ol>
+          <div class="markrow">
+            <button id="plc-capture" class="ghost" type="button">Capture current pose</button>
+            <button id="plc-clear" class="ghost" type="button">Clear all</button>
+          </div>
+          <p class="tiny dim">Each keyframe is timed from the start of the run; capture them in order.</p>
+        </div>
+        <div class="field">
+          <label for="plc-segdur">Seconds to reach the next keyframe</label>
+          <div class="fieldrow">
+            <input id="plc-segdur" type="number" min="1" max="3600" step="1" value="10">
+            <span class="unit">s</span>
+          </div>
+        </div>
+        <label class="switch"><input id="plc-hold"><span>Hold at each keyframe (step), instead of gliding between them (linear)</span></label>
+        <div class="grid2">
+          <div class="field">
+            <label for="plc-photo-iv">Photo interval <span class="dim">(0 = motion only)</span></label>
+            <div class="fieldrow"><input id="plc-photo-iv" type="number" min="0" max="3600" step="1" value="0"><span class="unit">s</span></div>
+          </div>
+          <div class="field">
+            <label for="plc-photo-n">Photo count</label>
+            <div class="fieldrow"><input id="plc-photo-n" type="number" min="1" max="100000" step="1" placeholder="∞"><button id="plc-photo-inf" class="ghost sm" type="button">∞</button></div>
+          </div>
+        </div>
+        <div id="plc-preview" class="preview" hidden>
+          <p class="tiny dim">The timeline that will be uploaded to the head:</p>
+          <code id="plc-frame" class="framebox"></code>
+        </div>
+        <button id="plc-start" class="startbtn" type="button" disabled>Add at least two keyframes</button>
+      </div>
     </div>
   </section>
 
   <!-- ────────────────────────────── ASTRO ────────────────────────────── -->
   <section id="tab-astro" class="tab" hidden>
+
     <div class="card">
-      <h3>Plate solving &amp; alignment</h3>
-      <p class="dim">
-        The solver, auto-alignment, guiding and the Alpaca/LX200 bridges keep
-        their existing controls for now.
-      </p>
-      <p><a class="btn" href="/legacy">Open the solver dashboard</a></p>
+      <h3>Celestial mode</h3>
+      <label class="switch">
+        <input id="astro-enter" type="checkbox">
+        <span>Enter astro tracking mode</span>
+      </label>
       <p class="tiny dim">
-        This is the field-tested page these tools have always used. It becomes a
-        panel here once the new surface has been used in the dark.
+        Puts the head in astro mode and keeps its attitude stream alive (the
+        server re-arms it every few seconds — a browser can't be trusted to).
+        Leaving stops tracking and returns to photo mode.
       </p>
-    </div>
-    <div class="card">
-      <h3>Mount</h3>
       <dl id="mountstate" class="kv"><dt>reading…</dt><dd></dd></dl>
+    </div>
+
+    <div id="astro-controls" hidden>
+      <div class="card">
+        <h3>Align</h3>
+        <p class="tiny dim">
+          The head needs to know which way is north before it can point at a
+          star. Three ways, best first:
+        </p>
+
+        <!-- 1. Plate solve — no compass at all -->
+        <div class="alignmethod">
+          <div class="alignhead"><b>Solve the sky</b> <span class="dim">— most accurate, no compass</span></div>
+          <p class="tiny dim">
+            Take a frame of the night sky and let the solver work out exactly
+            where the head is pointing, then write that as the alignment. This is
+            the dream path — it needs no compass and no phone sensors.
+          </p>
+          <button id="astro-solve" class="startbtn" type="button">Solve &amp; align</button>
+          <p id="astro-solve-msg" class="tiny dim" hidden></p>
+        </div>
+
+        <!-- 2. Phone compass -->
+        <div class="alignmethod">
+          <div class="alignhead"><b>Phone compass</b> <span class="dim">— if this browser is on a phone</span></div>
+          <p class="tiny dim">
+            Hold the phone flat against the head, pointing the same way the camera
+            does, and read its magnetometer. Only works on a phone, and a
+            magnetometer is never as good as a solve.
+          </p>
+          <div class="fieldrow">
+            <button id="astro-compass" class="ghost" type="button">Read phone compass</button>
+            <span id="astro-compass-val" class="mono dim">—</span>
+          </div>
+          <button id="astro-compass-align" class="ghost" type="button" disabled>Align to this heading</button>
+        </div>
+
+        <!-- 3. Manual bearing -->
+        <div class="alignmethod">
+          <div class="alignhead"><b>Type a bearing</b> <span class="dim">— from a real compass</span></div>
+          <div class="fieldrow">
+            <input id="astro-manual" type="number" min="0" max="360" step="0.5" placeholder="0–360°">
+            <span class="unit">°</span>
+            <button id="astro-manual-align" class="ghost" type="button">Align</button>
+          </div>
+          <p class="tiny dim">The true bearing the camera points at (magnetic compass corrected for declination).</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Track</h3>
+        <div class="row">
+          <label class="seg-inline">
+            Rate
+            <select id="astro-rate">
+              <option value="0">Sidereal (stars)</option>
+              <option value="2">Lunar (Moon)</option>
+            </select>
+          </label>
+          <label class="switch inline"><input id="astro-half" type="checkbox"><span>Half rate</span></label>
+        </div>
+        <p class="tiny dim">
+          Half rate splits the drift between sky and ground so each trails half as
+          much — the landscape-astro compromise. Tracking needs the Astro Kit
+          fitted and the head aligned; without the kit it can point and align but
+          not track.
+        </p>
+        <button id="astro-track" class="startbtn" type="button">Start tracking</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>More astro tools</h3>
+      <p><a class="btn" href="/legacy">Open the solver dashboard</a></p>
+      <p class="tiny dim">Auto-alignment, guiding and the Alpaca/LX200 bridges keep their existing controls there.</p>
     </div>
   </section>
 

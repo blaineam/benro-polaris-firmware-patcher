@@ -641,7 +641,8 @@ function paintProg(d) {
   if (!running) return;
 
   var titles = { panorama: 'Panorama running', timelapse: 'Timelapse running',
-                 hdr: 'HDR bracket', focus: d.preview ? 'Focus preview' : 'Focus stack running' };
+                 hdr: 'HDR bracket', focus: d.preview ? 'Focus preview' : 'Focus stack running',
+                 program: 'Program running' };
   $('#progrun-title').textContent = titles[d.kind] || 'Running';
 
   var fill = $('#progfill');
@@ -837,6 +838,200 @@ function wirePrograms() {
   wireFocusRack();
 }
 
+/* ─────────────────────────────── astro ─────────────────────────────────── */
+
+/* Alignment, the browser way. Three methods, all ending in the same 527
+   SP_SET_YAW the phone app sends -- the plate solve writes it from an actual
+   solve (best), the phone compass reads the handset magnetometer if there is
+   one, and manual entry is the last resort. */
+
+var astroPoll = 0;
+
+function astroGet() { return fetch('/api/astro', { cache: 'no-store' }).then(function (r) { return r.json(); }); }
+
+function paintAstro(a) {
+  var on = !!(a && a.active);
+  $('#astro-enter').checked = on;
+  $('#astro-controls').hidden = !on;
+  /* The tracking button reflects what the mount actually reports (284), not
+     just what we asked for -- read from the shared telemetry. */
+  var mode = S.ops['284'] ? kv(S.ops['284'].args) : {};
+  var tracking = mode.track === '1';
+  var tb = $('#astro-track');
+  tb.classList.toggle('armed', tracking);
+  tb.textContent = tracking ? 'Stop tracking' : 'Start tracking';
+}
+
+function astroRefresh() { return astroGet().then(paintAstro); }
+
+/* iOS 13+ gates DeviceOrientation behind a permission call that must come from a
+   user gesture; Android exposes it without one. This normalises both, and the
+   heading maths follows the snippet the operator pasted. */
+function readPhoneCompass() {
+  var out = $('#astro-compass-val'), btn = $('#astro-compass-align');
+  function start() {
+    if (!window.DeviceOrientationEvent) { out.textContent = 'no sensor on this device'; return; }
+    var handler = function (e) {
+      var h;
+      if (typeof e.webkitCompassHeading === 'number') {
+        h = e.webkitCompassHeading;                 /* iOS: already true-ish heading */
+      } else if (e.alpha != null) {
+        h = e.alpha;
+        if (!window.chrome) h = h - 270;            /* Android stock, per the app note */
+        h = (360 - h) % 360;                        /* alpha is counter-clockwise from east */
+      } else { return; }
+      h = ((h % 360) + 360) % 360;
+      out.textContent = h.toFixed(1) + '°';
+      out.classList.remove('dim');
+      btn.disabled = false;
+      btn.dataset.heading = h.toFixed(2);
+    };
+    window.addEventListener('deviceorientation', handler, true);
+    out.textContent = 'reading…';
+  }
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(function (state) {
+      if (state === 'granted') start();
+      else out.textContent = 'permission denied';
+    }).catch(function () { out.textContent = 'permission error'; });
+  } else start();
+}
+
+function wireAstro() {
+  $('#astro-enter').addEventListener('change', function () {
+    post(this.checked ? '/api/astro/enter' : '/api/astro/leave', {}).then(function (r) {
+      if (r && r.ok === false) setHint('<b>Astro:</b> ' + (r.error || ''));
+      astroRefresh();
+    });
+  });
+
+  /* Plate solve — the compass-free path. Kicks the solver with apply=1 and
+     watches /api/state, which the legacy dashboard already drives. */
+  $('#astro-solve').addEventListener('click', function () {
+    var msg = $('#astro-solve-msg');
+    msg.hidden = false; msg.textContent = 'solving the sky…';
+    post('/api/solve?mode=0&apply=1', {}).then(function () {
+      var tries = 0;
+      var iv = setInterval(function () {
+        fetch('/api/state', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (st) {
+          if (st.status === 'done') {
+            clearInterval(iv);
+            msg.textContent = st.result && st.result.solved
+              ? 'solved and aligned — the head now knows where it is pointing'
+              : 'solve finished; alignment written';
+          } else if (st.status === 'failed') {
+            clearInterval(iv); msg.textContent = 'solve failed — check framing and focal length on the solver dashboard';
+          } else if (++tries > 60) { clearInterval(iv); msg.textContent = 'still solving — watch the solver dashboard'; }
+          else msg.textContent = 'solving… (' + (st.status || 'working') + ')';
+        }).catch(function () { clearInterval(iv); msg.textContent = 'lost contact with the solver'; });
+      }, 1000);
+    });
+  });
+
+  $('#astro-compass').addEventListener('click', readPhoneCompass);
+  $('#astro-compass-align').addEventListener('click', function () {
+    post('/api/astro/align', { compass: this.dataset.heading }).then(function (r) {
+      setHint(r && r.ok ? '' : '<b>Align:</b> ' + ((r && r.error) || ''));
+    });
+  });
+  $('#astro-manual-align').addEventListener('click', function () {
+    var v = $('#astro-manual').value;
+    if (v === '') return;
+    post('/api/astro/align', { compass: v }).then(function (r) {
+      setHint(r && r.ok ? '' : '<b>Align:</b> ' + ((r && r.error) || ''));
+    });
+  });
+
+  $('#astro-track').addEventListener('click', function () {
+    var mode = S.ops['284'] ? kv(S.ops['284'].args) : {};
+    var tracking = mode.track === '1';
+    post('/api/astro/track', {
+      on: tracking ? 0 : 1,
+      rate: $('#astro-rate').value,
+      half: $('#astro-half').checked ? 1 : 0
+    }).then(function (r) {
+      if (r && r.ok === false) setHint('<b>Tracking:</b> ' + (r.error || ''));
+      setTimeout(astroRefresh, 300);
+    });
+  });
+}
+
+function astroPollStart() {
+  clearInterval(astroPoll);
+  if ($('#tab-astro').hidden) return;
+  astroRefresh();
+  astroPoll = setInterval(astroRefresh, 1500);
+}
+
+/* ─────────────────────────────── free program ──────────────────────────── */
+
+/* A keyframe timeline flown by hand: the poses live SERVER-side (captured from
+   the head's live attitude), so the client only holds the display copy. */
+var plcKeys = [];   /* [{t, pan, tilt, roll}] mirrored from the server */
+
+function plcRenderKeys() {
+  var ol = $('#plc-keys');
+  if (!plcKeys.length) { ol.innerHTML = '<li class="dim">none yet — jog the head, then capture a pose</li>'; }
+  else ol.innerHTML = plcKeys.map(function (k, i) {
+    return '<li>t=' + k.t + 's · pan ' + (k.pan * 180 / Math.PI).toFixed(1) +
+           '° tilt ' + (k.tilt * 180 / Math.PI).toFixed(1) + '°</li>';
+  }).join('');
+  var start = $('#plc-start');
+  start.disabled = plcKeys.length < 2;
+  start.textContent = plcKeys.length < 2 ? 'Add at least two keyframes' : 'Preview program';
+  if (plcKeys.length < 2) { start.dataset.armed = '0'; start.classList.remove('armed'); $('#plc-preview').hidden = true; }
+}
+
+function wirePlc() {
+  var cumT = 0;
+  $('#plc-capture').addEventListener('click', function () {
+    /* The time of this keyframe is the running sum of the per-segment durations;
+       the first is at t=0. The server reads the head's CURRENT pose. */
+    var t = plcKeys.length === 0 ? 0 : cumT + (parseInt($('#plc-segdur').value, 10) || 10);
+    post('/api/prog/plc/key', { t: t }).then(function (r) {
+      if (r && r.ok === false) { setHint('<b>Keyframe:</b> ' + (r.error || '')); return; }
+      cumT = t;
+      /* Mirror what the head reported, for the list. Pull the pose from 517. */
+      var pose = S.ops['517'] ? kv(S.ops['517'].args) : {};
+      plcKeys.push({ t: t, pan: parseFloat(pose.yaw || 0), tilt: parseFloat(pose.pitch || 0), roll: parseFloat(pose.roll || 0) });
+      plcRenderKeys();
+    });
+  });
+  $('#plc-clear').addEventListener('click', function () {
+    post('/api/prog/plc/clear', {}).then(function () { plcKeys = []; cumT = 0; plcRenderKeys(); });
+  });
+  $('#plc-photo-inf').addEventListener('click', function () { $('#plc-photo-n').value = ''; });
+
+  var start = $('#plc-start');
+  start.addEventListener('click', function () {
+    var params = {
+      photo_interval: parseFloat($('#plc-photo-iv').value) || 0,
+      photo_count: $('#plc-photo-n').value.trim() === '' ? -1 : parseInt($('#plc-photo-n').value, 10),
+      hold: $('#plc-hold').checked ? 1 : 0
+    };
+    if (start.dataset.armed !== '1') {
+      post('/api/prog/plc', params).then(function (r) {
+        if (r && r.valid === false) { setHint('<b>Program:</b> ' + (r.error || '')); return; }
+        setHint('');
+        $('#plc-frame').textContent = r.frame;
+        $('#plc-preview').hidden = false;
+        start.dataset.armed = '1'; start.classList.add('armed');
+        start.textContent = 'Run this move — ' + r.keys + ' keyframes';
+      });
+      return;
+    }
+    post('/api/prog/plc', Object.assign(params, { confirm: 1 })).then(function (r) {
+      start.dataset.armed = '0'; start.classList.remove('armed');
+      start.textContent = 'Preview program';
+      $('#plc-preview').hidden = true;
+      if (r && r.ok === false) setHint('<b>Program refused.</b> ' + (r.error || ''));
+      progRefresh();
+    });
+  });
+  plcRenderKeys();
+}
+
 /* ──────────────────────────────── tabs ─────────────────────────────────── */
 
 function wireTabs() {
@@ -847,6 +1042,7 @@ function wireTabs() {
       /* Leaving the control tab must not leave an axis running. */
       if (b.dataset.tab !== 'control') stopEverything();
       if (b.dataset.tab === 'programs') progPoll(); else clearTimeout(progTimer);
+      if (b.dataset.tab === 'astro') astroPollStart(); else clearInterval(astroPoll);
     });
   });
 }
@@ -859,4 +1055,6 @@ wireExposure();
 wireShutter();
 wireSettings();
 wirePrograms();
+wireAstro();
+wirePlc();
 poll();

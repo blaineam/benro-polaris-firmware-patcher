@@ -50,8 +50,28 @@
   preview or start) and stitches all-in-focus; its start frame carries the
   genuine `;num:<shots>;` double semicolon. Both fold into the same run view,
   poll model and dead-man as timelapse/panorama.
+- **ASTRO mode with browser compass alignment.** The Astro tab enters celestial
+  mode (285 mode:8) and holds the AHRS attitude heartbeat alive server-side (the
+  app re-arms it every 5 s; a browser tab can't be trusted to). Alignment offers
+  three routes, best first: **solve the sky** (kick this repo's own solver with
+  apply=1 — no compass, no phone sensors, more accurate than a magnetometer),
+  **phone compass** (DeviceOrientation/webkitCompassHeading when the browser is
+  on a handset), and **manual bearing** — all ending in the same 527 SP_SET_YAW
+  the app sends, with the server's lat/lon. Tracking is 531 with sidereal/lunar
+  rate and a full/half toggle (the half flag is inverted on the wire, handled).
+  `polaris-astro.{c,h}`, `test_astro.c` (24 assertions).
+- **FREE PROGRAM (283) — a keyframe move flown by hand.** Jog the head, capture
+  its live 517 pose as a keyframe, repeat, then play; the head walks the path on
+  its own and keeps going with no browser attached. Linear or hold interpolation,
+  an optional photo track, a previewed timeline. That is all six shooting
+  programmes plus the programmable mode now wired.
+- **A real heisenbug caught by ASan before it shipped:** `absorb_reply`'s
+  per-kind `seen[]` array was sized `[PROG_FOCUS+1]` and indexed by a kind that
+  grew past it — a global-buffer-overflow that corrupted an adjacent global.
+  Every test binary now also runs under AddressSanitizer + UBSan, clean.
 - The mount simulator learned jog, re-centre, registration, battery, card, the
-  camera option lists, and now runs all four programmes with a real countdown
+  camera option lists, the astro control opcodes (mode/AHRS/yaw/half/pose), and
+  now runs all six programmes with a real countdown
   (HDR via a pushed completion), so the whole control loop — motion through every
   programme — is testable with no hardware attached. `test_prog.c` is 64
   assertions.

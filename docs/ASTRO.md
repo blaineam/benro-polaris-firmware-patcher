@@ -226,6 +226,45 @@ panorama neither is inference:
   or dry-preview. Its only number is the frame count (2–200). The start frame is
   `step:3;;num:<shots>;` — the double semicolon is the app's own, not a typo.
 
+### ASTRO mode and alignment
+
+The Astro tab drives celestial mode from the browser. Entering it sends
+`SP_SET_MODE_STATE(8)` and holds the AHRS attitude stream alive with a
+server-side heartbeat (re-armed every few seconds — the app re-arms it every 5,
+and a browser tab cannot be trusted to); leaving stops tracking and returns to
+photo mode. Tracking is `SP_SET_TRACK_AU_STATE` (531) with a sidereal/lunar rate
+and a full/half toggle — and the half-rate flag is inverted on the wire
+(`halfSpeed:1` = half), which the module handles.
+
+**Compass alignment without a phone.** The head has to know which way is north
+before it can point at a star; the app sends its handset magnetometer heading
+(`SP_SET_YAW`, 527). The browser offers three routes, best first:
+
+1. **Solve the sky** — take a frame and let this repository's own solver work
+   out exactly where the head is pointing, then write that as the alignment
+   (`/api/solve?apply=1`). No compass, no phone sensors, and strictly more
+   accurate than a magnetometer. This is the path to prefer.
+2. **Phone compass** — when the browser is on a phone held against the head, read
+   its `DeviceOrientation`/`webkitCompassHeading` and send that as 527 (iOS asks
+   permission on the first tap).
+3. **Type a bearing** — a heading read off a real compass, as a last resort.
+
+All three end in the same 527 the app sends, with the server's own lat/lon so
+alignment and the solver agree about where the head is. 527's `ret` polarity is
+documented as contradictory, so alignment is confirmed by the mount's reported
+state, never by 527's reply.
+
+### FREE PROGRAM — a keyframe move you fly by hand
+
+The Programs tab's **Program** mode is the app's FREE PROGRAM (283): fly the head
+with the jog, capture its live pose as a keyframe, fly to the next, capture
+again, then play. The head walks the whole path on its own and — being
+head-side — keeps going with no browser attached. Poses are captured from the
+head's own 517 attitude (radians) so the stored keyframe needs no coordinate
+maths. Motion interpolates linearly between keyframes or holds (step) at each;
+an optional photo track shoots along the way. The exact timeline is previewed
+before it is uploaded.
+
 ### Live view
 
 The stream is the head's own mjpg-streamer on **:8080**, referenced directly
