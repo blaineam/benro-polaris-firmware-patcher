@@ -1586,6 +1586,20 @@ static void indi_def_all(int fd) {
       "<defTextVector device='%s' name='TIME_UTC' label='UTC' group='Site' state='Ok' perm='rw' timeout='60' timestamp='%s'>"
       "<defText name='UTC' label='UTC Time'>%s</defText>"
       "<defText name='OFFSET' label='UTC Offset'>0</defText></defTextVector>", INDI_DEV, ts, utc);
+    indi_send(fd,
+      "<defSwitchVector device='%s' name='TELESCOPE_PARK' label='Parking' group='Main Control' state='Ok' perm='rw' rule='OneOfMany' timeout='60' timestamp='%s'>"
+      "<defSwitch name='PARK' label='Park'>Off</defSwitch>"
+      "<defSwitch name='UNPARK' label='UnPark'>On</defSwitch></defSwitchVector>", INDI_DEV, ts);
+    /* Pulse guiding: the mount's a goto not an ST4, so these jog an axis briefly
+     * -- PHD2/Ekos calibrate the rate themselves. */
+    indi_send(fd,
+      "<defNumberVector device='%s' name='TELESCOPE_TIMED_GUIDE_NS' label='Guide N/S' group='Guide' state='Idle' perm='rw' timeout='60' timestamp='%s'>"
+      "<defNumber name='TIMED_GUIDE_N' label='N (ms)' format='%%g' min='0' max='60000' step='10'>0</defNumber>"
+      "<defNumber name='TIMED_GUIDE_S' label='S (ms)' format='%%g' min='0' max='60000' step='10'>0</defNumber></defNumberVector>", INDI_DEV, ts);
+    indi_send(fd,
+      "<defNumberVector device='%s' name='TELESCOPE_TIMED_GUIDE_WE' label='Guide W/E' group='Guide' state='Idle' perm='rw' timeout='60' timestamp='%s'>"
+      "<defNumber name='TIMED_GUIDE_W' label='W (ms)' format='%%g' min='0' max='60000' step='10'>0</defNumber>"
+      "<defNumber name='TIMED_GUIDE_E' label='E (ms)' format='%%g' min='0' max='60000' step='10'>0</defNumber></defNumberVector>", INDI_DEV, ts);
 }
 
 static void indi_mount(const char *sub, double ra_deg, double dec_deg) {
@@ -1607,6 +1621,38 @@ static void indi_mount(const char *sub, double ra_deg, double dec_deg) {
             "goto-radec --refine-arcmin 0.1 --ra %.6f --dec %.6f >/dev/null 2>&1 &",
             g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ub, ra_deg, dec_deg);
     if (system(cmd) == -1) {}
+}
+
+/* Sidereal tracking on/off, the honest way -- polaris-mount has a `track`
+ * subcommand (531). */
+static void indi_track(int on) {
+    char cmd[400], out[256];
+    snprintf(cmd, sizeof cmd,
+        "%s/polaris-mount --host %s --port %d track %s >/dev/null 2>&1",
+        g_astro, g_mount_host, g_mount_port, on ? "on" : "off");
+    run_capture(cmd, out, sizeof out);
+}
+
+/* A guide pulse: jog one gimbal axis at a low speed for `ms` milliseconds, then
+ * stop. `opcode` is 513 (RA/pan/HADJ) or 514 (Dec/tilt/VADJ); `sign` picks the
+ * direction. The Polaris is a goto mount, not an ST4 one, so this is an
+ * approximation -- but PHD2/Ekos calibrate it by pulsing and measuring, so a
+ * consistent small nudge per ms is all it needs. Blocks the session for the
+ * pulse, which is what a client expects of a timed guide. */
+#define INDI_GUIDE_SPEED 150
+static void indi_pulse(int opcode, int sign, int ms) {
+    char cmd[400], out[256];
+    if (ms <= 0) return;
+    if (ms > 5000) ms = 5000;                    /* a runaway pulse is a bug */
+    snprintf(cmd, sizeof cmd,
+        "%s/polaris-mount --host %s --port %d send --msg '1&%d&3&speed:%d;' >/dev/null 2>&1",
+        g_astro, g_mount_host, g_mount_port, opcode, sign < 0 ? -INDI_GUIDE_SPEED : INDI_GUIDE_SPEED);
+    run_capture(cmd, out, sizeof out);
+    usleep((useconds_t)ms * 1000);
+    snprintf(cmd, sizeof cmd,
+        "%s/polaris-mount --host %s --port %d send --msg '1&%d&3&speed:0;' >/dev/null 2>&1",
+        g_astro, g_mount_host, g_mount_port, opcode);
+    run_capture(cmd, out, sizeof out);
 }
 
 static void indi_session(int fd) {
@@ -1649,10 +1695,20 @@ static void indi_session(int fd) {
                         indi_push_coord(fd, 0);
                     } else if (!strcmp(pname, "TELESCOPE_TRACK_STATE")) {
                         int on = indi_one(el, "oneSwitch", "TRACK_ON", v1, sizeof v1) && !strcmp(v1,"On");
-                        if (!on) { indi_mount("abort", 0, 0); slewing = 0; }
+                        indi_track(on);          /* real sidereal tracking (531) */
                         indi_send(fd, "<setSwitchVector device='%s' name='TELESCOPE_TRACK_STATE' state='Ok' timestamp='%s'>"
                             "<oneSwitch name='TRACK_ON'>%s</oneSwitch><oneSwitch name='TRACK_OFF'>%s</oneSwitch>"
                             "</setSwitchVector>", INDI_DEV, ts, on?"On":"Off", on?"Off":"On");
+                    } else if (!strcmp(pname, "TELESCOPE_PARK")) {
+                        int park = indi_one(el, "oneSwitch", "PARK", v1, sizeof v1) && !strcmp(v1,"On");
+                        /* Park = stop moving: tracking off and any slew aborted.
+                         * The Polaris has no safe motorised stow-to-home we can
+                         * command, so park does not slew -- it makes the mount
+                         * stationary, which is the part that matters. */
+                        if (park) { indi_track(0); indi_mount("abort", 0, 0); slewing = 0; }
+                        indi_send(fd, "<setSwitchVector device='%s' name='TELESCOPE_PARK' state='Ok' timestamp='%s'>"
+                            "<oneSwitch name='PARK'>%s</oneSwitch><oneSwitch name='UNPARK'>%s</oneSwitch>"
+                            "</setSwitchVector>", INDI_DEV, ts, park?"On":"Off", park?"Off":"On");
                     } else if (!strcmp(pname, "CONNECTION")) {
                         indi_send(fd, "<setSwitchVector device='%s' name='CONNECTION' state='Ok' timestamp='%s'>"
                             "<oneSwitch name='CONNECT'>On</oneSwitch><oneSwitch name='DISCONNECT'>Off</oneSwitch>"
@@ -1675,6 +1731,22 @@ static void indi_session(int fd) {
                                     "</setNumberVector>", INDI_DEV, ts, tgt_ra_h, tgt_dec);
                             }
                         }
+                    } else if (!strcmp(pname, "TELESCOPE_TIMED_GUIDE_NS")) {
+                        double gn = 0, gs = 0;
+                        if (indi_one(el, "oneNumber", "TIMED_GUIDE_N", v1, sizeof v1)) gn = atof(v1);
+                        if (indi_one(el, "oneNumber", "TIMED_GUIDE_S", v2, sizeof v2)) gs = atof(v2);
+                        if (gn > 0) indi_pulse(514, +1, (int)gn);          /* Dec = tilt (514) */
+                        else if (gs > 0) indi_pulse(514, -1, (int)gs);
+                        indi_send(fd, "<setNumberVector device='%s' name='TELESCOPE_TIMED_GUIDE_NS' state='Ok' timestamp='%s'>"
+                            "<oneNumber name='TIMED_GUIDE_N'>0</oneNumber><oneNumber name='TIMED_GUIDE_S'>0</oneNumber></setNumberVector>", INDI_DEV, ts);
+                    } else if (!strcmp(pname, "TELESCOPE_TIMED_GUIDE_WE")) {
+                        double gw = 0, ge = 0;
+                        if (indi_one(el, "oneNumber", "TIMED_GUIDE_W", v1, sizeof v1)) gw = atof(v1);
+                        if (indi_one(el, "oneNumber", "TIMED_GUIDE_E", v2, sizeof v2)) ge = atof(v2);
+                        if (gw > 0) indi_pulse(513, +1, (int)gw);          /* RA = pan (513) */
+                        else if (ge > 0) indi_pulse(513, -1, (int)ge);
+                        indi_send(fd, "<setNumberVector device='%s' name='TELESCOPE_TIMED_GUIDE_WE' state='Ok' timestamp='%s'>"
+                            "<oneNumber name='TIMED_GUIDE_W'>0</oneNumber><oneNumber name='TIMED_GUIDE_E'>0</oneNumber></setNumberVector>", INDI_DEV, ts);
                     } else if (!strcmp(pname, "GEOGRAPHIC_COORD")) {
                         if (indi_one(el, "oneNumber", "LAT", v1, sizeof v1)) g_lat = atof(v1);
                         if (indi_one(el, "oneNumber", "LONG", v2, sizeof v2)) {

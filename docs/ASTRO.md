@@ -641,7 +641,10 @@ DRIVER_INFO                DRIVER_INTERFACE = 1 (telescope)
 ON_COORD_SET               TRACK | SLEW | SYNC
 EQUATORIAL_EOD_COORD       RA/DEC -> goto-radec (slew, async Busy) or align (sync)
 TELESCOPE_ABORT_MOTION     -> polaris-mount abort (works during a slew)
-TELESCOPE_TRACK_STATE      TRACK_ON / TRACK_OFF
+TELESCOPE_TRACK_STATE      -> polaris-mount track on|off (real sidereal, 531)
+TELESCOPE_PARK             PARK stops motion (track off + abort); no motorised stow
+TELESCOPE_TIMED_GUIDE_NS   N/S pulse -> jog the Dec axis (514) for N ms
+TELESCOPE_TIMED_GUIDE_WE   W/E pulse -> jog the RA axis (513) for N ms
 GEOGRAPHIC_COORD           LAT / LONG (0-360 E) / ELEV
 TIME_UTC
 ```
@@ -649,7 +652,12 @@ TIME_UTC
 The slew runs in the background so ABORT stays responsive, and the vector goes
 `Busy` → `Ok` when the pushed pointing lands within ~0.5° of the target (or after
 60 s). Position reads reuse `current_radec`, which is connection-safe at 1 Hz and
-never connects to an unaligned mount.
+never connects to an unaligned mount. **Pulse guiding** is an approximation — the
+Polaris is a goto mount, not an ST4 one, so a pulse just jogs the axis briefly at
+a low speed; PHD2/Ekos calibrate the actual rate by pulsing and measuring, which
+is all they need. **Park** makes the mount stationary (tracking off, slew
+aborted) rather than slewing to a home, because the Polaris exposes no motorised
+stow we can safely command.
 
 ---
 
