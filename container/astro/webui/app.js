@@ -1170,6 +1170,14 @@ function wireAstro() {
    only — planets and the Moon need an ephemeris, so they stay in a planetarium
    app for now; these are the objects you actually image. */
 var ASTRO_TARGETS = [
+  { n: 'Moon', t: 'moon', dyn: 'moon', a: 'luna' },
+  { n: 'Mars', t: 'planet', dyn: 'mars', a: '' },
+  { n: 'Jupiter', t: 'planet', dyn: 'jupiter', a: '' },
+  { n: 'Saturn', t: 'planet', dyn: 'saturn', a: '' },
+  { n: 'Venus', t: 'planet', dyn: 'venus', a: '' },
+  { n: 'Mercury', t: 'planet', dyn: 'mercury', a: '' },
+  { n: 'Uranus', t: 'planet', dyn: 'uranus', a: '' },
+  { n: 'Neptune', t: 'planet', dyn: 'neptune', a: '' },
   { n: 'M42 Orion Nebula', t: 'nebula', ra: 83.82, dec: -5.39, a: 'orion' },
   { n: 'M31 Andromeda Galaxy', t: 'galaxy', ra: 10.68, dec: 41.27, a: 'andromeda' },
   { n: 'M45 Pleiades', t: 'cluster', ra: 56.75, dec: 24.12, a: 'seven sisters subaru' },
@@ -1210,6 +1218,93 @@ var ASTRO_TARGETS = [
   { n: 'Sirius', t: 'star', ra: 101.29, dec: -16.72, a: '' }
 ];
 
+/* Low-precision ephemeris for the Moon and planets (Paul Schlyter's method),
+   good to ~1–2′ — well inside a GOTO + plate-solve refine. Returns geocentric
+   RA/Dec of date in degrees. The Sun is deliberately absent from the catalogue
+   (pointing a camera at it without a filter destroys the sensor). */
+function ephem(body, date) {
+  var RAD = Math.PI / 180;
+  var Y = date.getUTCFullYear(), Mo = date.getUTCMonth() + 1, D = date.getUTCDate();
+  var ut = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600;
+  var d = 367 * Y - Math.floor(7 * (Y + Math.floor((Mo + 9) / 12)) / 4) + Math.floor(275 * Mo / 9) + D - 730530 + ut / 24;
+  var ecl = 23.4393 - 3.563e-7 * d;
+  function rev(x) { return x - Math.floor(x / 360) * 360; }
+  function sind(x) { return Math.sin(x * RAD); }
+  function cosd(x) { return Math.cos(x * RAD); }
+  function radec(xg, yg, zg) {
+    var xe = xg, ye = yg * cosd(ecl) - zg * sind(ecl), ze = yg * sind(ecl) + zg * cosd(ecl);
+    return { ra: rev(Math.atan2(ye, xe) / RAD), dec: Math.atan2(ze, Math.sqrt(xe * xe + ye * ye)) / RAD };
+  }
+  /* the Sun's geocentric rectangular position — needed to make planets geocentric */
+  var ws = 282.9404 + 4.70935e-5 * d, es = 0.016709 - 1.151e-9 * d, Ms = rev(356.0470 + 0.9856002585 * d);
+  var Esun = Ms + (1 / RAD) * es * sind(Ms) * (1 + es * cosd(Ms));
+  var xvs = cosd(Esun) - es, yvs = Math.sqrt(1 - es * es) * sind(Esun);
+  var lonsun = rev(Math.atan2(yvs, xvs) / RAD + ws), rsun = Math.sqrt(xvs * xvs + yvs * yvs);
+  var xs = rsun * cosd(lonsun), ys = rsun * sind(lonsun);
+
+  if (body === 'moon') {
+    var N = rev(125.1228 - 0.0529538083 * d), i = 5.1454, w = rev(318.0634 + 0.1643573223 * d);
+    var a = 60.2666, e = 0.054900, M = rev(115.3654 + 13.0649929509 * d);
+    var E = M + (1 / RAD) * e * sind(M) * (1 + e * cosd(M));
+    E = E - (E - (1 / RAD) * e * sind(E) - M) / (1 - e * cosd(E));
+    var xv = a * (cosd(E) - e), yv = a * Math.sqrt(1 - e * e) * sind(E);
+    var v = rev(Math.atan2(yv, xv) / RAD), r = Math.sqrt(xv * xv + yv * yv);
+    var xh = r * (cosd(N) * cosd(v + w) - sind(N) * sind(v + w) * cosd(i));
+    var yh = r * (sind(N) * cosd(v + w) + cosd(N) * sind(v + w) * cosd(i));
+    var zh = r * (sind(v + w) * sind(i));
+    var lon = rev(Math.atan2(yh, xh) / RAD), lat = Math.atan2(zh, Math.sqrt(xh * xh + yh * yh)) / RAD;
+    var Lm = rev(N + w + M), Ls = rev(Ms + ws), Dm = rev(Lm - Ls), F = rev(Lm - N);
+    lon += -1.274 * sind(M - 2 * Dm) + 0.658 * sind(2 * Dm) - 0.186 * sind(Ms) - 0.059 * sind(2 * M - 2 * Dm)
+         - 0.057 * sind(M - 2 * Dm + Ms) + 0.053 * sind(M + 2 * Dm) + 0.046 * sind(2 * Dm - Ms)
+         + 0.041 * sind(M - Ms) - 0.035 * sind(Dm) - 0.031 * sind(M + Ms) - 0.015 * sind(2 * F - 2 * Dm)
+         + 0.011 * sind(M - 4 * Dm);
+    lat += -0.173 * sind(F - 2 * Dm) - 0.055 * sind(M - F - 2 * Dm) - 0.046 * sind(M + F - 2 * Dm)
+         + 0.033 * sind(F + 2 * Dm) + 0.017 * sind(2 * M + F);
+    r += -0.58 * cosd(M - 2 * Dm) - 0.46 * cosd(2 * Dm);
+    return radec(r * cosd(lon) * cosd(lat), r * sind(lon) * cosd(lat), r * sind(lat));
+  }
+  var P = {
+    mercury: [48.3313, 4.5236e-5, 7.0047, 5.00e-8, 29.1241, 1.01444e-5, 0.387098, 0, 0.205635, 5.59e-10, 168.6562, 4.0923344368],
+    venus:   [76.6799, 2.4659e-5, 3.3946, 2.75e-8, 54.8910, 1.38374e-5, 0.723330, 0, 0.006773, -1.302e-9, 48.0052, 1.6021302244],
+    mars:    [49.5574, 2.11081e-5, 1.8497, -1.78e-8, 286.5016, 2.92961e-5, 1.523688, 0, 0.093405, 2.516e-9, 18.6021, 0.5240207766],
+    jupiter: [100.4542, 2.76854e-5, 1.3030, -1.557e-7, 273.8777, 1.64505e-5, 5.20256, 0, 0.048498, 4.469e-9, 19.8950, 0.0830853001],
+    saturn:  [113.6634, 2.38980e-5, 2.4886, -1.081e-7, 339.3939, 2.97661e-5, 9.55475, 0, 0.055546, -9.499e-9, 316.9670, 0.0334442282],
+    uranus:  [74.0005, 1.3978e-5, 0.7733, 1.9e-8, 96.6612, 3.0565e-5, 19.18171, -1.55e-8, 0.047318, 7.45e-9, 142.5905, 0.011725806],
+    neptune: [131.7806, 3.0173e-5, 1.7700, -2.55e-7, 272.8461, -6.027e-6, 30.05826, 3.313e-8, 0.008606, 2.15e-9, 260.2471, 0.005995147]
+  };
+  var el = P[body]; if (!el) return { ra: 0, dec: 0 };
+  var N2 = rev(el[0] + el[1] * d), ip = el[2] + el[3] * d, w2 = rev(el[4] + el[5] * d);
+  var a2 = el[6] + el[7] * d, e2 = el[8] + el[9] * d, M2 = rev(el[10] + el[11] * d), E2 = M2, k;
+  for (k = 0; k < 5; k++) E2 = E2 - (E2 - (1 / RAD) * e2 * sind(E2) - M2) / (1 - e2 * cosd(E2));
+  var xv2 = a2 * (cosd(E2) - e2), yv2 = a2 * Math.sqrt(1 - e2 * e2) * sind(E2);
+  var v2 = rev(Math.atan2(yv2, xv2) / RAD), r2 = Math.sqrt(xv2 * xv2 + yv2 * yv2);
+  var xh2 = r2 * (cosd(N2) * cosd(v2 + w2) - sind(N2) * sind(v2 + w2) * cosd(ip));
+  var yh2 = r2 * (sind(N2) * cosd(v2 + w2) + cosd(N2) * sind(v2 + w2) * cosd(ip));
+  var zh2 = r2 * (sind(v2 + w2) * sind(ip));
+  /* the giant planets carry perturbations big enough to matter for pointing */
+  if (body === 'jupiter' || body === 'saturn') {
+    var lon2 = rev(Math.atan2(yh2, xh2) / RAD), lat2 = Math.atan2(zh2, Math.sqrt(xh2 * xh2 + yh2 * yh2)) / RAD;
+    var Mj = rev(19.8950 + 0.0830853001 * d), Msat = rev(316.9670 + 0.0334442282 * d);
+    if (body === 'jupiter') {
+      lon2 += -0.332 * sind(2 * Mj - 5 * Msat - 67.6) - 0.056 * sind(2 * Mj - 2 * Msat + 21)
+            + 0.042 * sind(3 * Mj - 5 * Msat + 21) - 0.036 * sind(Mj - 2 * Msat)
+            + 0.022 * cosd(Mj - Msat) + 0.023 * sind(2 * Mj - 3 * Msat + 52) - 0.016 * sind(Mj - 5 * Msat - 69);
+    } else {
+      lon2 += 0.812 * sind(2 * Mj - 5 * Msat - 67.6) - 0.229 * cosd(2 * Mj - 4 * Msat - 2)
+            + 0.119 * sind(Mj - 2 * Msat - 3) + 0.046 * sind(2 * Mj - 6 * Msat - 69) + 0.014 * sind(Mj - 3 * Msat + 32);
+      lat2 += -0.020 * cosd(2 * Mj - 4 * Msat - 2) + 0.018 * sind(2 * Mj - 6 * Msat - 49);
+    }
+    xh2 = r2 * cosd(lon2) * cosd(lat2); yh2 = r2 * sind(lon2) * cosd(lat2); zh2 = r2 * sind(lat2);
+  }
+  return radec(xh2 + xs, yh2 + ys, zh2);
+}
+
+/* A target's RA/Dec now — computed for the Moon/planets, fixed for deep sky. */
+function resolveTarget(o) {
+  if (o.dyn) { var c = ephem(o.dyn, new Date()); return { ra: c.ra, dec: c.dec, dyn: true }; }
+  return { ra: o.ra, dec: o.dec, dyn: false };
+}
+
 function wireTargets() {
   var sel = $('#tgt-select'), search = $('#tgt-search'), info = $('#tgt-info'), go = $('#tgt-goto');
   function render(filter) {
@@ -1223,27 +1318,30 @@ function wireTargets() {
   search.addEventListener('input', function () { render(this.value); });
   sel.addEventListener('change', function () {
     var o = ASTRO_TARGETS[parseInt(this.value, 10)]; if (!o) return;
-    info.textContent = o.n + '  ·  RA ' + (o.ra / 15).toFixed(2) + 'h  Dec ' + o.dec.toFixed(1) + '°';
+    var c = resolveTarget(o);
+    info.textContent = o.n + '  ·  RA ' + (c.ra / 15).toFixed(2) + 'h  Dec ' + c.dec.toFixed(1) + '°' +
+                       (c.dyn ? '  · now' : '');
     go.disabled = false; go.dataset.armed = '0'; go.classList.remove('armed');
     go.textContent = 'Go to ' + o.n.split(' ')[0];
   });
   go.addEventListener('click', function () {
     var o = ASTRO_TARGETS[parseInt(sel.value, 10)]; if (!o) return;
-    var msg = $('#tgt-msg');
+    var msg = $('#tgt-msg'), c = resolveTarget(o);   /* fresh coords each tap for the Moon/planets */
     if (go.dataset.armed !== '1') {
-      post('/api/astro/goto', { ra: o.ra, dec: o.dec, name: o.n }).then(function (r) {
+      post('/api/astro/goto', { ra: c.ra, dec: c.dec, name: o.n }).then(function (r) {
         if (r && r.valid === false) { setHint('<b>Go to:</b> ' + (r.error || '')); return; }
         go.dataset.armed = '1'; go.classList.add('armed');
         go.textContent = 'Confirm — slew to ' + o.n.split(' ')[0];
       });
       return;
     }
-    post('/api/astro/goto', { ra: o.ra, dec: o.dec, name: o.n, confirm: 1 }).then(function (r) {
+    post('/api/astro/goto', { ra: c.ra, dec: c.dec, name: o.n, confirm: 1 }).then(function (r) {
       go.dataset.armed = '0'; go.classList.remove('armed'); go.textContent = 'Go to ' + o.n.split(' ')[0];
       msg.hidden = false;
       msg.innerHTML = (r && r.ok === false)
         ? '<b>Refused.</b> ' + (r.error || '')
-        : 'Slewing to ' + o.n + ' — it will track once it arrives.';
+        : 'Slewing to ' + o.n + ' — it will track once it arrives.' +
+          (o.dyn === 'moon' ? ' The Moon drifts ~0.5°/hr — switch Track to lunar rate.' : '');
     });
   });
 }
