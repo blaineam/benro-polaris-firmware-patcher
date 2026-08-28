@@ -163,10 +163,13 @@ SITE=/app/sd/polaris-astro/site.conf
         echo "no $ASTRO/polaris-httpd after ${i} tries -- giving up"
         exit 0
     fi
-    if [ -z "$LAT" ] || [ -z "$LON" ]; then
-        echo "no LAT/LON (create /app/sd/polaris-astro/site.conf) -- not starting"
-        exit 0
-    fi
+    # The observing position is OPTIONAL now. Without it the server still starts,
+    # so the page is reachable and the location can be set there (Settings >
+    # Observing site, via the browser GPS or by hand) -- /api/site persists it
+    # back to this site.conf, so the next boot picks it up. Only pass --lat/--lon
+    # when we actually have both; polaris-httpd starts fine without them.
+    POS=""
+    if [ -n "$LAT" ] && [ -n "$LON" ]; then POS="--lat $LAT --lon $LON"; fi
 
     # Idempotent: running this by hand while the server is already up must not
     # spawn a second instance that dies on "Address already in use".
@@ -200,16 +203,16 @@ SITE=/app/sd/polaris-astro/site.conf
                      | sed -n 's/.*track:\([0-9-][0-9]*\).*/\1/p' | tail -1)
                 if [ -n "$_t" ] && [ "$_t" != "3" ] && [ "$_t" != "-1" ]; then
                     echo "$(date) mount reports track:$_t -- starting polaris-httpd on :$PORT"
-                    setsid "$ASTRO/polaris-httpd" --port "$PORT" --lat "$LAT" \
-                        --lon "$LON" --focal "$FOCAL" </dev/null >/tmp/httpd.log 2>&1 &
+                    setsid "$ASTRO/polaris-httpd" --port "$PORT" $POS \
+                        --focal "$FOCAL" </dev/null >/tmp/httpd.log 2>&1 &
                     exit 0
                 fi
                 sleep 10
             done
         ) >> "$LOG" 2>&1 &
     else
-        echo "starting polaris-httpd on :$PORT (lat $LAT lon $LON focal ${FOCAL}mm)"
-        setsid "$ASTRO/polaris-httpd" --port "$PORT" --lat "$LAT" --lon "$LON" \
+        echo "starting polaris-httpd on :$PORT (lat ${LAT:-unset} lon ${LON:-unset} focal ${FOCAL}mm)"
+        setsid "$ASTRO/polaris-httpd" --port "$PORT" $POS \
             --focal "$FOCAL" </dev/null >/tmp/httpd.log 2>&1 &
     fi
 

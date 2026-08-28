@@ -260,6 +260,13 @@
   graceful fallback (browsers only allow geolocation on a secure/localhost page).
 - **Device card** (Settings) — firmware / hardware / Astro-Kit axis / clock, from
   `780 SP_GET_DEVICE_VERSION` + `781 SP_GET_SYSTEM_TIME` (added to the allowlist).
+- **The observing position is no longer required to start.** `polaris-httpd` and
+  the boot script used to refuse to run without `LAT`/`LON` in `site.conf`; now the
+  server comes up regardless, so the page is reachable and you set your location in
+  the web app (the browser's GPS or by hand) — which persists it back to `site.conf`
+  for next boot. No `site.conf` editing, no SSH. The Astro tab shows a **"set your
+  observing location"** prompt until it is set, and alignment/go-to are gated on it,
+  while framing, focus, the gallery and the programmes work without it.
 
 ### Fixed
 

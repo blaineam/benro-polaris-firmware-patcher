@@ -2289,7 +2289,7 @@ function wireTabs() {
       /* Leaving the control tab must not leave an axis running. */
       if (b.dataset.tab !== 'control') stopEverything();
       if (b.dataset.tab === 'programs') progPoll(); else clearTimeout(progTimer);
-      if (b.dataset.tab === 'astro') astroPollStart(); else clearInterval(astroPoll);
+      if (b.dataset.tab === 'astro') { astroPollStart(); siteLoad(); } else clearInterval(astroPoll);
       if (b.dataset.tab === 'gallery') galleryLoad();
       if (b.dataset.tab === 'settings') { siteLoad(); deviceRefresh(); }
     });
@@ -2369,7 +2369,9 @@ function siteMsg(html, bad) {
 }
 function siteLoad() {
   fetch('/api/site', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
-    if (d && d.have_pos) { $('#site-lat').value = (+d.lat).toFixed(4); $('#site-lon').value = (+d.lon).toFixed(4); }
+    var have = !!(d && d.have_pos);
+    if (have) { $('#site-lat').value = (+d.lat).toFixed(4); $('#site-lon').value = (+d.lon).toFixed(4); }
+    var b = $('#astro-nopos'); if (b) b.hidden = have;   /* prompt until a location is set */
   }).catch(function () {});
 }
 function wireSite() {
@@ -2392,9 +2394,17 @@ function wireSite() {
       siteMsg('Enter a latitude (−90…90) and longitude (−180…180).', true); return;
     }
     post('/api/site', { lat: lat, lon: lon }).then(function (r) {
-      if (r && r.ok) siteMsg('Saved ' + lat.toFixed(4) + '°, ' + lon.toFixed(4) + '° — it survives a reboot.');
-      else siteMsg('Could not save: ' + ((r && r.error) || 'unknown'), true);
+      if (r && r.ok) {
+        siteMsg('Saved ' + lat.toFixed(4) + '°, ' + lon.toFixed(4) + '° — it survives a reboot.');
+        var b = $('#astro-nopos'); if (b) b.hidden = true;   /* clear the astro prompt */
+      } else siteMsg('Could not save: ' + ((r && r.error) || 'unknown'), true);
     });
+  });
+  var np = $('#astro-nopos-go');
+  if (np) np.addEventListener('click', function () {
+    var t = [].find.call(document.querySelectorAll('#tabs button'), function (b) { return b.dataset.tab === 'settings'; });
+    if (t) t.click();
+    var c = $('#site-lat'); if (c) { try { c.closest('.card').scrollIntoView({ block: 'start' }); } catch (_) {} c.focus(); }
   });
   siteLoad();
 }

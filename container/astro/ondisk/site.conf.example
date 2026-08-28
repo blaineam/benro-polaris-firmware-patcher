@@ -2,11 +2,15 @@
 # Copy to site.conf on the microSD:  /app/sd/polaris-astro/site.conf
 # Read at boot by /app/network_telnetd.sh.
 
-# ---- REQUIRED -------------------------------------------------------------
-# Your observing position, decimal degrees (north/east positive). The solver's
-# search hint and the Alpaca site properties both come from here.
-LAT=00.00000
-LON=000.00000
+# ---- OBSERVING POSITION (optional) ----------------------------------------
+# Your position in decimal degrees (north/east positive). The solver's search
+# hint and the Alpaca site properties come from here. You do NOT have to set it
+# here: leave these commented and set it in the web app instead (Settings >
+# Observing site, via the browser's GPS or by hand) — it is saved back to this
+# file, so it survives a reboot. Alignment and go-to need a position; framing,
+# focus, the gallery and the programmes do not.
+#LAT=00.00000
+#LON=000.00000
 # Lens focal length in mm.
 # FOCAL IS ONLY A FALLBACK. The solver reads the focal length from each frame's
 # EXIF, which is the only thing that tracks a zoom lens. Order of preference:

@@ -417,6 +417,10 @@ main { flex: 1 1 auto; overflow-y: auto; padding: 14px; padding-bottom: 22px; }
 .siterow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .cardhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cardhead h3 { margin: 0; }
+.nopos { border-color: var(--acc); background: rgba(90,169,230,.1);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.nopos b { color: var(--fg); }
+.nopos .ghost { margin-left: auto; flex: 0 0 auto; }
 
 /* ─────────────────────────────── shutter ───────────────────────────── */
 

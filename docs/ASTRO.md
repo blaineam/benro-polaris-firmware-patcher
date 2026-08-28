@@ -59,8 +59,12 @@ binaries to `/app/astro` and starts whatever you enabled.
 ## Configuration — `/app/sd/polaris-astro/site.conf`
 
 ```sh
-# REQUIRED. Without these the solver has no hint and Alpaca reports the wrong
-# site. Decimal degrees, east/north positive.
+# OPTIONAL. Your observing position, decimal degrees, east/north positive. You
+# do not have to set it here: leave it out and set it in the web app instead
+# (Settings ▸ Observing site, via the browser's GPS or by hand). /api/site
+# writes it back to THIS file, so it survives a reboot. The server starts
+# without it; alignment and go-to then prompt for it, while framing, focus, the
+# gallery and the programmes work regardless.
 LAT=35.35199
 LON=-119.17208
 

@@ -575,6 +575,13 @@
   <!-- ────────────────────────────── ASTRO ────────────────────────────── -->
   <section id="tab-astro" class="tab" hidden>
 
+    <!-- Shown until an observing location is set: alignment and go-to need it. -->
+    <div id="astro-nopos" class="card nopos" hidden>
+      <b>Set your observing location.</b> Plate-solve alignment and go-to need to
+      know where you are. Framing, focus and the programmes work without it.
+      <button id="astro-nopos-go" class="ghost sm" type="button">Set location</button>
+    </div>
+
     <div class="card">
       <h3>Celestial mode</h3>
       <label class="switch">

@@ -3423,6 +3423,10 @@ static void handle(int fd) {
                      ra_deg, dec_deg);
             respond(fd, 200, "application/json", m, strlen(m)); return;
         }
+        if (!g_have_pos) {
+            const char *msg = "{\"ok\":false,\"error\":\"set your observing location first (Settings ▸ Observing site) — a go-to needs it to point\"}";
+            respond(fd, 409, "application/json", msg, strlen(msg)); return;
+        }
         if (!may_read_mount()) {
             const char *msg = "{\"ok\":false,\"error\":\"align the mount first — a GOTO on an unaligned head points nowhere\"}";
             respond(fd, 409, "application/json", msg, strlen(msg)); return;
@@ -4487,7 +4491,15 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (!g_have_pos) { fprintf(stderr, "--lat and --lon are required (the solver hint needs them)\n"); return 2; }
+    /* The observing position is NO LONGER required to start. Without it the
+     * server still comes up so the web app can be reached and the location set
+     * there (Settings > Observing site, via the browser's GPS or by hand) and
+     * persisted -- no site.conf editing, no SSH. The features that genuinely
+     * need a position (plate-solve alignment, go-to) gate on g_have_pos and say
+     * so; framing, focus, the gallery and the programmes work without it. */
+    if (!g_have_pos)
+        fprintf(stderr, "no --lat/--lon yet -- starting without a position; set it in the "
+                        "web app (Settings > Observing site). Alignment and go-to need it.\n");
     g_http_port = port;   /* the autofocus job calls back in on this port */
 
     signal(SIGPIPE, SIG_IGN);
