@@ -344,6 +344,73 @@ The stream is the head's own mjpg-streamer on **:8080**, referenced directly
 rather than proxied — proxying it through this single-threaded server would
 block every other request for as long as the stream is open.
 
+For pixel-level work the server also serves **`/api/snapshot`** — ONE live-view
+frame, same-origin, cached to whole-second granularity. It exists because the
+`:8080` stream is cross-origin: a `<canvas>` that draws it is tainted and
+`getImageData()` throws, which would block the histogram and focus-peaking
+overlays. A single cached frame per second is cheap and never starves the jog
+loop; the continuous stream is still referenced directly, never proxied.
+
+### Framing aids — grid, focus peaking, histogram
+
+Three overlays live on the live-view stage (buttons top-right):
+
+- **Framing grid** (`#`) — a rule-of-thirds plus a small centre cross. A pure
+  CSS overlay, no pixel access.
+- **Focus peaking** (`◎`) — a gradient-magnitude glow that lights up sharp edges
+  and in-focus stars, brighter the sharper. Fed by `/api/snapshot` at ~1 fps,
+  analysed on a small offscreen canvas, drawn back over the frame. The snapshot
+  shares the stream's field of view, so the glow lands on the right pixels.
+- **Live histogram** — the luminance distribution of the same frame, bottom-left.
+
+All three persist per-browser and no-op cleanly when no frame is available.
+
+A standalone **manual-focus jog** on the Control tab drives the 311 focus-adjust
+(the same relay the focus-stack rack uses) for pulling a star to a hard point of
+light without opening a programme.
+
+### Auto-focus (HFR)
+
+An automatic focus that optimises the stars, the way NINA/Ekos do it: sweep the
+focuser, score each frame by how tight the stars are, and settle at the sharpest
+point. Astro tab ▸ **Auto-focus** (step ④).
+
+- **The metric** is `polaris-extract --focus-metric`, which computes each star's
+  **HFR** (Half-Flux Radius — the flux-weighted mean radius of its pixels about
+  the centroid, small = tight = sharp) during blob detection and prints one line:
+
+  ```
+  focus score=<maximise> hfr=<median of brightest stars> stars=<n> sharp=<gradient>
+  ```
+
+  `score` is the number the sweep maximises: the star term (`1000·n/HFR`)
+  multiplied by a whole-frame gradient sharpness. The multiply matters — in gross
+  defocus a few bright star *cores* can read as deceptively tight HFR and fake a
+  secondary peak; `sharp` falls monotonically all the way out, so the product
+  falls with it. With no stars at all the score *is* `sharp`, so a sweep still
+  climbs out of a blurred field toward where stars appear. Verified monotonic on
+  a real-JPEG defocus series (score 14113→1133 across Gaussian blur 0.6→5.5 px).
+
+- **The sweep** is `autofocus.sh`. Focus is relative (opcode 311) — the head
+  reports no focuser position — so it drives focus by calling back into the
+  server's own registered link (`POST /api/link/send`) and grabs frames from
+  `/api/snapshot`; no second connection to the head is opened. It sweeps ONE
+  direction, then returns to the best step approaching from that same side, so
+  the focuser's backlash is taken up consistently rather than missed by slop.
+  Progress and a V-curve are written to JSON for the UI to poll. With no position
+  read-out this is a *relative* pass — run it again if one lands short.
+
+- **The endpoint** is `/api/astro/autofocus`: `GET` returns `{status, progress}`
+  (the sweep's own JSON — step, samples, best); `POST confirm=1` forks a sweep
+  (link-up and not-already-running gated; tunable `steps`/`adj`/`settle`/
+  `backlash`); `POST stop=1` aborts. The Astro card shows Run/Stop, a live focus
+  curve with a best-step marker, and the HFR read-out.
+
+The metric and the sweep decision/return are bench-verified (real JPEGs; a
+stubbed focuser settles on the true peak and returns exactly there). Closed-loop
+motion against a real focuser and sky is hardware-validated later — the bench has
+no head, camera, or focuser.
+
 ## Web UI
 
 `http://<polaris ip>:8090/` — solve status, last solution (RA/Dec, roll, pixel
@@ -713,6 +780,8 @@ intermediate buffer.
 | Full alignment loop, real motor commands | 37.5° error → 0.122° in one pass |
 | Drift measurement | 0–0.4% error over 20″–9000″ |
 | Guiding loop, real motor commands | drift held <61″ vs 408″ unguided |
+| Autofocus HFR metric, real JPEGs | monotonic single peak, score 14113→1133 over blur 0.6→5.5 px |
+| Autofocus sweep, stubbed focuser | settles on the true peak, returns the focuser exactly there |
 
 ### Verified with the REAL app, simulated sky
 
@@ -741,6 +810,12 @@ error. A clock fault would show as ~105° of RA, not fractions of a degree.
 - **A confirmed alignment on real sky.** The armed path has been driven for real
   in dry run; nothing has yet written a heading correction to a live mount
   outside the simulator.
+- **Autofocus against a real focuser and sky.** The HFR metric is verified
+  monotonic on real JPEGs and the sweep's step-selection and backlash-compensated
+  return are bench-verified with a stubbed focuser, but no real lens has been
+  driven to focus by it, and the 311 focus-adjust granularity vs. a camera's
+  focus travel is unmeasured — the sweep tunables (`steps`/`adj`/`backlash`) will
+  want tuning against a real body.
 - **An end-to-end calibration since the focal and capture fixes.** Those were
   verified against saved frames and per-endpoint, not by running the app through
   a real alignment. That run has not happened yet.

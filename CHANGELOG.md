@@ -203,6 +203,33 @@
   telescope. Same honest limit as the INDI CCD — a solvable preview frame, not a
   raw light frame. Verified end-to-end (startexposure → imageready → imagearray,
   pixels transpose correctly).
+- **Astro autofocus (HFR) — the flagship missing piece.** An automatic focus
+  that optimises the stars, the way NINA/Ekos do it: sweep the focuser, score
+  each frame by how tight the stars are, settle at the sharpest point. New
+  `polaris-extract --focus-metric` computes each star's HFR (flux-weighted mean
+  radius) during detection and prints one line to maximise — the star term
+  (many, tight stars) multiplied by a whole-frame gradient sharpness so gross
+  defocus can't fake a secondary peak. `autofocus.sh` runs the sweep, driving
+  focus relatively (opcode 311) through the server's own registered link and
+  grabbing frames from the new same-origin `/api/snapshot`; with no focuser
+  read-out it sweeps one way and returns from that side to take up backlash.
+  `/api/astro/autofocus` (GET status + V-curve, POST confirm=1 / stop=1) forks
+  it. The Astro tab shows a Run/Stop card with a live focus curve, best-step
+  marker, and HFR read-out. Metric verified monotonic on a real-JPEG defocus
+  series; the sweep verified on the bench to settle on the true peak and return
+  the focuser exactly there; closed-loop motion is hardware-validated later.
+- **Manual-focus jog, a framing grid, focus peaking, and a live histogram** on
+  the Control tab / live-view stage. The MF jog is a standalone 311 focus
+  control for pulling stars to a hard point of light. The grid is a
+  rule-of-thirds + centre-cross overlay. Focus peaking (a gradient-magnitude
+  glow) and the histogram read pixels from `/api/snapshot` — a same-origin
+  single-frame proxy, because the cross-origin `:8080` stream taints a canvas.
+  Pixel math verified on a synthetic frame; overlays verified in-browser.
+- **The Astro tab reads as a numbered guided flow** — ① Level ② Align ③ Track
+  ④ Auto-focus ⑤ Go-to ⑥ Capture — in one centred column instead of a scrambled
+  two-column masonry, with the always-on diagnostics/bridges cards folded into a
+  collapsible. Programs' eight-segment chooser is grouped into "Over time" and
+  "Sequences". Verified in-browser on mobile and desktop.
 
 ### Fixed
 
