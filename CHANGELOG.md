@@ -268,6 +268,16 @@
   `.exposlot` doing `select.addEventListener` — throwing on it and stopping the
   boot before the later wiring ran. The three exposure sweeps are now scoped to
   `.exposlot[data-get]`.
+- **Autofocus would not have worked on the device: `autofocus.sh` was never
+  bundled.** `polaris-httpd` runs `$ASTRO/autofocus.sh` (`ASTRO` defaults to
+  `/app/astro`), but the script lived in `container/astro/` while the build only
+  copies `container/astro/ondisk/*.sh` into the image — so it shipped `solve-now.sh`
+  and `polaris-guide.sh` but not `autofocus.sh`. Moved it into `ondisk/` beside its
+  runtime peers, so `build-astro.sh` bundles it and `install_astro.sh` installs it.
+- **Removed five accidental duplicate docs** (`… 2.md`, Finder/iCloud copies — four
+  byte-identical, `CAPTURE-PATH 2.md` a stale 352-line copy of the 549-line
+  canonical), and added a complete **HTTP API reference** to `docs/ASTRO.md`
+  covering every `/api/*` route.
 
 ### Fixed — real-sky session, 2026-08-19
 

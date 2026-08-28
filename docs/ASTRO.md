@@ -701,6 +701,76 @@ guiding only happens when you press the button.
 
 ---
 
+## HTTP API reference
+
+Every `/api/*` route `polaris-httpd` serves at `:8090`. The web UI is built on
+these; they are also stable enough to script against. JSON in, JSON out unless
+noted. Motion and capture routes own the server-side dead-man and are described
+in their own sections above.
+
+**Control link & motion**
+
+| Route | Method | What it does |
+|---|---|---|
+| `/api/link` | GET | Link health plus every cached opcode's args (`opcodes{}`), so a newly understood opcode needs no C change. |
+| `/api/link/opcodes` | GET | The send allowlist itself — each opcode's `name`, subsystem and whether it moves. |
+| `/api/link/send` | POST | Send one **allowlisted** opcode: `cmd`, `args`, `confirm=1` for anything that moves/commits. |
+| `/api/move` | POST | Declare a jog intent (a 400 ms lease); the server owns the 50 ms repeat and the stop. |
+| `/api/stop` | POST | Stop every axis now. |
+
+**Live view & gallery**
+
+| Route | Method | What it does |
+|---|---|---|
+| `/api/snapshot` | GET | One same-origin live-view frame (cached ~1 s) for the focus-peaking/histogram overlays. |
+| `/api/media/list` | GET | Captured JPEGs across the capture dirs, newest first (`path`, `cat`, `size`, `mtime`). |
+| `/api/media/thumb?path=` | GET | A cached colour thumbnail of one photo. |
+| `/api/media/full?path=` | GET | The full frame, streamed. |
+
+**Programmes** (all run head-side; the server owns the progress poll)
+
+| Route | Method | What it does |
+|---|---|---|
+| `/api/prog` | GET | The running programme's status (kind, progress, per-kind fields). |
+| `/api/prog/cancel` | POST | Cancel the running programme. |
+| `/api/prog/lapse` | POST | Start a timelapse (272). |
+| `/api/prog/pano` | POST | Preview / start a panorama (271); `/api/prog/pano/pause`, `/api/prog/pano/interval` tune a running one. |
+| `/api/prog/hdr` | POST | Preview / start an HDR bracket (280). |
+| `/api/prog/focus`, `/api/prog/focus/mark` | POST | Focus stack (270) and its near/far marks. |
+| `/api/prog/plc`, `/api/prog/plc/key`, `/api/prog/plc/clear` | POST | Free program (283): capture keyframes, then play. |
+| `/api/prog/pathlapse`, `/api/prog/pathlapse/wp`, `/api/prog/pathlapse/clear` | POST | Path-lapse (272 + waypoints). |
+| `/api/prog/sun` | POST | Sun lapse (277). |
+| `/api/prog/grail`, `/api/prog/grail/off`, `/api/prog/grail/status` | POST/GET | Holy Grail day→night ramp config (305). |
+
+**Astro session**
+
+| Route | Method | What it does |
+|---|---|---|
+| `/api/astro` | GET | Astro mode + tilt/dither/limit/camera-dir state. |
+| `/api/astro/enter`, `/api/astro/leave` | POST | Enter/leave celestial (mode 8) tracking. |
+| `/api/astro/align` | POST | Write a compass heading (527) from a solve, phone compass, or manual bearing. |
+| `/api/astro/track` | POST | Sidereal/lunar tracking on/off. |
+| `/api/astro/goto` | POST | Preview (no confirm) or GOTO+track a catalogue target (`confirm=1`). |
+| `/api/astro/capture` | POST | Start the in-head astro capture sequence (`confirm=1`). |
+| `/api/astro/autofocus` | GET/POST | HFR focus sweep — status + V-curve; `confirm=1` starts, `stop=1` aborts. |
+| `/api/astro/limits` | GET/POST | Travel-limit state; releasing (state:1) needs `attest=1` (see the safety note). |
+
+**Solver, guiding, site & wifi**
+
+| Route | Method | What it does |
+|---|---|---|
+| `/api/solve` | POST | Run the plate solver (`mode=capture\|latest\|wait`, `apply=1` to align). |
+| `/api/apply` | POST | Apply the last solution as the alignment (age-guarded). |
+| `/api/cancel` | POST | Cancel a running solve. |
+| `/api/focal` | GET/POST | Read / override the solver focal length. |
+| `/api/guide` | GET/POST | Auto-guiding: `on=0\|1`; GET returns running state + drift points. |
+| `/api/state` | GET | Solver + mount state (`?mount=1` opens a brief aligned-only position read). |
+| `/api/site` | GET/POST | The observing latitude/longitude; POST persists to `site.conf`. |
+| `/api/wifi` | GET/POST | Wi-Fi status; POST joins a network / sets autojoin. |
+| `/api/keepwifi` | POST | Toggle the Wi-Fi keepalive. |
+
+---
+
 ## ASCOM Alpaca
 
 Point Stellarium, NINA or SkySafari at `<polaris ip>:8090`, device 0.
