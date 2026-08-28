@@ -132,6 +132,18 @@ polaris-extract, polaris-align.sh and install_astro.sh are MIT. They are
 separate programs that talk through files — see docs/LICENSE-AUDIT.md.
 EOF
 
+# iCloud/Finder leave "<name> 2.<ext>" conflict copies behind when the output dir
+# lives in a synced folder (Documents, Desktop). They are exact duplicates, and
+# for the index files they are ACTIVELY HARMFUL: the on-device solver globs
+# index-*.fits, so a leftover "index-4110 2.fits" gets loaded a second time. Purge
+# them so the bundle you drag to the card is clean. (Nothing legitimate is named
+# "<name> 2.<ext>".)
+_dups=$(find "$OUT" \( -name '* 2' -o -name '* 2.*' \) -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "${_dups:-0}" != "0" ]; then
+  find "$OUT" \( -name '* 2' -o -name '* 2.*' \) -type f -delete 2>/dev/null || true
+  echo "[*] removed $_dups iCloud/Finder ' 2' duplicate file(s) from the bundle"
+fi
+
 echo
 echo "[✓] bundle ready: $OUT"
 ls -la "$OUT" | sed 's/^/    /'
