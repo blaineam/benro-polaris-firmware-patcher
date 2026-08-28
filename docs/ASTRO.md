@@ -659,6 +659,25 @@ is all they need. **Park** makes the mount stationary (tracking off, slew
 aborted) rather than slewing to a home, because the Polaris exposes no motorised
 stow we can safely command.
 
+### INDI camera
+
+The same driver exposes a **second INDI device, `Benro Polaris Camera`** (CCD
+interface), so Ekos sees a mount *and* a camera on the one 7624 connection. Its
+`CCD_EXPOSURE` returns a JPEG as the `CCD1` BLOB, and the image is the head's
+**live-view frame** grabbed from `:8080/?action=snapshot` — the same source the
+plate solver uses.
+
+That is a deliberate, honest choice, not a shortcut: **the head refuses an
+externally-triggered shutter in astro mode** (opcode 264 is ignored while
+tracking — `solve-now.sh` documents this at length), so a capture that works in
+every mode has to come from live view. It is a real, solvable frame — good for
+framing, plate-solving and EAA in Ekos — but it is a preview-resolution JPEG,
+not a raw light frame. Full-resolution light frames are still taken through the
+Benro app / the camera itself, exactly as they must be. The properties are
+`CCD_EXPOSURE`, `CCD_ABORT_EXPOSURE`, `CCD_INFO`, and `CCD1` (BLOB). The frame is
+base64-streamed straight to the socket, so a large image does not need a large
+intermediate buffer.
+
 ---
 
 ## What is and is not verified

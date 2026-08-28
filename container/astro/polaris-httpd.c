@@ -1655,6 +1655,106 @@ static void indi_pulse(int opcode, int sign, int ms) {
     run_capture(cmd, out, sizeof out);
 }
 
+/* ---- INDI CCD (a second device, so Ekos sees a camera too) ----------------
+ *
+ * The image is the head's live-view MJPEG frame, grabbed as a single JPEG from
+ * :8080/?action=snapshot -- the SAME source the plate solver uses. That is a
+ * deliberate, honest choice: the head REFUSES an externally-triggered shutter in
+ * astro mode (opcode 264 is ignored while tracking; solve-now.sh documents this),
+ * so a mode-independent capture has to come from live view. It is a real,
+ * solvable frame (framing, plate-solving, EAA); full-res light frames are still
+ * taken through the Benro app / the camera, as they must be. */
+#define INDI_CAM "Benro Polaris Camera"
+
+static const char B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static size_t base64_encode(const unsigned char *in, size_t n, char *out, size_t cap) {
+    size_t i, o = 0;
+    for (i = 0; i + 3 <= n; i += 3) {
+        if (o + 4 >= cap) break;
+        out[o++] = B64[in[i] >> 2];
+        out[o++] = B64[((in[i] & 3) << 4) | (in[i+1] >> 4)];
+        out[o++] = B64[((in[i+1] & 15) << 2) | (in[i+2] >> 6)];
+        out[o++] = B64[in[i+2] & 63];
+    }
+    if (i < n && o + 4 < cap) {
+        unsigned a = in[i], b = (i+1 < n) ? in[i+1] : 0;
+        out[o++] = B64[a >> 2];
+        out[o++] = B64[((a & 3) << 4) | (b >> 4)];
+        out[o++] = (i+1 < n) ? B64[(b & 15) << 2] : '=';
+        out[o++] = '=';
+    }
+    out[o] = 0;
+    return o;
+}
+
+/* Grab one live-view JPEG to `path`. Returns its byte size, or 0. */
+static long indi_ccd_grab(const char *path) {
+    char cmd[640]; struct stat st;
+    snprintf(cmd, sizeof cmd,
+        "wget -q -T 8 -O '%s' 'http://%s:8080/?action=snapshot' 2>/dev/null || "
+        "curl -s -m 8 -o '%s' 'http://%s:8080/?action=snapshot' 2>/dev/null",
+        path, g_mount_host, path, g_mount_host);
+    if (system(cmd) == -1) {}
+    if (stat(path, &st) == 0 && st.st_size > 0) return (long)st.st_size;
+    return 0;
+}
+
+/* Read a JPEG and push it as the CCD1 BLOB (base64). Handles a large frame by
+ * sending the base64 straight to the socket rather than through indi_send. */
+static void indi_send_blob(int fd, const char *path, long sz) {
+    FILE *f; unsigned char *raw; char *b64, hdr[256], ts[32]; size_t bl;
+    if (sz <= 0 || sz > 6*1024*1024) return;
+    f = fopen(path, "rb"); if (!f) return;
+    raw = malloc((size_t)sz);
+    if (!raw) { fclose(f); return; }
+    if (fread(raw, 1, (size_t)sz, f) != (size_t)sz) { free(raw); fclose(f); return; }
+    fclose(f);
+    b64 = malloc(((size_t)sz/3 + 1) * 4 + 8);
+    if (!b64) { free(raw); return; }
+    bl = base64_encode(raw, (size_t)sz, b64, ((size_t)sz/3 + 1) * 4 + 8);
+    free(raw);
+    indi_ts(ts, sizeof ts);
+    snprintf(hdr, sizeof hdr,
+        "<setBLOBVector device='%s' name='CCD1' state='Ok' timestamp='%s'>"
+        "<oneBLOB name='CCD1' size='%ld' format='.jpg'>", INDI_CAM, ts, sz);
+    send_all(fd, hdr, strlen(hdr));
+    send_all(fd, b64, bl);
+    send_all(fd, "</oneBLOB></setBLOBVector>\n", 26);
+    free(b64);
+}
+
+static void indi_def_cam(int fd) {
+    char ts[32]; indi_ts(ts, sizeof ts);
+    indi_send(fd,
+      "<defSwitchVector device='%s' name='CONNECTION' label='Connection' group='Main Control' state='Ok' perm='rw' rule='OneOfMany' timeout='60' timestamp='%s'>"
+      "<defSwitch name='CONNECT' label='Connect'>On</defSwitch>"
+      "<defSwitch name='DISCONNECT' label='Disconnect'>Off</defSwitch></defSwitchVector>", INDI_CAM, ts);
+    indi_send(fd,
+      "<defTextVector device='%s' name='DRIVER_INFO' label='Driver Info' group='General Info' state='Ok' perm='ro' timeout='60' timestamp='%s'>"
+      "<defText name='DRIVER_NAME' label='Name'>Benro Polaris Camera</defText>"
+      "<defText name='DRIVER_EXEC' label='Exec'>polaris-httpd</defText>"
+      "<defText name='DRIVER_VERSION' label='Version'>1.0</defText>"
+      "<defText name='DRIVER_INTERFACE' label='Interface'>2</defText></defTextVector>", INDI_CAM, ts);
+    indi_send(fd,
+      "<defNumberVector device='%s' name='CCD_EXPOSURE' label='Expose' group='Main Control' state='Idle' perm='rw' timeout='60' timestamp='%s'>"
+      "<defNumber name='CCD_EXPOSURE_VALUE' label='Duration (s)' format='%%.3f' min='0' max='3600' step='0.1'>1</defNumber></defNumberVector>", INDI_CAM, ts);
+    indi_send(fd,
+      "<defSwitchVector device='%s' name='CCD_ABORT_EXPOSURE' label='Abort' group='Main Control' state='Idle' perm='rw' rule='AtMostOne' timeout='60' timestamp='%s'>"
+      "<defSwitch name='ABORT' label='Abort'>Off</defSwitch></defSwitchVector>", INDI_CAM, ts);
+    indi_send(fd,
+      "<defNumberVector device='%s' name='CCD_INFO' label='CCD Information' group='Image Info' state='Ok' perm='ro' timeout='60' timestamp='%s'>"
+      "<defNumber name='CCD_MAX_X' label='Max X' format='%%g' min='1' max='40000' step='1'>960</defNumber>"
+      "<defNumber name='CCD_MAX_Y' label='Max Y' format='%%g' min='1' max='40000' step='1'>640</defNumber>"
+      "<defNumber name='CCD_PIXEL_SIZE' label='Pixel (um)' format='%%g' min='0' max='100' step='0'>4</defNumber>"
+      "<defNumber name='CCD_PIXEL_SIZE_X' label='Pixel X' format='%%g' min='0' max='100' step='0'>4</defNumber>"
+      "<defNumber name='CCD_PIXEL_SIZE_Y' label='Pixel Y' format='%%g' min='0' max='100' step='0'>4</defNumber>"
+      "<defNumber name='CCD_BITSPERPIXEL' label='Bits' format='%%g' min='8' max='16' step='0'>8</defNumber></defNumberVector>", INDI_CAM, ts);
+    indi_send(fd,
+      "<defBLOBVector device='%s' name='CCD1' label='Image' group='Image Info' state='Ok' perm='ro' timeout='60' timestamp='%s'>"
+      "<defBLOB name='CCD1' label='Image'/></defBLOBVector>", INDI_CAM, ts);
+}
+
 static void indi_session(int fd) {
     char buf[8192]; size_t used = 0;
     int coord_mode = 0;          /* 0 track, 1 slew, 2 sync                 */
@@ -1673,11 +1773,45 @@ static void indi_session(int fd) {
             if (n <= 0) return;
             used += (size_t)n; buf[used] = 0;
             while (indi_take(buf, &used, el, sizeof el)) {
-                char pname[64], v1[64], v2[64], ts[32];
+                char pname[64], v1[64], v2[64], dev[64], ts[32];
+                int is_cam;
                 indi_ts(ts, sizeof ts);
+                indi_attr(el, "device", dev, sizeof dev);
+                is_cam = !strcmp(dev, INDI_CAM);
                 if (!strncmp(el, "<getProperties", 14)) {
-                    indi_def_all(fd);
+                    indi_def_all(fd);        /* mount */
+                    indi_def_cam(fd);        /* camera */
                     indi_push_coord(fd, slewing);
+                } else if (is_cam && !strncmp(el, "<newNumberVector", 16) &&
+                           (indi_attr(el, "name", pname, sizeof pname), !strcmp(pname, "CCD_EXPOSURE"))) {
+                    /* Take a frame: grab a live-view JPEG and push it as CCD1. */
+                    char jpg[64], expo[24];
+                    double t = indi_one(el, "oneNumber", "CCD_EXPOSURE_VALUE", v1, sizeof v1) ? atof(v1) : 1;
+                    long sz;
+                    snprintf(expo, sizeof expo, "%.3f", t);
+                    indi_send(fd, "<setNumberVector device='%s' name='CCD_EXPOSURE' state='Busy' timestamp='%s'>"
+                        "<oneNumber name='CCD_EXPOSURE_VALUE'>%s</oneNumber></setNumberVector>", INDI_CAM, ts, expo);
+                    snprintf(jpg, sizeof jpg, "/tmp/indi-ccd-%d.jpg", (int)getpid());
+                    sz = indi_ccd_grab(jpg);
+                    if (sz > 0) {
+                        indi_send_blob(fd, jpg, sz);
+                        indi_send(fd, "<setNumberVector device='%s' name='CCD_EXPOSURE' state='Ok' timestamp='%s'>"
+                            "<oneNumber name='CCD_EXPOSURE_VALUE'>0</oneNumber></setNumberVector>", INDI_CAM, ts);
+                    } else {
+                        indi_send(fd, "<setNumberVector device='%s' name='CCD_EXPOSURE' state='Alert' timestamp='%s'>"
+                            "<oneNumber name='CCD_EXPOSURE_VALUE'>0</oneNumber></setNumberVector>", INDI_CAM, ts);
+                        indi_send(fd, "<message device='%s' timestamp='%s' message='live view did not return a frame — turn preview on'/>", INDI_CAM, ts);
+                    }
+                    unlink(jpg);
+                } else if (is_cam && !strncmp(el, "<newSwitchVector", 16)) {
+                    indi_attr(el, "name", pname, sizeof pname);
+                    if (!strcmp(pname, "CONNECTION"))
+                        indi_send(fd, "<setSwitchVector device='%s' name='CONNECTION' state='Ok' timestamp='%s'>"
+                            "<oneSwitch name='CONNECT'>On</oneSwitch><oneSwitch name='DISCONNECT'>Off</oneSwitch>"
+                            "</setSwitchVector>", INDI_CAM, ts);
+                    else if (!strcmp(pname, "CCD_ABORT_EXPOSURE"))
+                        indi_send(fd, "<setSwitchVector device='%s' name='CCD_ABORT_EXPOSURE' state='Ok' timestamp='%s'>"
+                            "<oneSwitch name='ABORT'>Off</oneSwitch></setSwitchVector>", INDI_CAM, ts);
                 } else if (!strncmp(el, "<newSwitchVector", 16)) {
                     indi_attr(el, "name", pname, sizeof pname);
                     if (!strcmp(pname, "ON_COORD_SET")) {

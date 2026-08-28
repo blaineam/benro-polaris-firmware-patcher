@@ -693,10 +693,13 @@
         <p class="tiny dim">
           This server speaks three mount protocols at once, so most astronomy
           software can drive the Polaris directly: <b>ASCOM Alpaca</b>
-          (auto-discovered — NINA, Stellarium), a native <b>INDI</b> telescope
-          (KStars/Ekos, PHD2 — connect the <i>INDI Telescope</i> to this host and
-          port), and <b>LX200</b> over TCP (Stellarium, SkySafari, or the
-          LX200-generic driver). The original solver dashboard is still at
+          (auto-discovered — NINA, Stellarium), native <b>INDI</b> (KStars/Ekos,
+          PHD2), and <b>LX200</b> over TCP (Stellarium, SkySafari, or the
+          LX200-generic driver). The INDI server exposes <b>both a mount and a
+          camera</b> — connect the <i>INDI Telescope</i> and <i>INDI CCD</i> to
+          this host and port; the camera returns a live-view frame for framing
+          and plate-solving (full-res light frames are still shot through the
+          Benro app). The original solver dashboard is still at
           <a href="/legacy">/legacy</a>.
         </p>
         <dl class="kv">

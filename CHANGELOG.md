@@ -36,10 +36,10 @@
   input — sticks, the arrow pads (now a tucked-away "precise nudge"), the arrow
   keys — funnels through one `moveAxis()` sender, so a live speed change and the
   lease keepalive can never double-drive the wire.
-- **Built for low-vision use at the scope.** A size control on the stage cycles
-  Normal → Large → Huge, scaling the preview, the joysticks and the text together
-  (the whole reason to control a mount from a browser instead of a phone), and
-  the choice persists. A fullscreen button fills the screen with the live view
+- **Built for low-vision use at the scope.** A size control on the stage toggles
+  Normal ↔ Large, scaling the preview, the joysticks and the text together (the
+  whole reason to control a mount from a browser instead of a phone), and the
+  choice persists. A fullscreen button fills the screen with the live view
   **while keeping the joysticks overlaid**, so you can frame and jog on a big
   image at once.
 - **Tilt compensation (538) and auto-level (549) in the Astro tab — track on an
@@ -162,6 +162,17 @@
   (all eight vectors defined, interface=1, SYNC/SLEW→Busy/ABORT/geo round-trip,
   periodic push). `--indi-port` (default 7624), and the three bridges are named
   in the app's Observatory-bridges card.
+- **INDI: real track, park, pulse-guiding, and a camera.** `TELESCOPE_TRACK_STATE`
+  drives `polaris-mount track on|off` (real sidereal); `TELESCOPE_PARK` stops the
+  mount (tracking off + abort — the Polaris has no safe motorised stow); pulse
+  guiding (`TELESCOPE_TIMED_GUIDE_NS/WE`) jogs the RA/Dec axis briefly (the mount
+  is goto, not ST4, so PHD2/Ekos calibrate the rate). And a **second INDI device,
+  `Benro Polaris Camera`** (CCD), so Ekos sees a mount *and* a camera: its
+  `CCD_EXPOSURE` returns the head's live-view JPEG as the `CCD1` BLOB
+  (base64-streamed to the socket) — the head refuses an externally-triggered
+  shutter in astro mode, so a mode-independent capture comes from live view; a
+  real, solvable frame for framing/EAA, not a raw light frame. Verified with a
+  protocol client: two devices, CCD BLOB round-trips exactly.
 
 ### Fixed
 
