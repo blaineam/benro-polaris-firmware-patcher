@@ -40,11 +40,26 @@
          button scales the whole thing for low-vision use at the scope. -->
     <div id="stage" class="stage">
       <img id="live" alt="">
+      <!-- Focus-peaking sits directly over the frame; it is fed same-origin
+           snapshots (/api/snapshot) so its canvas can read pixels — the raw
+           :8080 stream is cross-origin and would taint the canvas. -->
+      <canvas id="peak" class="peakcanvas" hidden></canvas>
+      <!-- Framing grid: pure overlay, no pixel access needed. -->
+      <div id="grid" class="gridovl" hidden aria-hidden="true">
+        <span class="gl v1"></span><span class="gl v2"></span>
+        <span class="gl h1"></span><span class="gl h2"></span>
+        <span class="gl cx"></span><span class="gl cy"></span>
+      </div>
       <div id="livemsg" class="livemsg">live view off</div>
+
+      <!-- Live histogram of the same snapshot the peaking reads. -->
+      <div id="histbox" class="histbox" hidden><canvas id="hist" width="256" height="48"></canvas></div>
 
       <div class="ovl tl"><span id="camname" class="stagechip" hidden></span></div>
       <div class="ovl tr">
         <button id="previewtoggle" class="gbtn" type="button" title="live view on/off" aria-label="live view">live</button>
+        <button id="gridbtn" class="gbtn" type="button" title="framing grid" aria-label="framing grid">#</button>
+        <button id="peakbtn" class="gbtn" type="button" title="focus peaking &amp; histogram" aria-label="focus peaking">◎</button>
         <button id="sizebtn" class="gbtn" type="button" title="control &amp; text size" aria-label="control size">A+</button>
         <button id="fsbtn" class="gbtn" type="button" title="fullscreen preview" aria-label="fullscreen preview">⤢</button>
       </div>
@@ -88,6 +103,22 @@
       <div class="exposlot" data-get="265" data-set="258" data-key="iso"><span class="lbl">ISO</span><select disabled></select></div>
       <div class="exposlot" data-get="267" data-set="260" data-key="ev"><span class="lbl">EV</span><select disabled></select></div>
       <div class="exposlot" data-get="266" data-set="259" data-key="wb"><span class="lbl">WB</span><select disabled></select></div>
+    </div>
+
+    <!-- Manual focus jog — the same 311 focus-adjust the focus-stack rack uses,
+         but standalone, so you can pull a star down to a hard point of light or
+         nail framing focus without opening a programme. Hold-repeats. For an
+         automatic focus that optimises the stars, use Astro ▸ Auto-focus. -->
+    <div class="focusbar">
+      <span class="lbl">focus</span>
+      <div class="focusjog">
+        <button class="ghost sm mf" data-adj="-4" type="button" aria-label="focus nearer, fast" title="nearer (fast)">◄◄</button>
+        <button class="ghost sm mf" data-adj="-1" type="button" aria-label="focus nearer" title="nearer">◄</button>
+        <span class="mfhint">near · far</span>
+        <button class="ghost sm mf" data-adj="1"  type="button" aria-label="focus farther" title="farther">►</button>
+        <button class="ghost sm mf" data-adj="4"  type="button" aria-label="focus farther, fast" title="farther (fast)">►►</button>
+      </div>
+      <span class="mfnote dim">camera on manual focus</span>
     </div>
 
     <!-- Precise single-axis pads + keyboard, tucked away — the sticks are the

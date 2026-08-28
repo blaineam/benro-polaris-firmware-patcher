@@ -516,6 +516,99 @@ function wireStage() {
   });
 }
 
+/* ── framing grid · focus peaking · live histogram ──
+   The grid is a pure CSS overlay. Peaking and the histogram need real pixels,
+   and the :8080 MJPEG is cross-origin — a canvas that draws it is tainted and
+   getImageData() throws. So they run off /api/snapshot: one SAME-ORIGIN still a
+   second, analysed on a small offscreen canvas, drawn back over the frame. The
+   still shares the live view's field of view, so peaking marks line up. */
+var peakOn = false, peakTimer = 0, peakImg = null;
+
+function drawHistogram(ctx, hist, hmax) {
+  var c = ctx.canvas, W = c.width, H = c.height, i, h;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(120,220,255,.9)';
+  for (i = 0; i < 256; i++) {
+    h = hmax > 0 ? Math.round(Math.log(1 + hist[i]) / Math.log(1 + hmax) * (H - 2)) : 0;
+    if (h > 0) ctx.fillRect(i, H - h, 1, h);
+  }
+}
+
+/* Draw one snapshot into a small buffer, then compute the histogram (into #hist)
+   and a gradient-magnitude "peaking" glow (into #peak, over the frame). */
+function analyseFrame(img) {
+  var iw = img.naturalWidth, ih = img.naturalHeight, i, p, L;
+  if (!iw || !ih) return;
+  var aw = Math.min(iw, 512), ah = Math.round(ih * aw / iw);
+  var off = analyseFrame._c || (analyseFrame._c = document.createElement('canvas'));
+  off.width = aw; off.height = ah;
+  var octx = off.getContext('2d'), data;
+  octx.drawImage(img, 0, 0, aw, ah);
+  try { data = octx.getImageData(0, 0, aw, ah).data; } catch (_) { return; }
+
+  var n = aw * ah, lum = new Uint8Array(n), hist = new Uint32Array(256), hmax = 0;
+  for (i = 0, p = 0; i < n; i++, p += 4) {
+    L = (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8;
+    lum[i] = L; hist[L]++;
+  }
+  for (i = 1; i < 255; i++) if (hist[i] > hmax) hmax = hist[i];   /* ignore 0/255 spikes */
+  var hc = $('#hist'); if (hc) drawHistogram(hc.getContext('2d'), hist, hmax);
+
+  var pk = $('#peak'); pk.width = aw; pk.height = ah;
+  var pctx = pk.getContext('2d'), out = pctx.createImageData(aw, ah), o = out.data;
+  var x, y, g, gx, gy, idx, a, FLOOR = 24, RANGE = 60;
+  for (y = 1; y < ah - 1; y++) {
+    for (x = 1; x < aw - 1; x++) {
+      idx = y * aw + x;
+      gx = lum[idx + 1] - lum[idx - 1]; if (gx < 0) gx = -gx;
+      gy = lum[idx + aw] - lum[idx - aw]; if (gy < 0) gy = -gy;
+      g = gx + gy;
+      if (g > FLOOR) {
+        a = g - FLOOR; if (a > RANGE) a = RANGE;
+        p = idx * 4;
+        o[p] = 130; o[p + 1] = 255; o[p + 2] = 100; o[p + 3] = Math.round(a / RANGE * 220);
+      }
+    }
+  }
+  pctx.putImageData(out, 0, 0);
+}
+
+function peakTick() {
+  if (!peakOn) return;
+  if (!peakImg) peakImg = new Image();
+  peakImg.onload = function () { try { analyseFrame(peakImg); } catch (_) {} };
+  peakImg.onerror = function () {};
+  peakImg.src = '/api/snapshot?t=' + Date.now();
+}
+
+function setPeak(on) {
+  peakOn = on;
+  $('#peakbtn').classList.toggle('on', on);
+  $('#peak').hidden = !on;
+  $('#histbox').hidden = !on;
+  try { localStorage.setItem('polaris-peak', on ? '1' : ''); } catch (_) {}
+  if (on) { peakTick(); if (!peakTimer) peakTimer = setInterval(peakTick, 1000); }
+  else { clearInterval(peakTimer); peakTimer = 0; }
+}
+
+function wireOverlays() {
+  var gridOn = false;
+  try { gridOn = localStorage.getItem('polaris-grid') === '1'; } catch (_) {}
+  $('#grid').hidden = !gridOn;
+  $('#gridbtn').classList.toggle('on', gridOn);
+  $('#gridbtn').addEventListener('click', function () {
+    gridOn = !gridOn;
+    $('#grid').hidden = !gridOn;
+    this.classList.toggle('on', gridOn);
+    try { localStorage.setItem('polaris-grid', gridOn ? '1' : ''); } catch (_) {}
+  });
+  $('#peakbtn').addEventListener('click', function () { setPeak(!peakOn); });
+  var want = false;
+  try { want = localStorage.getItem('polaris-peak') === '1'; } catch (_) {}
+  if (want) setPeak(true);
+}
+
 /* ─────────────────────────────── exposure ──────────────────────────────── */
 
 /* Reply shape, from the app's own parser (PolarisOrderCommunication:
@@ -982,7 +1075,9 @@ function focusMark(which, btn) {
 }
 
 function wireFocusRack() {
-  $$('.rack').forEach(function (btn) {
+  /* Both the focus-stack rack (.rack) and the standalone manual-focus jog (.mf)
+     on the Control tab drive the same 311 focus-adjust, so they share one wiring. */
+  $$('.rack, .mf').forEach(function (btn) {
     var adj = btn.dataset.adj;
     /* Racking is a 311 focus-adjust, hold-repeats like the phone app (~300 ms).
        It goes through the ordinary allowlisted send, not a bespoke route. */
@@ -2003,6 +2098,7 @@ wireTabs();
 wireJog();
 wireSticks();
 wireStage();
+wireOverlays();
 wireExposure();
 wireShutter();
 wireSettings();

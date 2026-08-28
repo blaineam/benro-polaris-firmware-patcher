@@ -608,6 +608,7 @@ static double g_site_elev = 0.0;
 static int    g_cam_ready = 0, g_cam_w = 0, g_cam_h = 0;
 static double g_cam_lastdur = 0;
 #define ALPACA_CAM_PGM "/tmp/alpaca-cam.pgm"
+#define SNAP_JPG       "/tmp/polaris-snap.jpg"   /* same-origin live-view frame */
 
 /* THE DEVICE CLOCK IS NOT UTC. It runs local time while reporting itself as
  * UTC; ConformU caught this as "Scope and ASCOM sidereal times are more than 1
@@ -689,6 +690,40 @@ static int alpaca_cam_capture(double dur) {
     if (strcmp(magic, "P5") || w <= 0 || h <= 0) return 0;
     g_cam_w = w; g_cam_h = h; g_cam_lastdur = dur; g_cam_ready = 1;
     return 1;
+}
+
+/* Same-origin proxy of a single live-view frame.
+ *
+ * The live MJPEG at :8080 is a DIFFERENT ORIGIN from this server, so a <canvas>
+ * that draws the stream <img> is tainted and getImageData() throws -- which is
+ * exactly what the histogram and focus-peaking overlays need. Fetching one frame
+ * here and serving it from our own origin makes those client-side analyses legal.
+ *
+ * This is deliberately ONE frame, not the stream: pumping the continuous MJPEG
+ * through this single-threaded select() server would wedge it. The frame is
+ * cached to whole-second granularity so an overlay polling at a couple of fps
+ * spins up at most one wget per second and never starves the jog loop. */
+static time_t g_snap_t = 0;
+static void serve_snapshot(int fd) {
+    char cmd[512]; FILE *f; long sz; char *buf; time_t now = time(NULL);
+    if (now != g_snap_t) {
+        snprintf(cmd, sizeof cmd,
+            "wget -q -T 6 -O %s 'http://%s:8080/?action=snapshot' 2>/dev/null || "
+            "curl -s -m 6 -o %s 'http://%s:8080/?action=snapshot' 2>/dev/null",
+            SNAP_JPG, g_mount_host, SNAP_JPG, g_mount_host);
+        if (system(cmd) == -1) {}
+        g_snap_t = now;
+    }
+    f = fopen(SNAP_JPG, "rb");
+    if (!f) { respond(fd, 502, "text/plain", "no live-view frame", 18); return; }
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0) { fclose(f); respond(fd, 502, "text/plain", "no live-view frame", 18); return; }
+    buf = malloc((size_t)sz);
+    if (!buf) { fclose(f); respond(fd, 500, "text/plain", "oom", 3); return; }
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); respond(fd, 502, "text/plain", "read", 4); return; }
+    fclose(f);
+    respond(fd, 200, "image/jpeg", buf, (size_t)sz);
+    free(buf);
 }
 
 /* Serve the captured PGM as an ASCOM ImageArray (Type Int32, Rank 2, mono).
@@ -2662,6 +2697,9 @@ static void handle(int fd) {
         return;
     }
     if (serve_asset(fd, path)) return;
+
+    /* One live-view frame, same-origin, so the overlays can read its pixels. */
+    if (!strcmp(path, "/api/snapshot")) { serve_snapshot(fd); return; }
 
     /* ------------------------------------------------------ control link */
 

@@ -177,6 +177,36 @@ main { flex: 1 1 auto; overflow-y: auto; padding: 14px; padding-bottom: 22px; }
 }
 .stage:fullscreen { max-height: none; width: 100%; height: 100%; border: 0; border-radius: 0; aspect-ratio: auto; }
 .stage:-webkit-full-screen { max-height: none; width: 100%; height: 100%; border-radius: 0; }
+
+/* Focus peaking canvas: over the frame, object-fit:contain to match #live so
+   the glow lands on the same pixels (the snapshot shares the stream's FOV). */
+.peakcanvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+  z-index: 2; pointer-events: none; }
+
+/* Framing grid: rule-of-thirds + a small centre cross. Pure overlay. */
+.gridovl { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.gridovl .gl { position: absolute; background: rgba(255,255,255,.26); }
+.gridovl .v1, .gridovl .v2 { top: 0; bottom: 0; width: 1px; }
+.gridovl .h1, .gridovl .h2 { left: 0; right: 0; height: 1px; }
+.gridovl .v1 { left: 33.333%; } .gridovl .v2 { left: 66.666%; }
+.gridovl .h1 { top: 33.333%; } .gridovl .h2 { top: 66.666%; }
+.gridovl .cx, .gridovl .cy { left: 50%; top: 50%; background: rgba(255,255,255,.5); }
+.gridovl .cx { width: 20px; height: 1px; transform: translate(-50%,-50%); }
+.gridovl .cy { width: 1px; height: 20px; transform: translate(-50%,-50%); }
+
+/* Live histogram, tucked into the stage's bottom-left. */
+.histbox { position: absolute; left: 10px; bottom: 10px; z-index: 3;
+  border: 1px solid rgba(255,255,255,.16); border-radius: 8px; overflow: hidden;
+  background: rgba(0,0,0,.4); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.histbox canvas { display: block; width: 168px; height: 40px; }
+
+/* Manual-focus jog bar on the Control tab. */
+.focusbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+.focusbar > .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); }
+.focusjog { display: flex; align-items: center; gap: 6px; }
+.focusjog .mf { min-width: 44px; }
+.mfhint { font-size: 11px; color: var(--dim); padding: 0 4px; }
+.mfnote { font-size: 11px; }
 .underrow { align-items: center; gap: 12px; }
 .precise > summary { cursor: pointer; color: var(--dim); font-size: 13px; padding: 6px 0; }
 .precise[open] > summary { color: var(--fg); }
