@@ -112,6 +112,7 @@ class Mount:
         self.mode = 8                          # Astro
         self.grail = False                     # Holy Grail ramp configured on
         self.tilt_comp = False                 # tilt compensation (unlevel base)
+        self.dither = False                    # dithering between frames
         self.aligned = False
         self.t0 = time.time()
         self.moves = 0
@@ -459,6 +460,12 @@ class Handler(socketserver.BaseRequestHandler):
             with mount.lock:
                 mount.tilt_comp = args.get("state", "0") == "1"
             self.send("538@ret:0;")
+        elif cmd == "539":            # GET dithering flag
+            self.send(f"539@state:{1 if mount.dither else 0};")
+        elif cmd == "540":            # SET dithering (persistent)
+            with mount.lock:
+                mount.dither = args.get("state", "0") == "1"
+            self.send("540@ret:0;")
         elif cmd == "549":            # auto-level — MOVES; sim just acks
             self.send("549@ret:0;")
         elif cmd == "517":            # mechanical pose, radians

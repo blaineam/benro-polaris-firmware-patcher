@@ -1759,6 +1759,12 @@ static const opcode_policy_t OPCODES[] = {
      * persistent SETTING, not motion -- so it is not confirm-gated. (538) */
     { 537, "tilt-comp-get", 3, 0, "read the tilt-compensation flag -> state:<0|1>" },
     { 538, "tilt-comp",     3, 0, "state:<0|1> -- compensate for an unlevel base; persistent" },
+    /* Dithering: shifts the framing a hair between exposures so stacking averages
+     * out hot pixels and fixed-pattern noise. The SET does not move the head
+     * then-and-there -- the tiny nudges happen between frames of a running
+     * capture -- so it is a setting, not confirm-gated motion. (539 get / 540 set) */
+    { 539, "dither-get",    3, 0, "read the dithering flag -> state:<0|1>" },
+    { 540, "dither",        3, 0, "state:<0|1> -- dither between frames (stacking); persistent" },
 
     /* NOT LISTED, DELIBERATELY:
      *   530  multi-step star alignment -- wedges the motors on repeat, and the

@@ -1077,11 +1077,13 @@ function wireAstro() {
     post(entering ? '/api/astro/enter' : '/api/astro/leave', {}).then(function (r) {
       if (r && r.ok === false) setHint('<b>Astro:</b> ' + (r.error || ''));
       if (entering) {
-        /* Ask the head for its current tilt-compensation flag so the toggle
-           reflects reality rather than defaulting to off. */
+        /* Ask the head for its current tilt-compensation + dithering flags so the
+           toggles reflect reality rather than defaulting to off. */
         send(537, '', false);
+        send(539, '', false);
         setTimeout(function () {
           var t = S.ops['537']; if (t) $('#astro-tilt').checked = kv(t.args).state === '1';
+          var d = S.ops['539']; if (d) $('#dither').checked = kv(d.args).state === '1';
         }, 600);
       }
       astroRefresh();
@@ -1102,6 +1104,11 @@ function wireAstro() {
   $('#astro-level').addEventListener('click', function () {
     send(549, 'state:1;', true);
     setHint('<b>Auto-levelling…</b> let the head settle before you align, and never level while tracking.');
+  });
+
+  /* Dithering (540): a stacking aid, persistent, no immediate motion. */
+  $('#dither').addEventListener('change', function () {
+    send(540, 'state:' + (this.checked ? 1 : 0) + ';', false);
   });
 
   /* Plate solve — the compass-free path. Kicks the solver with apply=1 and
