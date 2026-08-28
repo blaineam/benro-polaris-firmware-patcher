@@ -1162,6 +1162,124 @@ function wireAstro() {
   });
 
   wireObservatoryTools();
+  wireTargets();
+  wireAstroCapture();
+}
+
+/* A compact deep-sky + bright-star catalogue (J2000, degrees). Fixed coordinates
+   only — planets and the Moon need an ephemeris, so they stay in a planetarium
+   app for now; these are the objects you actually image. */
+var ASTRO_TARGETS = [
+  { n: 'M42 Orion Nebula', t: 'nebula', ra: 83.82, dec: -5.39, a: 'orion' },
+  { n: 'M31 Andromeda Galaxy', t: 'galaxy', ra: 10.68, dec: 41.27, a: 'andromeda' },
+  { n: 'M45 Pleiades', t: 'cluster', ra: 56.75, dec: 24.12, a: 'seven sisters subaru' },
+  { n: 'M1 Crab Nebula', t: 'nebula', ra: 83.63, dec: 22.01, a: '' },
+  { n: 'M8 Lagoon Nebula', t: 'nebula', ra: 270.92, dec: -24.38, a: '' },
+  { n: 'M16 Eagle Nebula', t: 'nebula', ra: 274.70, dec: -13.81, a: 'pillars' },
+  { n: 'M17 Omega / Swan Nebula', t: 'nebula', ra: 275.20, dec: -16.17, a: 'swan' },
+  { n: 'M20 Trifid Nebula', t: 'nebula', ra: 270.60, dec: -23.03, a: '' },
+  { n: 'M27 Dumbbell Nebula', t: 'nebula', ra: 299.90, dec: 22.72, a: '' },
+  { n: 'M57 Ring Nebula', t: 'nebula', ra: 283.40, dec: 33.03, a: 'ring' },
+  { n: 'M97 Owl Nebula', t: 'nebula', ra: 168.70, dec: 55.02, a: 'owl' },
+  { n: 'M33 Triangulum Galaxy', t: 'galaxy', ra: 23.46, dec: 30.66, a: 'pinwheel' },
+  { n: 'M51 Whirlpool Galaxy', t: 'galaxy', ra: 202.47, dec: 47.19, a: 'whirlpool' },
+  { n: 'M63 Sunflower Galaxy', t: 'galaxy', ra: 198.96, dec: 42.03, a: 'sunflower' },
+  { n: 'M64 Black Eye Galaxy', t: 'galaxy', ra: 194.18, dec: 21.68, a: 'black eye' },
+  { n: 'M81 Bode’s Galaxy', t: 'galaxy', ra: 148.89, dec: 69.07, a: 'bode' },
+  { n: 'M82 Cigar Galaxy', t: 'galaxy', ra: 148.97, dec: 69.68, a: 'cigar' },
+  { n: 'M101 Pinwheel Galaxy', t: 'galaxy', ra: 210.80, dec: 54.35, a: 'pinwheel' },
+  { n: 'M104 Sombrero Galaxy', t: 'galaxy', ra: 189.998, dec: -11.62, a: 'sombrero' },
+  { n: 'M13 Hercules Cluster', t: 'cluster', ra: 250.42, dec: 36.46, a: 'hercules globular' },
+  { n: 'M22 Sagittarius Cluster', t: 'cluster', ra: 279.10, dec: -23.90, a: '' },
+  { n: 'M3 Globular Cluster', t: 'cluster', ra: 205.55, dec: 28.38, a: '' },
+  { n: 'M44 Beehive Cluster', t: 'cluster', ra: 130.10, dec: 19.67, a: 'beehive praesepe' },
+  { n: 'NGC 7000 North America Nebula', t: 'nebula', ra: 314.75, dec: 44.31, a: 'north america' },
+  { n: 'NGC 6960 Veil Nebula', t: 'nebula', ra: 311.60, dec: 30.72, a: 'veil' },
+  { n: 'NGC 7293 Helix Nebula', t: 'nebula', ra: 337.41, dec: -20.84, a: 'helix' },
+  { n: 'NGC 2237 Rosette Nebula', t: 'nebula', ra: 97.90, dec: 4.95, a: 'rosette' },
+  { n: 'NGC 869/884 Double Cluster', t: 'cluster', ra: 34.70, dec: 57.13, a: 'double cluster' },
+  { n: 'IC 1396 Elephant’s Trunk', t: 'nebula', ra: 324.74, dec: 57.50, a: 'elephant trunk' },
+  { n: 'IC 434 Horsehead Nebula', t: 'nebula', ra: 85.24, dec: -2.46, a: 'horsehead' },
+  { n: 'Polaris (align/home)', t: 'star', ra: 37.95, dec: 89.26, a: 'north star' },
+  { n: 'Vega', t: 'star', ra: 279.23, dec: 38.78, a: '' },
+  { n: 'Deneb', t: 'star', ra: 310.36, dec: 45.28, a: '' },
+  { n: 'Altair', t: 'star', ra: 297.70, dec: 8.87, a: '' },
+  { n: 'Arcturus', t: 'star', ra: 213.92, dec: 19.18, a: '' },
+  { n: 'Capella', t: 'star', ra: 79.17, dec: 45.998, a: '' },
+  { n: 'Betelgeuse', t: 'star', ra: 88.79, dec: 7.41, a: '' },
+  { n: 'Sirius', t: 'star', ra: 101.29, dec: -16.72, a: '' }
+];
+
+function wireTargets() {
+  var sel = $('#tgt-select'), search = $('#tgt-search'), info = $('#tgt-info'), go = $('#tgt-goto');
+  function render(filter) {
+    var q = (filter || '').toLowerCase().trim();
+    sel.innerHTML = ASTRO_TARGETS.map(function (o, i) {
+      if (q && o.n.toLowerCase().indexOf(q) < 0 && (o.a || '').indexOf(q) < 0 && o.t.indexOf(q) < 0) return '';
+      return '<option value="' + i + '">' + o.n + '  ·  ' + o.t + '</option>';
+    }).join('');
+  }
+  render('');
+  search.addEventListener('input', function () { render(this.value); });
+  sel.addEventListener('change', function () {
+    var o = ASTRO_TARGETS[parseInt(this.value, 10)]; if (!o) return;
+    info.textContent = o.n + '  ·  RA ' + (o.ra / 15).toFixed(2) + 'h  Dec ' + o.dec.toFixed(1) + '°';
+    go.disabled = false; go.dataset.armed = '0'; go.classList.remove('armed');
+    go.textContent = 'Go to ' + o.n.split(' ')[0];
+  });
+  go.addEventListener('click', function () {
+    var o = ASTRO_TARGETS[parseInt(sel.value, 10)]; if (!o) return;
+    var msg = $('#tgt-msg');
+    if (go.dataset.armed !== '1') {
+      post('/api/astro/goto', { ra: o.ra, dec: o.dec, name: o.n }).then(function (r) {
+        if (r && r.valid === false) { setHint('<b>Go to:</b> ' + (r.error || '')); return; }
+        go.dataset.armed = '1'; go.classList.add('armed');
+        go.textContent = 'Confirm — slew to ' + o.n.split(' ')[0];
+      });
+      return;
+    }
+    post('/api/astro/goto', { ra: o.ra, dec: o.dec, name: o.n, confirm: 1 }).then(function (r) {
+      go.dataset.armed = '0'; go.classList.remove('armed'); go.textContent = 'Go to ' + o.n.split(' ')[0];
+      msg.hidden = false;
+      msg.innerHTML = (r && r.ok === false)
+        ? '<b>Refused.</b> ' + (r.error || '')
+        : 'Slewing to ' + o.n + ' — it will track once it arrives.';
+    });
+  });
+}
+
+function wireAstroCapture() {
+  var b = $('#cap-start');
+  $('#cap-inf').addEventListener('click', function () { $('#cap-shots').value = ''; });
+  b.addEventListener('click', function () {
+    var params = {
+      interval: parseInt($('#cap-interval').value, 10) || 8,
+      shots: $('#cap-shots').value.trim() === '' ? '' : parseInt($('#cap-shots').value, 10)
+    };
+    if (b.dataset.armed !== '1') {
+      b.dataset.armed = '1'; b.classList.add('armed'); b.textContent = 'Confirm — start capturing';
+      return;
+    }
+    post('/api/astro/capture', Object.assign(params, { confirm: 1 })).then(function (r) {
+      b.dataset.armed = '0'; b.classList.remove('armed'); b.textContent = 'Start astro capture';
+      if (r && r.ok === false) { setHint('<b>Astro capture:</b> ' + (r.error || '')); return; }
+      setHint(''); $('#cap-run').hidden = false;
+    });
+  });
+}
+
+/* Reflect a running astro capture (a 272 programme) in the capture card. */
+function paintAstroCapture(d) {
+  var run = $('#cap-run'); if (!run) return;
+  var on = d && d.kind && d.kind !== 'none';
+  run.hidden = !on;
+  if (!on) return;
+  var line = d.unlimited ? ((typeof d.taken === 'number' ? d.taken : '—') + ' frames · ∞')
+    : (typeof d.remaining === 'number' && d.remaining >= 0 && d.total > 0)
+      ? ((d.total - d.remaining) + ' of ' + d.total + ' frames')
+      : (typeof d.remaining === 'number' && d.remaining >= 0) ? (d.remaining + ' frames left')
+      : 'running';
+  $('#cap-status').textContent = line + ' · ' + fmtDuration(d.elapsed_s) + ' elapsed';
 }
 
 /* ── plate solving, guiding, status — the /legacy dashboard, folded in native ──
@@ -1294,7 +1412,10 @@ function wireObservatoryTools() {
 function astroPollStart() {
   clearInterval(astroPoll);
   if ($('#tab-astro').hidden) return;
-  var tick = function () { astroRefresh(); solveGet(); guideGet(); };
+  var tick = function () {
+    astroRefresh(); solveGet(); guideGet();
+    progGet().then(paintAstroCapture).catch(function () {});
+  };
   tick();
   astroPoll = setInterval(tick, 2000);
 }

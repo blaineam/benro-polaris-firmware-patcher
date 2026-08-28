@@ -529,6 +529,7 @@ static int param_ci(const char *qs, const char *name, char *out, size_t cap,
 }
 
 static int param(const char *qs, const char *name, char *out, size_t cap);
+static int alpaca_camera(int fd, const char *method, const char *m, const char *qs, const char *body);
 static int param_ci(const char *qs, const char *name, char *out, size_t cap, int cs);
 static int current_radec(double *ra, double *dec);
 static int may_read_mount(void);
@@ -602,6 +603,12 @@ static int    g_connected = 1;
 static pid_t  g_slew_pid = -1;
 static double g_site_elev = 0.0;
 
+/* Alpaca Camera state. Alpaca is stateless HTTP handled in the main process, so
+ * the captured frame persists between startexposure and imagearray on disk. */
+static int    g_cam_ready = 0, g_cam_w = 0, g_cam_h = 0;
+static double g_cam_lastdur = 0;
+#define ALPACA_CAM_PGM "/tmp/alpaca-cam.pgm"
+
 /* THE DEVICE CLOCK IS NOT UTC. It runs local time while reporting itself as
  * UTC; ConformU caught this as "Scope and ASCOM sidereal times are more than 1
  * hour apart" -- 7 hours, i.e. the whole PDT offset. The autosolve daemon was
@@ -652,6 +659,175 @@ static int last_solution(double *ra_deg, double *dec_deg) {
     return 1;
 }
 
+/* ===========================================================================
+ * ASCOM Alpaca Camera device (/api/v1/camera/0/...)
+ *
+ * So NINA (Alpaca-native) gets the same live-view capture the INDI CCD gives
+ * Ekos. Alpaca Camera returns a PIXEL ARRAY, not a JPEG, so the frame is the
+ * head's live-view JPEG decoded to grayscale by polaris-extract --gray-pgm and
+ * served as a monochrome ImageArray. Same honesty as the INDI CCD: the head
+ * refuses an externally-triggered shutter in astro mode, so a mode-independent
+ * frame comes from live view -- solvable, for framing/EAA, not a raw light frame.
+ * =========================================================================== */
+
+/* Grab a live-view JPEG and decode it to /tmp/alpaca-cam.pgm. Returns 1 on ok. */
+static int alpaca_cam_capture(double dur) {
+    char cmd[700], magic[4]; FILE *f; int w = 0, h = 0, mx = 0;
+    snprintf(cmd, sizeof cmd,
+        "wget -q -T 8 -O /tmp/alpaca-cam.jpg 'http://%s:8080/?action=snapshot' 2>/dev/null || "
+        "curl -s -m 8 -o /tmp/alpaca-cam.jpg 'http://%s:8080/?action=snapshot' 2>/dev/null",
+        g_mount_host, g_mount_host);
+    if (system(cmd) == -1) {}
+    snprintf(cmd, sizeof cmd,
+        "%s/polaris-extract --jpeg /tmp/alpaca-cam.jpg --downsample 1 --gray-pgm > %s 2>/dev/null",
+        g_astro, ALPACA_CAM_PGM);
+    if (system(cmd) == -1) {}
+    f = fopen(ALPACA_CAM_PGM, "rb");
+    if (!f) return 0;
+    if (fscanf(f, "%2s %d %d %d", magic, &w, &h, &mx) != 4) { fclose(f); return 0; }
+    fclose(f);
+    if (strcmp(magic, "P5") || w <= 0 || h <= 0) return 0;
+    g_cam_w = w; g_cam_h = h; g_cam_lastdur = dur; g_cam_ready = 1;
+    return 1;
+}
+
+/* Serve the captured PGM as an ASCOM ImageArray (Type Int32, Rank 2, mono).
+ * ImageArray[x][y]; the PGM is row-major, so column x = px[y*w + x]. */
+static void alpaca_cam_imagearray(int fd, const char *qs) {
+    FILE *f; long fsz; unsigned char *buf, *px; int w = 0, h = 0, x, y, nv = 0, vals[3];
+    const char *p, *end; long doff; char *json; size_t cap, o; long c = client_txn(qs);
+    if (!g_cam_ready || !(f = fopen(ALPACA_CAM_PGM, "rb"))) {
+        alpaca_error(fd, qs, 1025, "no image — start an exposure first"); return; }
+    fseek(f, 0, SEEK_END); fsz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (fsz <= 8) { fclose(f); alpaca_error(fd, qs, 1025, "empty image"); return; }
+    buf = malloc((size_t)fsz);
+    if (!buf) { fclose(f); alpaca_error(fd, qs, 1025, "out of memory"); return; }
+    if (fread(buf, 1, (size_t)fsz, f) != (size_t)fsz) { free(buf); fclose(f); alpaca_error(fd, qs, 1025, "read"); return; }
+    fclose(f);
+    p = (const char *)buf + 2; end = (const char *)buf + fsz;   /* skip "P5" */
+    while (nv < 3 && p < end) {
+        while (p < end && (*p==' '||*p=='\n'||*p=='\r'||*p=='\t')) p++;
+        if (p < end && *p == '#') { while (p < end && *p != '\n') p++; continue; }
+        { int v = 0, any = 0; while (p < end && *p >= '0' && *p <= '9') { v = v*10 + (*p-'0'); p++; any = 1; }
+          if (any) vals[nv++] = v; else break; }
+    }
+    if (nv < 3) { free(buf); alpaca_error(fd, qs, 1025, "bad pgm"); return; }
+    w = vals[0]; h = vals[1];
+    if (p < end) p++;                    /* the single whitespace before the data */
+    doff = p - (const char *)buf;
+    if (doff + (long)w * h > fsz) { free(buf); alpaca_error(fd, qs, 1025, "truncated pgm"); return; }
+    px = buf + doff;
+    cap = (size_t)w * h * 4 + (size_t)w * 2 + 256;
+    json = malloc(cap);
+    if (!json) { free(buf); alpaca_error(fd, qs, 1025, "out of memory"); return; }
+    o = (size_t)snprintf(json, cap, "{\"Type\":2,\"Rank\":2,\"Value\":[");
+    for (x = 0; x < w; x++) {
+        if (x) json[o++] = ',';
+        json[o++] = '[';
+        for (y = 0; y < h; y++) {
+            int v = px[(size_t)y * w + x];
+            if (y) json[o++] = ',';
+            if (v >= 100) { json[o++]='0'+v/100; json[o++]='0'+(v/10)%10; json[o++]='0'+v%10; }
+            else if (v >= 10) { json[o++]='0'+v/10; json[o++]='0'+v%10; }
+            else json[o++]='0'+v;
+        }
+        json[o++] = ']';
+    }
+    json[o++] = ']';
+    o += (size_t)snprintf(json + o, cap - o,
+        ",\"ClientTransactionID\":%ld,\"ServerTransactionID\":%lu,\"ErrorNumber\":0,\"ErrorMessage\":\"\"}",
+        c, ++g_server_txn);
+    respond(fd, 200, "application/json", json, o);
+    free(json); free(buf);
+}
+
+static int alpaca_camera(int fd, const char *method, const char *m, const char *qs, const char *body) {
+    int xs = g_cam_w > 0 ? g_cam_w : 960, ys = g_cam_h > 0 ? g_cam_h : 640;
+    char b[64];
+    int put = !strcmp(method, "PUT");
+
+    /* ---- common device ---- */
+    if (!strcmp(m, "connected")) {
+        if (put) {
+            const char *src = (body && *body) ? body : qs; char v2[16]; int bv;
+            if (!(body && *body ? param_body(src, "Connected", v2, sizeof v2) : param(src, "Connected", v2, sizeof v2))
+                || !parse_bool_strict(v2, &bv)) { respond_400(fd, "bad Connected"); return 1; }
+            alpaca_value(fd, qs, "null"); return 1;
+        }
+        alpaca_value(fd, qs, "true"); return 1;
+    }
+    if (!strcmp(m, "name"))            { alpaca_value(fd, qs, "\"Benro Polaris Camera\""); return 1; }
+    if (!strcmp(m, "description"))     { alpaca_value(fd, qs, "\"Benro Polaris live-view camera via polaris-httpd\""); return 1; }
+    if (!strcmp(m, "driverinfo"))      { alpaca_value(fd, qs, "\"polaris-httpd camera\""); return 1; }
+    if (!strcmp(m, "driverversion"))   { alpaca_value(fd, qs, "\"1.0\""); return 1; }
+    if (!strcmp(m, "interfaceversion")){ alpaca_value(fd, qs, "3"); return 1; }
+    if (!strcmp(m, "supportedactions")){ alpaca_value(fd, qs, "[]"); return 1; }
+    if (!strcmp(m, "sensorname"))      { alpaca_value(fd, qs, "\"live-view\""); return 1; }
+
+    /* ---- geometry / capability (mono, no cooler, no gain, 8-bit) ---- */
+    if (!strcmp(m, "cameraxsize")) { snprintf(b, sizeof b, "%d", xs); alpaca_value(fd, qs, b); return 1; }
+    if (!strcmp(m, "cameraysize")) { snprintf(b, sizeof b, "%d", ys); alpaca_value(fd, qs, b); return 1; }
+    if (!strcmp(m, "sensortype"))  { alpaca_value(fd, qs, "0"); return 1; }          /* Monochrome */
+    if (!strcmp(m, "maxadu"))      { alpaca_value(fd, qs, "255"); return 1; }
+    if (!strcmp(m, "pixelsizex") || !strcmp(m, "pixelsizey")) { alpaca_value(fd, qs, "4.0"); return 1; }
+    if (!strcmp(m, "maxbinx") || !strcmp(m, "maxbiny")) { alpaca_value(fd, qs, "1"); return 1; }
+    if (!strcmp(m, "canasymmetricbin") || !strcmp(m, "canabortexposure") ||
+        !strcmp(m, "canstopexposure")) { alpaca_value(fd, qs, "true"); return 1; }
+    if (!strcmp(m, "canpulseguide") || !strcmp(m, "canfastreadout") ||
+        !strcmp(m, "cangetcoolerpower") || !strcmp(m, "cansetccdtemperature") ||
+        !strcmp(m, "hasshutter") || !strcmp(m, "cooleron")) { alpaca_value(fd, qs, "false"); return 1; }
+    if (!strcmp(m, "electronsperadu")) { alpaca_value(fd, qs, "1.0"); return 1; }
+    if (!strcmp(m, "fullwellcapacity")) { alpaca_value(fd, qs, "255.0"); return 1; }
+    if (!strcmp(m, "exposuremin"))  { alpaca_value(fd, qs, "0.0"); return 1; }
+    if (!strcmp(m, "exposuremax"))  { alpaca_value(fd, qs, "3600.0"); return 1; }
+    if (!strcmp(m, "exposureresolution")) { alpaca_value(fd, qs, "0.001"); return 1; }
+    if (!strcmp(m, "bayeroffsetx") || !strcmp(m, "bayeroffsety")) { alpaca_value(fd, qs, "0"); return 1; }
+    if (!strcmp(m, "readoutmode"))  { alpaca_value(fd, qs, "0"); return 1; }
+    if (!strcmp(m, "readoutmodes")) { alpaca_value(fd, qs, "[\"Live view\"]"); return 1; }
+    if (!strcmp(m, "gains")) { alpaca_value(fd, qs, "[]"); return 1; }
+    if (!strcmp(m, "startx") || !strcmp(m, "starty")) {
+        if (put) { alpaca_value(fd, qs, "null"); return 1; } alpaca_value(fd, qs, "0"); return 1; }
+    if (!strcmp(m, "binx") || !strcmp(m, "biny")) {
+        if (put) { alpaca_value(fd, qs, "null"); return 1; } alpaca_value(fd, qs, "1"); return 1; }
+    if (!strcmp(m, "numx")) {
+        if (put) { alpaca_value(fd, qs, "null"); return 1; } snprintf(b, sizeof b, "%d", xs); alpaca_value(fd, qs, b); return 1; }
+    if (!strcmp(m, "numy")) {
+        if (put) { alpaca_value(fd, qs, "null"); return 1; } snprintf(b, sizeof b, "%d", ys); alpaca_value(fd, qs, b); return 1; }
+
+    /* ---- properties an OSC/cooled camera has and we do not ---- */
+    if (!strcmp(m, "gain") || !strcmp(m, "gainmin") || !strcmp(m, "gainmax") ||
+        !strcmp(m, "offset") || !strcmp(m, "ccdtemperature") || !strcmp(m, "heatsinktemperature") ||
+        !strcmp(m, "coolerpower") || !strcmp(m, "setccdtemperature") || !strcmp(m, "fastreadout") ||
+        !strcmp(m, "lastexposurestarttime")) {
+        alpaca_error(fd, qs, 1024, "not implemented on this camera"); return 1;
+    }
+
+    /* ---- exposure ---- */
+    if (!strcmp(m, "camerastate")) { alpaca_value(fd, qs, "0"); return 1; }   /* always Idle: capture is synchronous */
+    if (!strcmp(m, "imageready"))  { alpaca_value(fd, qs, g_cam_ready ? "true" : "false"); return 1; }
+    if (!strcmp(m, "percentcompleted")) { alpaca_value(fd, qs, g_cam_ready ? "100" : "0"); return 1; }
+    if (!strcmp(m, "lastexposureduration")) {
+        snprintf(b, sizeof b, "%.3f", g_cam_lastdur); alpaca_value(fd, qs, b); return 1; }
+    if (!strcmp(m, "startexposure")) {
+        const char *src = (body && *body) ? body : qs; char v2[32]; double dur = 1;
+        if ((body && *body ? param_body(src, "Duration", v2, sizeof v2) : param(src, "Duration", v2, sizeof v2)))
+            dur = atof(v2);
+        g_cam_ready = 0;
+        if (alpaca_cam_capture(dur)) alpaca_value(fd, qs, "null");
+        else alpaca_error(fd, qs, 1025, "live view returned no frame — turn preview on and check the camera");
+        return 1;
+    }
+    if (!strcmp(m, "abortexposure") || !strcmp(m, "stopexposure")) {
+        alpaca_value(fd, qs, "null"); return 1;                    /* nothing async to stop */
+    }
+    if (!strcmp(m, "imagearray") || !strcmp(m, "imagearrayvariant")) {
+        alpaca_cam_imagearray(fd, qs); return 1;
+    }
+
+    alpaca_error(fd, qs, 1025, "unknown camera method");
+    return 1;
+}
+
 /* returns 1 if handled */
 static int handle_alpaca(int fd, const char *method, const char *path, const char *qs,
                          const char *body) {
@@ -671,12 +847,17 @@ static int handle_alpaca(int fd, const char *method, const char *path, const cha
         if (strstr(path, "configureddevices")) {
             alpaca_value(fd, qs,
                 "[{\"DeviceName\":\"Benro Polaris\",\"DeviceType\":\"Telescope\","
-                "\"DeviceNumber\":0,\"UniqueID\":\"benro-polaris-0\"}]");
+                "\"DeviceNumber\":0,\"UniqueID\":\"benro-polaris-0\"},"
+                "{\"DeviceName\":\"Benro Polaris Camera\",\"DeviceType\":\"Camera\","
+                "\"DeviceNumber\":0,\"UniqueID\":\"benro-polaris-cam-0\"}]");
             return 1;
         }
         alpaca_error(fd, qs, 1025, "unknown management call");
         return 1;
     }
+
+    if (strncmp(path, "/api/v1/camera/0/", 17) == 0)
+        return alpaca_camera(fd, method, path + 17, qs, body);
 
     if (strncmp(path, "/api/v1/telescope/0/", 20) != 0) return 0;
     m = path + 20;
@@ -2889,6 +3070,78 @@ static void handle(int fd) {
     if (!strcmp(path, "/api/astro")) {
         char out[512];
         astro_status_json(out, sizeof out);
+        respond_json(fd, out); return;
+    }
+
+    /* GOTO a catalogue target: slew to RA/Dec and track it. The catalogue lives
+     * in the browser (fixed J2000 coordinates); this just points the head. Uses
+     * the SAME goto-radec the Alpaca/INDI/LX200 bridges use -- which tracks by
+     * default -- so one code path aims the mount. MOVES: confirm-gated. */
+    if (!strcmp(path, "/api/astro/goto")) {
+        char ra[24]="", dec[24]="", nm[64]="", conf[8]="", cmd[640], out[1024], ub[64];
+        double ra_deg, dec_deg;
+        if (!param(qs,"ra",ra,sizeof ra) && body) param(body,"ra",ra,sizeof ra);
+        if (!param(qs,"dec",dec,sizeof dec) && body) param(body,"dec",dec,sizeof dec);
+        if (!param(qs,"name",nm,sizeof nm) && body) param(body,"name",nm,sizeof nm);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        if (!ra[0] || !dec[0]) { respond_400(fd, "ra and dec (degrees) required"); return; }
+        ra_deg = atof(ra); dec_deg = atof(dec);
+        if (ra_deg < 0 || ra_deg >= 360 || dec_deg < -90 || dec_deg > 90) {
+            respond_400(fd, "ra 0..360, dec -90..90 (degrees)"); return; }
+        if (!(conf[0]=='1' || !strcmp(conf,"true"))) {
+            char m[256];
+            snprintf(m, sizeof m, "{\"ok\":true,\"valid\":true,\"preview\":true,\"ra\":%.4f,\"dec\":%.4f}",
+                     ra_deg, dec_deg);
+            respond(fd, 200, "application/json", m, strlen(m)); return;
+        }
+        if (!may_read_mount()) {
+            const char *msg = "{\"ok\":false,\"error\":\"align the mount first — a GOTO on an unaligned head points nowhere\"}";
+            respond(fd, 409, "application/json", msg, strlen(msg)); return;
+        }
+        utc_arg(ub, sizeof ub);
+        /* Background it so the browser is not held for the ~10 s slew; the astro
+         * tab polls position. goto-radec tracks by default. */
+        snprintf(cmd, sizeof cmd,
+            "timeout -t 60 %s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s "
+            "goto-radec --refine-arcmin 0.1 --ra %.6f --dec %.6f >/dev/null 2>&1 &",
+            g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ub, ra_deg, dec_deg);
+        if (system(cmd) == -1) {}
+        { char nesc[128]; json_escape(nm, nesc, sizeof nesc);
+          snprintf(out, sizeof out,
+            "{\"ok\":true,\"slewing\":true,\"ra\":%.4f,\"dec\":%.4f,\"name\":\"%s\"}",
+            ra_deg, dec_deg, nesc); }
+        respond_json(fd, out); return;
+    }
+
+    /* Start the in-head astro capture sequence: a 272 lapse with an integer
+     * interval, which is exactly the astro-lapse shape (StarrySkyLayout, mode 8)
+     * -- the head does its own stacking (starskyStack). CAVEAT, surfaced in the
+     * UI: an externally-triggered capture in astro mode is documented as
+     * unreliable (solve-now.sh), so this is an attempt, not a guarantee. */
+    if (!strcmp(path, "/api/astro/capture")) {
+        char iv[16]="", sh[16]="", bl[16]="", conf[8]="";
+        lapse_params_t lp; char err[160]="", out[512]; int n;
+        if (!param(qs,"interval",iv,sizeof iv) && body) param(body,"interval",iv,sizeof iv);
+        if (!param(qs,"shots",sh,sizeof sh) && body) param(body,"shots",sh,sizeof sh);
+        if (!param(qs,"bulb",bl,sizeof bl) && body) param(body,"bulb",bl,sizeof bl);
+        if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+        lp.interval_s = iv[0] ? (double)atoi(iv) : 4;   /* astro uses INTEGER seconds */
+        lp.shots = sh[0] ? atol(sh) : -1;               /* -1 = unbounded stack       */
+        lp.bulb_s = atof(bl);
+        lp.fps = 24;
+        if (!(conf[0]=='1' || !strcmp(conf,"true"))) {
+            respond(fd, 409, "application/json",
+                "{\"ok\":false,\"error\":\"astro capture moves the mount and fires the shutter; resend with confirm=1\"}", 100);
+            return;
+        }
+        if (prog_start_lapse(&lp, err, sizeof err) != 0) {
+            char m[256]; json_escape(err, out, sizeof out);
+            snprintf(m, sizeof m, "{\"ok\":false,\"error\":\"%s\"}", out);
+            respond(fd, 409, "application/json", m, strlen(m)); return;
+        }
+        n = snprintf(out, sizeof out, "{\"ok\":true,\"prog\":");
+        n += prog_status_json(out+n, (int)sizeof out - n);
+        snprintf(out+n, sizeof out - n, "}");
         respond_json(fd, out); return;
     }
 

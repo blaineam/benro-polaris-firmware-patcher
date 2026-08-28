@@ -143,6 +143,7 @@ static double exif_focal_mm(const unsigned char* d, unsigned len)
 int main(int argc, char** argv) {
     const char* fn = NULL;
     int ds = 4, minpix = 3, maxpix = 500, maxstars = 300, margin = 16, stats = 0;
+    int gray_pgm = 0;   /* dump the decoded grayscale as a binary PGM, no stars */
     double focal_mm = 0.0;                 /* from EXIF; 0 = unknown */
     char focalbuf[32];
     int y_bottom = 1;                 /* FITS convention by default */
@@ -174,6 +175,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--y-origin"))   { const char* v = NEXT(); y_bottom = strcmp(v, "top") != 0; }
         else if (!strcmp(a, "--tile"))       tile = atoi(NEXT());
         else if (!strcmp(a, "--stats"))      stats = 1;
+        else if (!strcmp(a, "--gray-pgm"))   gray_pgm = 1;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option: %s\n", a); usage(argv[0]); return 2; }
         #undef NEXT
@@ -222,6 +224,16 @@ int main(int argc, char** argv) {
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
     fclose(f);
+
+    /* --gray-pgm: emit the decoded grayscale as a binary P5 PGM and stop. This
+     * is the pixel source for the Alpaca camera device (polaris-httpd shells out
+     * to it, reads the PGM, and serves it as an ImageArray). */
+    if (gray_pgm) {
+        printf("P5\n%d %d\n255\n", W, H);
+        fwrite(gray, 1, (size_t)W * H, stdout);
+        free(gray);
+        return 0;
+    }
 
     /* Background and noise, ESTIMATED LOCALLY.
      *

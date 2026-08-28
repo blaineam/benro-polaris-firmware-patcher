@@ -173,6 +173,24 @@
   shutter in astro mode, so a mode-independent capture comes from live view; a
   real, solvable frame for framing/EAA, not a raw light frame. Verified with a
   protocol client: two devices, CCD BLOB round-trips exactly.
+- **A guided target workflow, end to end.** The Astro tab now closes the loop:
+  enter astro (tilt compensation handles an unlevel tripod) → plate-solve align
+  → **pick a target from a built-in catalogue** (Messier / NGC / IC highlights
+  plus bright alignment stars, searchable) → **Go to** it (a native GOTO that
+  slews and tracks, using the same `goto-radec` the bridges use, alignment-gated
+  and two-tap) → auto-guiding holds it → **start the in-head astro capture**
+  (a 272 interval sequence — the head shoots and stacks itself). The capture step
+  is honest about the one hardware catch: the Polaris can refuse an
+  externally-started shutter while tracking, so the UI says to trigger the first
+  shot in the Benro app if it doesn't begin.
+- **ASCOM Alpaca Camera device**, so NINA gets the same live-view capture INDI
+  already gives Ekos. `/api/v1/camera/0/*` exposes a monochrome camera whose
+  `startexposure` grabs a live-view JPEG, decodes it to grayscale via a new
+  `polaris-extract --gray-pgm`, and serves it as an `ImageArray` (Type Int32,
+  Rank 2, column-major `[x][y]`); it is listed in `configureddevices` beside the
+  telescope. Same honest limit as the INDI CCD — a solvable preview frame, not a
+  raw light frame. Verified end-to-end (startexposure → imageready → imagearray,
+  pixels transpose correctly).
 
 ### Fixed
 

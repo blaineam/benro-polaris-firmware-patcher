@@ -376,6 +376,15 @@ main { flex: 1 1 auto; overflow-y: auto; padding: 14px; padding-bottom: 22px; }
   border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; }
 .hair { border: 0; border-top: 1px solid var(--line); margin: 14px 0 4px; }
 
+/* Target catalogue picker. */
+.tgtsearch { width: 100%; background: var(--card2); color: var(--fg);
+  border: 1px solid var(--line2); border-radius: var(--r-sm); padding: 0 12px;
+  min-height: 42px; font: inherit; margin-bottom: 8px; }
+.tgtlist { width: 100%; background: var(--card2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px;
+  font: inherit; }
+.tgtlist option { padding: 5px 6px; border-radius: 6px; }
+
 .switch { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
 .switch input { width: 20px; height: 20px; accent-color: var(--acc); }
 

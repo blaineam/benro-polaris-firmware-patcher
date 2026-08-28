@@ -583,6 +583,12 @@ guiding only happens when you press the button.
 
 Point Stellarium, NINA or SkySafari at `<polaris ip>:8090`, device 0.
 
+Alongside the telescope, an **Alpaca Camera** device (device 0, `Camera`) is
+listed in `configureddevices`, so NINA can capture too: `startexposure` returns
+the head's live-view frame as a monochrome `ImageArray` (the same live-view
+source and the same honest limit as the INDI CCD — a solvable preview frame, not
+a raw light frame). Pixels come from `polaris-extract --gray-pgm`.
+
 ```
 /management/v1/configureddevices          discovery
 /api/v1/telescope/0/rightascension        live position (HOURS, per spec)

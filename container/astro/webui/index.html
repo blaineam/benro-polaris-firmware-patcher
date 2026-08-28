@@ -618,6 +618,47 @@
         </p>
         <button id="astro-track" class="startbtn" type="button">Start tracking</button>
       </div>
+
+      <!-- Go to a catalogue target and track it. -->
+      <div class="card">
+        <h3>Go to a target</h3>
+        <p class="tiny dim">
+          Pick a deep-sky object and the head slews to it and tracks. Plate-solve
+          align first, so it lands on target.
+        </p>
+        <input id="tgt-search" type="text" placeholder="search — M42, Andromeda, ring…" autocomplete="off" class="tgtsearch">
+        <select id="tgt-select" size="6" class="tgtlist"></select>
+        <dl class="kv"><dt>Selected</dt><dd id="tgt-info" class="mono">—</dd></dl>
+        <button id="tgt-goto" class="startbtn" type="button" disabled>Choose a target</button>
+        <p id="tgt-msg" class="tiny dim" hidden></p>
+      </div>
+
+      <!-- Astro capture: the head's own in-head stacking sequence. -->
+      <div class="card">
+        <h3>Capture stacked images</h3>
+        <p class="tiny dim">
+          Starts the head's own astro interval sequence — it shoots and stacks
+          in-head. With <b>tilt compensation</b> and <b>auto-guiding</b> on
+          (above), the stack stays aligned and clean on an unlevel tripod.
+        </p>
+        <div class="grid2">
+          <div class="field">
+            <label for="cap-interval">Interval</label>
+            <div class="fieldrow"><input id="cap-interval" type="number" min="1" max="3600" step="1" value="8"><span class="unit">s</span></div>
+          </div>
+          <div class="field">
+            <label for="cap-shots">Frames</label>
+            <div class="fieldrow"><input id="cap-shots" type="number" min="1" max="5000" step="1" placeholder="∞"><button id="cap-inf" class="ghost sm" type="button">∞</button></div>
+          </div>
+        </div>
+        <p class="tiny dim">
+          Heads-up: the Polaris can refuse an externally-started capture while
+          it's tracking. If it doesn't begin, take the first shot in the Benro
+          app and it'll stack from there.
+        </p>
+        <dl id="cap-run" class="kv" hidden><dt>Capture</dt><dd id="cap-status" class="mono">—</dd></dl>
+        <button id="cap-start" class="startbtn" type="button">Start astro capture</button>
+      </div>
     </div>
 
       <!-- Plate solving — the /legacy solver, folded in natively. -->
