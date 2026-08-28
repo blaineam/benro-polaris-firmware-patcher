@@ -267,16 +267,18 @@
   for next boot. No `site.conf` editing, no SSH. The Astro tab shows a **"set your
   observing location"** prompt until it is set, and alignment/go-to are gated on it,
   while framing, focus, the gallery and the programmes work without it.
-- **Zero-SSH astro install** — `patch-polaris.sh --astro-autostart`. Bakes a
-  fail-safe, idempotent boot hook (`astro-autoinstall.sh`) into the patched
-  firmware; on boot the device self-installs the astro SD bundle to `/app/astro`
-  and starts the web server, so there is **no `install_astro.sh` by hand and no
-  SSH**. Put the card in, power on, open the page, set your location. Idempotent
-  (an SD swap with newer binaries updates in place), fail-safe (a problem there
-  cannot stop the rest of boot), and it chains a `--ssh-key` hook if both are
-  requested. Opt-in, and it requires re-flashing the patched firmware; the hook's
-  install/skip/update/chain/fail-safe logic is verified on a simulated filesystem,
-  but the on-hardware boot has not yet been exercised.
+- **Zero-SSH astro install — bake the stack into the firmware.**
+  `patch-polaris.sh --astro-autostart` copies the pre-built astro binaries and
+  scripts straight into `/app/astro` inside the patched firmware and installs
+  `polaris-astro-boot.sh` as the boot hook. So the SD card carries **only the
+  index files** — flash the firmware, drop `astrometry/` on the card, power on,
+  open the page, set your location. No SD-side binaries, no `install_astro.sh`,
+  no SSH. A `--ssh-key` hook is preserved as the boot script's chained pre-hook.
+  Updating means re-flashing. The bake's copy (indexes and `site.conf` correctly
+  left OUT), boot-hook install and SSH chaining are verified against a fake appfs;
+  the full patch needs a stock firmware image, so it and the on-hardware boot have
+  not been exercised. (The boot script now detects the SD by its index dir, not by
+  `site.conf`, so first boot doesn't stall waiting for a config that isn't there.)
 
 ### Fixed
 

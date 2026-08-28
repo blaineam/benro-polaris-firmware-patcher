@@ -21,10 +21,13 @@
 #                          root login (path to a .pub / authorized_keys file, or
 #                          the key line itself). Adds one new appfs file; the
 #                          stock firmware already runs sshd. Repeatable.
-#     --astro-autostart    bake in a ZERO-SSH boot hook: on boot the device
-#                          self-installs the astro SD bundle and starts the web
-#                          server — no install_astro.sh by hand, no SSH. Requires
-#                          re-flashing this patched firmware. Fail-safe + opt-in.
+#     --astro-autostart    bake the astro stack straight into the firmware (from
+#                          build-astro.sh's output) and install the boot hook, so
+#                          the SD card only needs the index files — flash, drop
+#                          astrometry/ on the card, power on, open the page. No
+#                          SSH, no install step. Requires re-flashing.
+#     --astro-bundle DIR   the polaris-astro/ bundle to bake in
+#                          (default out/astro-bundle/COPY-TO-SD-CARD-ROOT/polaris-astro)
 #     --image NAME         docker image tag              (default polaris-patcher)
 #
 #  READ THE README AND DISCLAIMERS FIRST.  Tested ONLY against FwVer 4.0.0.32
@@ -36,6 +39,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 FWPKT=""; VER="2.5.34"; OUT="$HERE/out"; SELFTEST=0; FIXTYPO=1; SWAPUSB1=1; IMG="polaris-patcher"; MODE="full"
 SSHKEY=""
 ASTROAUTO=0
+ABUNDLE=""
 
 # These default FROM THE ENVIRONMENT so both forms work:
 #   LIBGPHOTO2_REF=my-branch ./patch-polaris.sh ...
@@ -63,6 +67,7 @@ while [ $# -gt 0 ]; do
     --no-fix-typo) FIXTYPO=0; shift;;
     --no-usb1) SWAPUSB1=0; shift;;
     --astro-autostart) ASTROAUTO=1; shift;;
+    --astro-bundle) ABUNDLE="$2"; shift 2;;
     --ssh-key)
       [ -n "${2:-}" ] || { echo "error: --ssh-key needs a value" >&2; exit 1; }
       if [ -f "$2" ]; then K="$(cat "$2")"
@@ -108,6 +113,21 @@ else
 fi
 
 mkdir -p "$OUT"
+
+# --astro-autostart bakes the astro stack into the firmware. Resolve the pre-built
+# bundle (default: build-astro.sh's output) and mount it read-only for the patcher.
+ASTRO_MOUNT=""
+if [ "$ASTROAUTO" = "1" ]; then
+  [ -n "$ABUNDLE" ] || ABUNDLE="$HERE/out/astro-bundle/COPY-TO-SD-CARD-ROOT/polaris-astro"
+  if [ ! -x "$ABUNDLE/polaris-httpd" ]; then
+    echo "error: --astro-autostart needs the astro bundle, but $ABUNDLE/polaris-httpd was not found." >&2
+    echo "       Build it first ( ./build-astro.sh ), or pass --astro-bundle <polaris-astro dir>." >&2
+    exit 1
+  fi
+  ASTRO_MOUNT="$(cd "$ABUNDLE" && pwd)"
+  echo "[*] astro: baking $ASTRO_MOUNT into the firmware (SD will need only the index files)"
+fi
+
 echo "[*] building docker image '$IMG' (first run only)…"
 docker build -q -t "$IMG" -f "$HERE/docker/Dockerfile" "$HERE" >/dev/null
 
@@ -122,7 +142,8 @@ docker run --rm \
   -e KEEP_RESET_USB="$KEEPRESET" \
   -e SWAP_USB1="$SWAPUSB1" \
   -e SSH_PUBKEY="$SSHKEY" \
-  -e ASTRO_AUTOINSTALL="$ASTROAUTO" \
+  -e ASTRO_BAKE="$ASTROAUTO" \
+  ${ASTRO_MOUNT:+-v "$ASTRO_MOUNT":/astro:ro} \
   -v "$IN":/in:ro -v "$OUT":/out \
   "$IMG"
 

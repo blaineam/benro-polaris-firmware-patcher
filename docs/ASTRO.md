@@ -55,27 +55,35 @@ Then run `install_astro.sh` on the device once (over SSH), or — with no SSH at
 all — patch the firmware with `--astro-autostart` (below) so it self-installs.
 A `site.conf` is optional now: the location can be set from the web app.
 
-### Zero-SSH install
+### Zero-SSH install — bake the astro stack into the firmware
 
-Patch the firmware with the auto-install boot hook and you never touch a shell:
+The simplest setup: bake the whole astro stack into the patched firmware, so the
+SD card carries only the (large, static) index files. Two things reach the card —
+the firmware to flash, and the indexes — and there is no install step at all.
 
 ```sh
+./build-astro.sh                              # builds the bundle + indexes
 ./patch-polaris.sh --fwpkt FwPkt.bin --astro-autostart
 ```
 
-Flash that firmware, put the SD card (with the bundle above) in, and power on.
-On boot the device copies the bundle to `/app/astro` and starts the web server on
-`:8090` on its own — open the page and set your location. The hook is:
+`--astro-autostart` copies the pre-built binaries and scripts into `/app/astro`
+inside the firmware and installs `polaris-astro-boot.sh` as the boot hook. Then:
 
-- **idempotent** — safe every boot; it reinstalls only when `/app/astro` is
-  missing or the SD carries a newer `polaris-httpd`, so swapping in a freshly
-  built card updates the device in place;
-- **fail-safe** — any error there cannot stop the rest of the stock boot; and
-- it **chains a `--ssh-key` hook** if you asked for both.
+1. Flash the patched firmware.
+2. Copy **only** `out/astro-bundle/COPY-TO-SD-CARD-ROOT/astrometry/` to the card
+   (`<SD root>/astrometry/index-*.fits`). No `polaris-astro/`, no `site.conf`.
+3. Power on and open `http://<polaris ip>:8090/`. Set your location in the web app.
 
-It requires re-flashing the patched firmware (an SD swap alone won't add the
-hook). The install/skip/update/chain/fail-safe logic is verified on a simulated
-filesystem; the on-hardware boot has not yet been exercised.
+The indexes stay on the SD because they are too big for the firmware; everything
+else lives in `/app/astro`. A `--ssh-key` hook, if you also asked for one, is
+preserved as the boot script's chained pre-hook. Updating the astro stack means
+re-flashing (there is nothing on the SD to swap).
+
+The bake step's file-copy (binaries and scripts in, indexes and `site.conf` out),
+boot-hook install and SSH chaining are verified against a fake appfs; the patcher
+itself needs a stock firmware image, so the full patch and the on-hardware boot
+have not been exercised here. For a first outing, the SSH `install_astro.sh` path
+above is the tested-safe fallback.
 
 ---
 

@@ -41,9 +41,12 @@ SITE=/app/sd/polaris-astro/site.conf
     fi
 
     # Wait for the microSD to actually mount. Bounded, so a missing card cannot
-    # stall boot forever, but long enough that a slow card still works.
+    # stall boot forever, but long enough that a slow card still works. Detect the
+    # mount by EITHER site.conf OR the astrometry index dir — with the astro stack
+    # baked into the firmware the card carries only the indexes and no site.conf,
+    # and site.conf is optional anyway (the position can be set from the web app).
     i=0
-    while [ $i -lt 45 ] && [ ! -f "$SITE" ]; do
+    while [ $i -lt 45 ] && [ ! -f "$SITE" ] && [ ! -d /app/sd/astrometry ]; do
         i=$((i + 1)); sleep 2
     done
     if [ -f "$SITE" ]; then

@@ -421,37 +421,53 @@ if [ -n "${SSH_PUBKEY:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7b. OPTIONAL (ASTRO_AUTOINSTALL): make the astro stack ZERO-SSH. Install the
-#     self-installing boot hook the stock /app/bootapp already calls; on boot it
-#     copies the SD bundle to /app/astro (idempotently) and starts the web
-#     server — no SSH, no install_astro.sh by hand. The hook is fail-safe: any
-#     error there cannot stop the rest of boot. If SSH was ALSO requested above,
-#     its hook is handed to the bootstrap as the chained pre-hook so both survive.
+# 7b. OPTIONAL (ASTRO_BAKE): bake the whole astro stack straight INTO the
+#     firmware. /app/astro is populated here from a pre-built bundle (mounted at
+#     /astro) and polaris-astro-boot.sh is installed as the boot hook, so there is
+#     nothing to install on the device and no SSH: the SD card carries only the
+#     (large, static) index files. Flash, drop the astrometry/ dir on the card,
+#     power on, open the page. If SSH was also requested, its hook is preserved as
+#     the boot script's chained pre-hook (/app/network_telnetd.pre-astro.sh).
 # ---------------------------------------------------------------------------
-if [ "${ASTRO_AUTOINSTALL:-0}" = "1" ]; then
-  log "astro: installing the zero-SSH auto-install boot hook…"
+if [ "${ASTRO_BAKE:-0}" = "1" ]; then
+  log "astro: baking the astro stack into /app/astro…"
   BOOTAPP="$APP/bootapp"
-  [ -f "$BOOTAPP" ] || die "ASTRO_AUTOINSTALL set but /app/bootapp is missing from this appfs — refusing to guess a boot hook"
-  [ -f /opt/patcher/ondisk/astro-autoinstall.sh ] || die "ASTRO_AUTOINSTALL: /opt/patcher/ondisk/astro-autoinstall.sh missing from the patcher"
+  [ -f "$BOOTAPP" ] || die "--astro-autostart: /app/bootapp is missing from this appfs — refusing to guess a boot hook"
+  [ -d /astro ] || die "--astro-autostart: the astro bundle was not mounted at /astro (build it with build-astro.sh)"
+  [ -x /astro/polaris-httpd ] || die "--astro-autostart: /astro/polaris-httpd missing — point --astro-bundle at the polaris-astro/ dir"
+  [ -f /astro/polaris-astro-boot.sh ] || die "--astro-autostart: /astro/polaris-astro-boot.sh missing from the bundle"
   A_UID="$(stat -c %u "$BOOTAPP")"; A_GID="$(stat -c %g "$BOOTAPP")"; A_MODE="$(stat -c %a "$BOOTAPP")"
 
+  # Copy the binaries + scripts into the appfs. The indexes stay on the SD (too
+  # big for the firmware), and no site.conf is baked (the position is set in the
+  # web app and saved to the card).
+  mkdir -p "$APP/astro"
+  _n=0
+  for f in /astro/*; do
+    [ -f "$f" ] || continue
+    b="$(basename "$f")"
+    case "$b" in astrometry|site.conf|site.conf.example) continue;; esac
+    install -m 755 -o "$A_UID" -g "$A_GID" "$f" "$APP/astro/$b"
+    _n=$((_n + 1))
+  done
+  log "  copied $_n file(s) into /app/astro"
+
+  # Install polaris-astro-boot.sh as the boot hook, chaining any SSH hook.
   ASTRO_SLOT=""
   if [ -n "$SSH_HOOK" ]; then
-    # SSH just claimed a slot: preserve its script as the bootstrap's pre-hook and
-    # reuse the same slot for the bootstrap, so the key is still appended at boot.
-    install -m "$A_MODE" -o "$A_UID" -g "$A_GID" "$APP/$SSH_HOOK" "$APP/astro-autoinstall.pre.sh"
+    install -m "$A_MODE" -o "$A_UID" -g "$A_GID" "$APP/$SSH_HOOK" "$APP/network_telnetd.pre-astro.sh"
     ASTRO_SLOT="$SSH_HOOK"
-    log "  ssh-key hook chained as /app/astro-autoinstall.pre.sh (runs first at boot)"
+    log "  ssh-key hook chained as /app/network_telnetd.pre-astro.sh (the boot script runs it first)"
   else
     for cand in network_telnetd.sh start_agent.sh; do
       grep -q "$cand" "$BOOTAPP" || continue          # bootapp must actually call it
       [ -e "$APP/$cand" ] && continue                 # do not clobber an existing hook
       ASTRO_SLOT="$cand"; break
     done
-    [ -n "$ASTRO_SLOT" ] || die "ASTRO_AUTOINSTALL: no free boot hook that /app/bootapp calls (network_telnetd.sh, start_agent.sh)"
+    [ -n "$ASTRO_SLOT" ] || die "--astro-autostart: no free boot hook that /app/bootapp calls (network_telnetd.sh, start_agent.sh)"
   fi
-  install -m "$A_MODE" -o "$A_UID" -g "$A_GID" /opt/patcher/ondisk/astro-autoinstall.sh "$APP/$ASTRO_SLOT"
-  log "  added /app/$ASTRO_SLOT ($A_MODE $A_UID:$A_GID — same as bootapp) — self-installs the SD bundle + starts the astro stack at boot, no SSH"
+  install -m "$A_MODE" -o "$A_UID" -g "$A_GID" "$APP/astro/polaris-astro-boot.sh" "$APP/$ASTRO_SLOT"
+  log "  installed boot hook /app/$ASTRO_SLOT — starts the astro stack at boot; the SD needs only the astrometry/ index files"
 fi
 
 # ---------------------------------------------------------------------------
