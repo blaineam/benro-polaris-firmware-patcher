@@ -487,17 +487,17 @@ function setLive(on) {
    shutter overlaid, so you can frame and jog on a big image at once. */
 function applySize(sz) {
   var root = document.documentElement;
-  if (sz === 'lg' || sz === 'xl') root.setAttribute('data-size', sz);
+  if (sz === 'lg' || sz === 'xl') { sz = 'lg'; root.setAttribute('data-size', 'lg'); }
   else { root.removeAttribute('data-size'); sz = ''; }
   var b = $('#sizebtn');
-  if (b) b.textContent = sz === 'lg' ? 'A+' : sz === 'xl' ? 'A++' : 'A';
+  if (b) { b.textContent = sz === 'lg' ? 'A+' : 'A'; b.classList.toggle('on', sz === 'lg'); }
   try { localStorage.setItem('polaris-size', sz); } catch (_) {}
   resetSticks();   /* a size change moves the sticks — recentre any knob */
   return sz;
 }
 
 function wireStage() {
-  var order = ['', 'lg', 'xl'], cur = '';
+  var order = ['', 'lg'], cur = '';
   try { cur = localStorage.getItem('polaris-size') || ''; } catch (_) {}
   cur = applySize(cur);
 
