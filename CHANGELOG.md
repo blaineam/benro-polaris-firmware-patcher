@@ -184,6 +184,17 @@
   is honest about the one hardware catch: the Polaris can refuse an
   externally-started shutter while tracking, so the UI says to trigger the first
   shot in the Benro app if it doesn't begin.
+- **The last head settings, and the Sun — both gated by their real hazard.** The
+  Settings tab gained **camera-plate direction** (546, a benign re-orient,
+  confirm-gated) and **restricted angle** (release the head's travel limits,
+  542). Releasing the limits lets the head swing into its own Astro Kit or the
+  tripod, so — matching the app — it is gated behind a **physical-attestation**:
+  542 stays OUT of the generic send allowlist, a dedicated `/api/astro/limits`
+  route is the only way to release it, and it refuses without `attest=1`
+  (re-enforcing the limits is always safe). The **Sun** joins the target
+  catalogue behind the same kind of gate — its GOTO is locked until you confirm a
+  **solar filter is fitted**, because a bare sensor pointed at the Sun is
+  destroyed in seconds.
 - **ASCOM Alpaca Camera device**, so NINA gets the same live-view capture INDI
   already gives Ekos. `/api/v1/camera/0/*` exposes a monochrome camera whose
   `startexposure` grabs a live-view JPEG, decodes it to grayscale via a new
