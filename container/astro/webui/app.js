@@ -1317,6 +1317,7 @@ function wireAstro() {
   wireObservatoryTools();
   wireTargets();
   wireAstroCapture();
+  wireAstroAutofocus();
 }
 
 /* A compact deep-sky + bright-star catalogue (J2000, degrees). Fixed coordinates
@@ -1545,6 +1546,86 @@ function paintAstroCapture(d) {
       : (typeof d.remaining === 'number' && d.remaining >= 0) ? (d.remaining + ' frames left')
       : 'running';
   $('#cap-status').textContent = line + ' · ' + fmtDuration(d.elapsed_s) + ' elapsed';
+}
+
+/* ── astro autofocus: start a sweep, poll the V-curve, settle on best ──
+   The server runs the sweep (focuser + HFR scoring); the page just starts it and
+   polls /api/astro/autofocus, which returns the sweep's own progress JSON. */
+var afPoll = 0;
+
+function afDrawCurve(prog) {
+  var box = $('#af-curvebox'), svg = $('#af-curve'), best = $('#af-best');
+  var s = (prog && prog.samples) || [], i, sc, max = 0, min = Infinity;
+  if (!s.length) { box.hidden = true; return; }
+  box.hidden = false;
+  for (i = 0; i < s.length; i++) { sc = +s[i].score || 0; if (sc > max) max = sc; if (sc < min) min = sc; }
+  var W = 300, H = 90, pad = 5, span = (max - min) || 1, n = s.length;
+  var X = function (i) { return pad + (n <= 1 ? 0 : i * (W - 2 * pad) / (n - 1)); };
+  var Y = function (sc) { return H - pad - ((sc - min) / span) * (H - 2 * pad); };
+  var pts = s.map(function (p, i) { return X(i).toFixed(1) + ',' + Y(+p.score || 0).toFixed(1); }).join(' ');
+  var bstep = (prog.best && typeof prog.best.step === 'number') ? prog.best.step : -1;
+  var svgtext = '<polyline class="afline" points="' + pts + '"/>';
+  if (bstep >= 0) { var bx = X(bstep).toFixed(1); svgtext += '<line class="afbest" x1="' + bx + '" y1="0" x2="' + bx + '" y2="' + H + '"/>'; }
+  svgtext += s.map(function (p, i) { return '<circle class="afdot" cx="' + X(i).toFixed(1) + '" cy="' + Y(+p.score || 0).toFixed(1) + '" r="2.2"/>'; }).join('');
+  svg.innerHTML = svgtext;
+  if (prog.best) {
+    var h = prog.best.hfr;
+    best.textContent = 'best: step ' + prog.best.step +
+      (h != null && +h > 0 ? ' · HFR ' + (+h).toFixed(2) + ' px' : '') +
+      (prog.step && prog.steps ? '  ·  swept ' + prog.step + '/' + prog.steps : '');
+  }
+}
+
+function afRender(d) {
+  var run = $('#af-run'), stop = $('#af-stop'), msg = $('#af-msg');
+  var prog = (d && d.progress) || {};
+  var st = (d && d.status) || prog.state || 'idle';
+  afDrawCurve(prog);
+  if (st === 'running') {
+    run.hidden = true; stop.hidden = false;
+    msg.hidden = false; msg.innerHTML = '<b>Focusing…</b> step ' + (prog.step || 0) + ' of ' + (prog.steps || '—');
+  } else {
+    run.hidden = false; stop.hidden = true;
+    if (st === 'done') {
+      msg.hidden = false;
+      msg.innerHTML = '<b>Focused.</b> Settled on the sharpest step' +
+        (prog.best && +prog.best.hfr > 0 ? ' — HFR ' + (+prog.best.hfr).toFixed(2) + ' px.' : '.');
+    } else if (st === 'failed') {
+      msg.hidden = false; msg.innerHTML = '<b>Auto-focus:</b> ' + (prog.error || 'the sweep could not complete.');
+    } else { msg.hidden = true; }
+    if (afPoll) { clearInterval(afPoll); afPoll = 0; }
+  }
+}
+
+function afTick() {
+  fetch('/api/astro/autofocus', { cache: 'no-store' })
+    .then(function (r) { return r.json(); }).then(afRender).catch(function () {});
+}
+
+function wireAstroAutofocus() {
+  var run = $('#af-run'), stop = $('#af-stop');
+  run.addEventListener('click', function () {
+    var bl = parseInt($('#af-backlash').value, 10);
+    var params = {
+      confirm: 1,
+      steps: parseInt($('#af-steps').value, 10) || 12,
+      adj: parseInt($('#af-adj').value, 10) || 1,
+      settle: parseFloat($('#af-settle').value),
+      backlash: isNaN(bl) ? 3 : bl
+    };
+    if (isNaN(params.settle)) params.settle = 0.8;
+    $('#af-msg').hidden = false; $('#af-msg').innerHTML = 'Starting…';
+    post('/api/astro/autofocus', params).then(function (r) {
+      if (r && r.ok === false) { $('#af-msg').innerHTML = '<b>Auto-focus:</b> ' + (r.error || 'could not start.'); return; }
+      run.hidden = true; stop.hidden = false;
+      afTick();
+      if (!afPoll) afPoll = setInterval(afTick, 1200);
+    });
+  });
+  stop.addEventListener('click', function () {
+    post('/api/astro/autofocus', { stop: 1 }).then(function () { afTick(); });
+  });
+  afTick();   /* pick up a sweep already running (e.g. after a reload) */
 }
 
 /* ── plate solving, guiding, status — the /legacy dashboard, folded in native ──

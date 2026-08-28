@@ -200,6 +200,21 @@ main { flex: 1 1 auto; overflow-y: auto; padding: 14px; padding-bottom: 22px; }
   background: rgba(0,0,0,.4); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
 .histbox canvas { display: block; width: 168px; height: 40px; }
 
+/* Astro autofocus card. */
+.afrow { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+.af-adv { margin-top: 10px; }
+.af-adv > summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+.afgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 8px 0; }
+.afgrid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+.af-curvebox { margin-top: 10px; }
+#af-curve { width: 100%; height: 90px; display: block; background: #0a0d13;
+  border: 1px solid var(--line); border-radius: 8px; }
+#af-curve .afline { fill: none; stroke: var(--acc); stroke-width: 2; vector-effect: non-scaling-stroke; }
+#af-curve .afbest { stroke: var(--ok); stroke-width: 1.5; vector-effect: non-scaling-stroke; opacity: .8; }
+#af-curve .afdot { fill: var(--acc); }
+.af-stat { margin-top: 6px; }
+#af-best { font-size: 12px; color: var(--fg); }
+
 /* Manual-focus jog bar on the Control tab. */
 .focusbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
 .focusbar > .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--dim); }

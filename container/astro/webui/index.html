@@ -650,6 +650,38 @@
         <button id="astro-track" class="startbtn" type="button">Start tracking</button>
       </div>
 
+      <!-- Astro autofocus: sweep the focuser, settle on the sharpest stars. -->
+      <div class="card">
+        <h3>Auto-focus <span class="dim">— tack-sharp stars</span></h3>
+        <p class="tiny dim">
+          Sweeps the focuser and settles where the stars are tightest — smallest
+          <b>HFR</b>, scored from the live view at each step, exactly how NINA and
+          Ekos focus. Put the camera on <b>manual focus</b>, aim at a starfield,
+          and turn live view on first. The head reports no focuser position, so
+          this is a <i>relative</i> sweep that returns from one side to take up
+          backlash — run it again if a pass lands short.
+        </p>
+        <div class="afrow">
+          <button id="af-run" class="startbtn" type="button">Run auto-focus</button>
+          <button id="af-stop" class="ghost" type="button" hidden>Stop</button>
+        </div>
+        <details class="af-adv">
+          <summary>Sweep settings</summary>
+          <div class="afgrid">
+            <label>Steps<input id="af-steps" type="number" min="3" max="40" step="1" value="12"></label>
+            <label>Step size<input id="af-adj" type="number" min="1" max="10" step="1" value="1"></label>
+            <label>Settle (s)<input id="af-settle" type="number" min="0" max="5" step="0.1" value="0.8"></label>
+            <label>Backlash<input id="af-backlash" type="number" min="0" max="20" step="1" value="3"></label>
+          </div>
+          <p class="tiny dim">More steps or a larger step size widen the search; settle gives the lens and preview time between moves.</p>
+        </details>
+        <p id="af-msg" class="tiny dim" hidden></p>
+        <div id="af-curvebox" class="af-curvebox" hidden>
+          <svg id="af-curve" viewBox="0 0 300 90" preserveAspectRatio="none" aria-label="focus curve"></svg>
+          <div class="af-stat"><span id="af-best" class="mono"></span></div>
+        </div>
+      </div>
+
       <!-- Go to a catalogue target and track it. -->
       <div class="card">
         <h3>Go to a target</h3>

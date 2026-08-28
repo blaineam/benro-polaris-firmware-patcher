@@ -84,6 +84,11 @@ static pid_t find_proc(const char *needle) {
     return found;
 }
 #define JOB_START      "/tmp/polaris-job.start"    /* unix time it began */
+
+#define AF_STATUS      "/tmp/polaris-af.status"     /* idle|running|done|failed */
+#define AF_PID         "/tmp/polaris-af.pid"        /* pid of the autofocus job */
+#define AF_JSON        "/tmp/polaris-af.json"       /* sweep progress + V-curve */
+#define AF_LOG         "/tmp/polaris-af.log"
 #define ASTRO_DIR      "/app/astro"
 
 static const char *g_astro = ASTRO_DIR;
@@ -98,6 +103,7 @@ static const char *g_astro = ASTRO_DIR;
  * error against a 10 arcsec tolerance. We ask for 0.1 arcmin (6 arcsec). */
 static const char *g_mount_host = "127.0.0.1";
 static int         g_mount_port = 9090;
+static int         g_http_port  = 8080;   /* our own port, for the autofocus job */
 static double g_lat = 0.0, g_lon = 0.0;
 static int    g_have_pos = 0;
 static double g_focal = 400.0;
@@ -411,6 +417,53 @@ static int start_solve(int apply, int mode) {
         int rc = system(cmd);
         set_status(rc == 0 ? "done" : "failed");
         unlink(JOB_PID);
+        _exit(0);
+    }
+}
+
+/* --------------------------------------------------------------- autofocus */
+
+static void af_set(const char *s) { FILE *f = fopen(AF_STATUS, "w"); if (f) { fputs(s, f); fclose(f); } }
+
+/* Is a sweep genuinely running? Trust the pid, not the status string -- a job
+ * that died without a final status would otherwise wedge every later start. */
+static int af_running(void) {
+    char status[32], pb[32]; long jp;
+    read_file(AF_STATUS, status, sizeof status);
+    if (strncmp(status, "running", 7) != 0) return 0;
+    read_file(AF_PID, pb, sizeof pb); jp = atol(pb);
+    if (jp > 0 && kill((pid_t)jp, 0) == 0) return 1;
+    af_set("failed"); unlink(AF_PID);
+    return 0;
+}
+
+/* Fork the focus sweep. It drives the focuser and grabs frames by calling BACK
+ * into this server over localhost (the registered link + the snapshot proxy),
+ * so the parent must keep serving while it runs -- which it does, the job being
+ * a separate process on its own. Parent returns at once; the UI polls AF_JSON. */
+static int start_autofocus(int steps, double settle, int adj, int backlash) {
+    pid_t pid;
+    if (af_running()) return 0;
+    af_set("running");
+    { FILE *f = fopen(AF_JSON, "w");
+      if (f) { fputs("{\"state\":\"running\",\"step\":0,\"steps\":0,\"samples\":[]}\n", f); fclose(f); } }
+    pid = fork();
+    if (pid < 0) { af_set("failed"); return -1; }
+    if (pid > 0) { int st; waitpid(pid, &st, 0); return 1; }   /* reap the middle child */
+    if (fork() > 0) _exit(0);                                  /* orphan the job to init */
+    setsid();
+    { FILE *f = fopen(AF_PID, "w"); if (f) { fprintf(f, "%ld\n", (long)getpid()); fclose(f); } }
+    {
+        char cmd[1024]; int fd, i;
+        for (i = 3; i < 64; i++) close(i);                     /* drop the client socket */
+        fd = open("/dev/null", O_RDONLY); if (fd >= 0) { dup2(fd, 0); if (fd != 0) close(fd); }
+        fd = open(AF_LOG, O_WRONLY|O_CREAT|O_TRUNC, 0644); if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
+        snprintf(cmd, sizeof cmd,
+            "HTTP_PORT=%d ASTRO=%s AF_STEPS=%d AF_ADJ=%d AF_SETTLE=%.2f AF_BACKLASH=%d "
+            "AF_JSON=%s sh %s/autofocus.sh",
+            g_http_port, g_astro, steps, adj, settle, backlash, AF_JSON, g_astro);
+        { int rc = system(cmd); af_set(rc == 0 ? "done" : "failed"); }
+        unlink(AF_PID);
         _exit(0);
     }
 }
@@ -3231,6 +3284,59 @@ static void handle(int fd) {
         }
     }
 
+    /* Astro autofocus: sweep the focuser and settle at the sharpest stars.
+     * GET returns {status, progress} where progress is the sweep's own JSON
+     * (step, V-curve samples, best). POST confirm=1 starts a sweep; POST stop=1
+     * aborts one. It drives the focuser automatically, so it is confirm-gated and
+     * needs the link up; the sweep itself scores frames with the HFR metric. */
+    if (!strcmp(path, "/api/astro/autofocus")) {
+        if (!strcmp(method, "GET")) {
+            char status[32], prog[8192], out[8500];
+            read_file(AF_STATUS, status, sizeof status);
+            read_file(AF_JSON, prog, sizeof prog);
+            if (strncmp(status, "running", 7) == 0 && !af_running()) strcpy(status, "failed");
+            if (!prog[0]) strcpy(prog, "{\"state\":\"idle\"}");
+            else { size_t L = strlen(prog); while (L && (prog[L-1]=='\n'||prog[L-1]=='\r')) prog[--L]=0; }
+            snprintf(out, sizeof out, "{\"ok\":true,\"status\":\"%.16s\",\"progress\":%s}",
+                     status[0] ? status : "idle", prog);
+            respond_json(fd, out); return;
+        }
+        {
+            char conf[8]="", stop[8]="", v[16]="";
+            int steps = 12, adj = 1, backlash = 3; double settle = 0.8;
+            if (!param(qs,"stop",stop,sizeof stop) && body) param(body,"stop",stop,sizeof stop);
+            if (stop[0]=='1' || !strcmp(stop,"true")) {
+                char pb[32]; long jp; read_file(AF_PID, pb, sizeof pb); jp = atol(pb);
+                if (jp > 0) kill((pid_t)jp, SIGTERM);
+                af_set("failed");
+                respond_json(fd, "{\"ok\":true,\"stopped\":true}"); return;
+            }
+            if (!param(qs,"confirm",conf,sizeof conf) && body) param(body,"confirm",conf,sizeof conf);
+            if (!(conf[0]=='1' || !strcmp(conf,"true"))) {
+                const char *m = "{\"ok\":false,\"error\":\"autofocus sweeps the focuser automatically; resend with confirm=1\"}";
+                respond(fd, 409, "application/json", m, strlen(m)); return;
+            }
+            if (plink_status() != PLINK_UP) {
+                const char *m = "{\"ok\":false,\"error\":\"control link is down — connect and turn live view on first\"}";
+                respond(fd, 503, "application/json", m, strlen(m)); return;
+            }
+            if (af_running()) {
+                const char *m = "{\"ok\":false,\"error\":\"autofocus already running\"}";
+                respond(fd, 409, "application/json", m, strlen(m)); return;
+            }
+            if ((param(qs,"steps",v,sizeof v) || (body && param(body,"steps",v,sizeof v))) && v[0]) {
+                steps = atoi(v); if (steps < 3) steps = 3; if (steps > 40) steps = 40; }
+            v[0]=0; if ((param(qs,"adj",v,sizeof v) || (body && param(body,"adj",v,sizeof v))) && v[0]) {
+                adj = atoi(v); if (adj < 1) adj = 1; if (adj > 10) adj = 10; }
+            v[0]=0; if ((param(qs,"settle",v,sizeof v) || (body && param(body,"settle",v,sizeof v))) && v[0]) {
+                settle = atof(v); if (settle < 0) settle = 0; if (settle > 5) settle = 5; }
+            v[0]=0; if ((param(qs,"backlash",v,sizeof v) || (body && param(body,"backlash",v,sizeof v))) && v[0]) {
+                backlash = atoi(v); if (backlash < 0) backlash = 0; if (backlash > 20) backlash = 20; }
+            start_autofocus(steps, settle, adj, backlash);
+            respond_json(fd, "{\"ok\":true,\"started\":true}"); return;
+        }
+    }
+
     /* --------------------------------------------------- free program (283) */
 
     /* Fly the head with the jog, capture its pose as a keyframe, repeat, then
@@ -4147,6 +4253,7 @@ int main(int argc, char **argv) {
         }
     }
     if (!g_have_pos) { fprintf(stderr, "--lat and --lon are required (the solver hint needs them)\n"); return 2; }
+    g_http_port = port;   /* the autofocus job calls back in on this port */
 
     signal(SIGPIPE, SIG_IGN);
     /* NOTE: do NOT set SIGCHLD to SIG_IGN -- it makes popen()/pclose() and

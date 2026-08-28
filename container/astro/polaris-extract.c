@@ -21,7 +21,7 @@
 #include <jpeglib.h>
 #include <sys/time.h>
 
-typedef struct { double x, y, flux; int npix; } star_t;
+typedef struct { double x, y, flux, hfr; int npix; } star_t;
 
 static float* bgmap = NULL;      /* per-tile background */
 static float* nsmap = NULL;      /* per-tile noise (MAD -> sigma) */
@@ -60,6 +60,8 @@ static void usage(const char* me) {
 "  --max-pixels N    largest blob to keep       (default 500; rejects the moon,\n"
 "                    nebulosity and clipped glare)\n"
 "  --max-stars N     keep the brightest N       (default 300)\n"
+"  --focus-metric    print one autofocus line \"focus score=.. hfr=.. stars=.. sharp=..\"\n"
+"                    (score to MAXIMISE, median HFR of the brightest stars) and stop\n"
 "  --margin PX       ignore blobs within PX of the edge, full-res (default 16)\n"
 "  --tile PX         background tile size at the DECODED scale (default 64).\n"
 "                    Background and noise are measured per tile and\n"
@@ -144,6 +146,7 @@ int main(int argc, char** argv) {
     const char* fn = NULL;
     int ds = 4, minpix = 3, maxpix = 500, maxstars = 300, margin = 16, stats = 0;
     int gray_pgm = 0;   /* dump the decoded grayscale as a binary PGM, no stars */
+    int focus_metric = 0;   /* print one sharpness line for autofocus, no stars */
     double focal_mm = 0.0;                 /* from EXIF; 0 = unknown */
     char focalbuf[32];
     int y_bottom = 1;                 /* FITS convention by default */
@@ -176,6 +179,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--tile"))       tile = atoi(NEXT());
         else if (!strcmp(a, "--stats"))      stats = 1;
         else if (!strcmp(a, "--gray-pgm"))   gray_pgm = 1;
+        else if (!strcmp(a, "--focus-metric")) focus_metric = 1;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option: %s\n", a); usage(argv[0]); return 2; }
         #undef NEXT
@@ -295,7 +299,12 @@ int main(int argc, char** argv) {
         stack = (int*)malloc((size_t)cap * sizeof(int));
         stars = (star_t*)malloc((size_t)(maxstars * 8 + 1024) * sizeof(star_t));
         int starcap = maxstars * 8 + 1024;
-        if (!label || !stack || !stars) { fprintf(stderr, "out of memory\n"); return 1; }
+        /* Per-blob pixel record, so HFR (flux-weighted mean radius) can be
+         * computed in a second pass once the centroid is known. Bounded by
+         * maxpix -- a blob larger than that is dropped, not measured. */
+        int*    bpx = (int*)   malloc((size_t)(maxpix + 2) * sizeof(int));
+        double* bpv = (double*)malloc((size_t)(maxpix + 2) * sizeof(double));
+        if (!label || !stack || !stars || !bpx || !bpv) { fprintf(stderr, "out of memory\n"); return 1; }
         for (y = 0; y < H; y++) {
             for (x = 0; x < W; x++) {
                 size_t idx = (size_t)y * W + x;
@@ -313,6 +322,7 @@ int main(int argc, char** argv) {
                     int dx, dy;
                     if (v < 0) v = 0;
                     npix++; sx += cx * v; sy += cy * v; sf += v;
+                    if (npix <= maxpix + 1) { bpx[npix-1] = cur; bpv[npix-1] = v; }
                     if (cx < minx) minx = cx; if (cx > maxx) maxx = cx;
                     if (cy < miny) miny = cy; if (cy > maxy) maxy = cy;
                     if (npix > maxpix) { /* too big: drain and drop */
@@ -347,16 +357,73 @@ int main(int argc, char** argv) {
                     double fx = (sx / sf) * ds, fy = (sy / sf) * ds;
                     if (fx < margin || fy < margin || fx > fullW - margin || fy > fullH - margin)
                         continue;
+                    /* HFR: flux-weighted mean radius of the blob's pixels about
+                     * its centroid, in full-resolution px. Small = tight star =
+                     * sharp focus. This is the number autofocus minimises. */
+                    { double cx0 = sx / sf, cy0 = sy / sf, hnum = 0; int k;
+                      for (k = 0; k < npix; k++) {
+                          double drx = (bpx[k] % W) - cx0, dry = (bpx[k] / W) - cy0;
+                          hnum += bpv[k] * sqrt(drx*drx + dry*dry);
+                      }
+                      stars[nstars].hfr = (hnum / sf) * ds; }
                     stars[nstars].x = fx; stars[nstars].y = fy;
                     stars[nstars].flux = sf; stars[nstars].npix = npix;
                     nstars++;
                 }
             }
         }
+        free(bpx); free(bpv);
     }
 
     qsort(stars, nstars, sizeof(star_t), cmp_flux);
     if (nstars > maxstars) nstars = maxstars;
+
+    /* Autofocus metric: one line, no star list. The number to MAXIMISE is
+     * `score`. Near focus, stars are many and tight, so score rises as the
+     * median HFR of the brightest stars falls. In gross defocus every star is
+     * smeared below threshold and there is no HFR at all; there `score` falls
+     * back to a whole-frame gradient sharpness, which still climbs toward focus
+     * -- so a sweep can find its way from a blurred field into the star regime,
+     * then home in on the sharpest point. */
+    if (focus_metric) {
+        int nb = nstars < 30 ? nstars : 30, k;
+        double medhfr = -1, sharp = 0, score;
+        if (nb >= 1) {
+            double *hv = (double*)malloc((size_t)nb * sizeof(double));
+            if (hv) {
+                for (k = 0; k < nb; k++) hv[k] = stars[k].hfr;
+                for (k = 1; k < nb; k++) {                 /* insertion sort, tiny n */
+                    double t = hv[k]; int j = k - 1;
+                    while (j >= 0 && hv[j] > t) { hv[j+1] = hv[j]; j--; }
+                    hv[j+1] = t;
+                }
+                medhfr = (nb & 1) ? hv[nb/2] : 0.5 * (hv[nb/2 - 1] + hv[nb/2]);
+                free(hv);
+            }
+        }
+        {   /* mean |gradient| over the decoded gray -- always computable */
+            long cnt = 0; double acc = 0; int x2, y2;
+            for (y2 = 1; y2 < H - 1; y2++)
+                for (x2 = 1; x2 < W - 1; x2++) {
+                    size_t p = (size_t)y2 * W + x2;
+                    int gx = (int)gray[p+1] - gray[p-1]; if (gx < 0) gx = -gx;
+                    int gy = (int)gray[p+W] - gray[p-W]; if (gy < 0) gy = -gy;
+                    acc += gx + gy; cnt++;
+                }
+            sharp = cnt ? acc / (double)cnt : 0;
+        }
+        /* Score to MAXIMISE. The star term (many, tight stars) is multiplied by
+         * the whole-frame sharpness so gross defocus -- where a handful of bright
+         * star CORES can still read as deceptively tight HFR -- cannot fake a
+         * secondary peak: `sharp` falls monotonically all the way out, dragging
+         * the product down with it. With no stars at all, score IS sharp, so a
+         * sweep still climbs out of a blurred field toward where stars appear. */
+        if (nb >= 3 && medhfr > 0.01) score = (1000.0 * nb / medhfr) * sharp;
+        else                          score = sharp;
+        printf("focus score=%.4f hfr=%.4f stars=%d sharp=%.4f\n", score, medhfr, nstars, sharp);
+        free(gray); free(label); free(stack); free(stars); free(bgmap); free(nsmap);
+        return 0;
+    }
 
     gettimeofday(&tv1, NULL);
     if (focal_mm > 0) snprintf(focalbuf, sizeof focalbuf, "%.1fmm(exif)", focal_mm);
