@@ -22,6 +22,34 @@
   declares an intent with a 400 ms lease and the server owns both the repeat and
   the stop: a locked phone, a closed tab or a Wi-Fi drop mid-slew **stops** the
   head instead of leaving it running.
+- **An immersive, preview-first control screen with analog joysticks.** The
+  Control tab was rebuilt to compose the way the phone app does — a full-bleed
+  live-view **stage** with everything floating on top: two **draggable analog
+  joysticks** under both thumbs (pan/tilt left, rotation right), the shutter and
+  camera settings below, status and stage buttons in the corners. The sticks are
+  **velocity** controls — displacement sets direction _and_ speed (push to the
+  edge = full speed), the speed slider caps the top speed, the knob turns red
+  while moving, and a **double-tap re-centres that axis** (523), as in the app.
+  They ride the exact continuous fast-jog path the server already owned
+  (`speed:<±100..2500>`), so the 400 ms lease and the server dead-man cover them
+  unchanged: let go, lock the phone or close the tab and the head stops. Every
+  input — sticks, the arrow pads (now a tucked-away "precise nudge"), the arrow
+  keys — funnels through one `moveAxis()` sender, so a live speed change and the
+  lease keepalive can never double-drive the wire.
+- **Built for low-vision use at the scope.** A size control on the stage cycles
+  Normal → Large → Huge, scaling the preview, the joysticks and the text together
+  (the whole reason to control a mount from a browser instead of a phone), and
+  the choice persists. A fullscreen button fills the screen with the live view
+  **while keeping the joysticks overlaid**, so you can frame and jog on a big
+  image at once.
+- **Tilt compensation (538) and auto-level (549) in the Astro tab — track on an
+  unlevel tripod.** Surfaces the head's own **`SP_SET_TILT_STATE`**, the setting
+  the app buries three taps deep in a help sheet: with it on, the head corrects
+  for its own tilt from its attitude sensor, so deep-sky tracking doesn't need a
+  perfectly level tripod. It is a persistent setting, not motion, and the toggle
+  reads the head's current state (537) on entry rather than guessing. Auto-level
+  (549, which physically drives the head to level and so is confirm-gated and
+  refused mid-track) sits beside it for when you do want a mechanical level.
 - **`docs/APP-PROTOCOL.md`** (122 opcodes, every claim cited to the decompiled
   app) and **`docs/APP-FEATURES.md`** (the app's screens, programs and the
   traps in porting them).

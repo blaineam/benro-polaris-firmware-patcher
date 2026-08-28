@@ -111,6 +111,7 @@ class Mount:
         self.slewing = False
         self.mode = 8                          # Astro
         self.grail = False                     # Holy Grail ramp configured on
+        self.tilt_comp = False                 # tilt compensation (unlevel base)
         self.aligned = False
         self.t0 = time.time()
         self.moves = 0
@@ -452,6 +453,14 @@ class Handler(socketserver.BaseRequestHandler):
             self.send("527@ret:0;")
         elif cmd == "536":            # half-speed flag
             self.send("536@ret:0;")
+        elif cmd == "537":            # GET tilt-compensation flag
+            self.send(f"537@state:{1 if mount.tilt_comp else 0};")
+        elif cmd == "538":            # SET tilt-compensation (persistent, no motion)
+            with mount.lock:
+                mount.tilt_comp = args.get("state", "0") == "1"
+            self.send("538@ret:0;")
+        elif cmd == "549":            # auto-level — MOVES; sim just acks
+            self.send("549@ret:0;")
         elif cmd == "517":            # mechanical pose, radians
             with mount.lock:
                 az, alt = mount.reported()

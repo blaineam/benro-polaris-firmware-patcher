@@ -34,41 +34,43 @@
   <!-- ───────────────────────────── CONTROL ───────────────────────────── -->
   <section id="tab-control" class="tab">
 
-    <div class="viewwrap">
-      <!-- Live view is the head's own MJPEG stream. Loaded lazily by app.js so
-           a browser that cannot reach :8080 shows a reason instead of a broken
-           image icon. -->
+    <!-- Immersive stage: the live view fills it and the controls float on top,
+         the way the phone app composes its screen — joysticks under both thumbs,
+         status top-left, stage buttons top-right. Big by default, and the size
+         button scales the whole thing for low-vision use at the scope. -->
+    <div id="stage" class="stage">
       <img id="live" alt="">
       <div id="livemsg" class="livemsg">live view off</div>
-      <div class="viewoverlay">
-        <button id="previewtoggle" class="ghost sm" type="button">live view</button>
-        <span class="grow"></span>
-        <span id="camname" class="tiny dim"></span>
+
+      <div class="ovl tl"><span id="camname" class="stagechip" hidden></span></div>
+      <div class="ovl tr">
+        <button id="previewtoggle" class="gbtn" type="button" title="live view on/off" aria-label="live view">live</button>
+        <button id="sizebtn" class="gbtn" type="button" title="control &amp; text size" aria-label="control size">A+</button>
+        <button id="fsbtn" class="gbtn" type="button" title="fullscreen preview" aria-label="fullscreen preview">⤢</button>
+      </div>
+
+      <!-- Analog joysticks: displacement maps to direction AND speed, like the
+           phone app's sticks, on the SAME 400 ms lease + server dead-man — drag
+           to move, let go (or the browser dies) and the head stops. Pan/tilt
+           left, rotation right, under both thumbs. -->
+      <div class="stick xy" data-stick="xy" role="application" aria-label="pan and tilt joystick" tabindex="-1">
+        <div class="knob"></div><span class="axhint">pan · tilt</span>
+      </div>
+      <div class="stick rot" data-stick="rot" role="application" aria-label="rotation joystick" tabindex="-1">
+        <div class="knob"></div><span class="axhint">rotate</span>
       </div>
     </div>
 
-    <!-- Two single-axis pads rather than one free stick: the head is a 2-axis
-         mount and the app constrains its stick the same way. Hold to move,
-         release to stop; the release is guaranteed server-side by the lease. -->
-    <div class="pads">
-      <div class="pad" data-axis="tilt" aria-label="tilt">
-        <button class="jog up"   data-dir="1"  type="button" aria-label="tilt up">▲</button>
-        <button class="recentre" data-axis-id="2" type="button" title="re-zero tilt">◎</button>
-        <button class="jog down" data-dir="-1" type="button" aria-label="tilt down">▼</button>
-      </div>
-      <div class="pad wide" data-axis="pan" aria-label="pan">
-        <button class="jog left"  data-dir="-1" type="button" aria-label="pan left">◀</button>
-        <button class="recentre" data-axis-id="1" type="button" title="re-zero pan">◎</button>
-        <button class="jog right" data-dir="1"  type="button" aria-label="pan right">▶</button>
-      </div>
-      <div class="pad" data-axis="rot" aria-label="rotation">
-        <button class="jog ccw" data-dir="-1" type="button" aria-label="rotate anticlockwise">↺</button>
-        <button class="recentre" data-axis-id="3" type="button" title="re-zero rotation">◎</button>
-        <button class="jog cw"  data-dir="1"  type="button" aria-label="rotate clockwise">↻</button>
-      </div>
+    <!-- Shutter + record, big, right under the preview. -->
+    <div class="shutterrow">
+      <button id="shoot" class="shutter" type="button">
+        <span class="ring"></span><span class="label">hold to shoot</span>
+      </button>
+      <button id="rec" class="ghost rec" type="button">● rec</button>
     </div>
 
-    <div class="row">
+    <!-- Speed (the stick's top speed) + level — a slim bar. -->
+    <div class="row underrow">
       <label class="gear">
         speed
         <input id="gear" type="range" min="1" max="5" value="3" step="1">
@@ -88,12 +90,29 @@
       <div class="exposlot" data-get="266" data-set="259" data-key="wb"><span class="lbl">WB</span><select disabled></select></div>
     </div>
 
-    <div class="shutterrow">
-      <button id="shoot" class="shutter" type="button">
-        <span class="ring"></span><span class="label">hold to shoot</span>
-      </button>
-      <button id="rec" class="ghost rec" type="button">● record</button>
-    </div>
+    <!-- Precise single-axis pads + keyboard, tucked away — the sticks are the
+         primary control, these are the fallback for a fine nudge. -->
+    <details class="precise">
+      <summary>Precise nudge &amp; keyboard</summary>
+      <div class="pads">
+        <div class="pad" data-axis="tilt" aria-label="tilt">
+          <button class="jog up"   data-dir="1"  type="button" aria-label="tilt up">▲</button>
+          <button class="recentre" data-axis-id="2" type="button" title="re-zero tilt">◎</button>
+          <button class="jog down" data-dir="-1" type="button" aria-label="tilt down">▼</button>
+        </div>
+        <div class="pad wide" data-axis="pan" aria-label="pan">
+          <button class="jog left"  data-dir="-1" type="button" aria-label="pan left">◀</button>
+          <button class="recentre" data-axis-id="1" type="button" title="re-zero pan">◎</button>
+          <button class="jog right" data-dir="1"  type="button" aria-label="pan right">▶</button>
+        </div>
+        <div class="pad" data-axis="rot" aria-label="rotation">
+          <button class="jog ccw" data-dir="-1" type="button" aria-label="rotate anticlockwise">↺</button>
+          <button class="recentre" data-axis-id="3" type="button" title="re-zero rotation">◎</button>
+          <button class="jog cw"  data-dir="1"  type="button" aria-label="rotate clockwise">↻</button>
+        </div>
+      </div>
+      <p class="tiny dim">Arrow keys jog pan/tilt, “,” / “.” rotate, Esc stops. Double-tap a stick to re-centre that axis.</p>
+    </details>
   </section>
 
   <!-- ──────────────────────────── PROGRAMS ───────────────────────────── -->
@@ -508,6 +527,31 @@
     </div>
 
     <div id="astro-controls" hidden>
+      <!-- Level the base before aligning. Tilt compensation is the one that means
+           you don't have to get the tripod perfectly level for deep sky. -->
+      <div class="card">
+        <h3>Level the head</h3>
+        <label class="switch inline">
+          <input id="astro-tilt" type="checkbox">
+          <span><b>Tilt compensation</b> — track on an unlevel tripod</span>
+        </label>
+        <p class="tiny dim">
+          When it's on, the head corrects for its own tilt from its attitude
+          sensor, so deep-sky tracking doesn't need a perfectly level tripod — it
+          just needs to know which way is down, which it does. Turn it
+          <b>off</b> only if you've levelled the base by hand. It persists on the
+          head and measurably changes tracking accuracy.
+        </p>
+        <div class="markrow">
+          <button id="astro-level" class="ghost" type="button">Auto-level the head now</button>
+        </div>
+        <p class="tiny dim">
+          Auto-level physically drives the head to level — do it <b>before</b> you
+          align, never while tracking (it moves the head). With tilt compensation
+          on you can usually skip it.
+        </p>
+      </div>
+
       <div class="card">
         <h3>Align</h3>
         <p class="tiny dim">

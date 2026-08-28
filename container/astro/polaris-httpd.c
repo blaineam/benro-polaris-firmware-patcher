@@ -1754,6 +1754,11 @@ static const opcode_policy_t OPCODES[] = {
     { 527, "set-heading",   3, 1, "compass heading; UNSIGNED [0,360) offset by 180" },
     { 547, "auto-level-en", 3, 0, "read the auto-level enable flag" },
     { 548, "set-auto-level-en", 3, 0, "en:<0|1> -- persistent" },
+    /* Tilt compensation: the head corrects for a non-level base from its own
+     * attitude, so deep-sky tracking does not need a perfectly level tripod. A
+     * persistent SETTING, not motion -- so it is not confirm-gated. (538) */
+    { 537, "tilt-comp-get", 3, 0, "read the tilt-compensation flag -> state:<0|1>" },
+    { 538, "tilt-comp",     3, 0, "state:<0|1> -- compensate for an unlevel base; persistent" },
 
     /* NOT LISTED, DELIBERATELY:
      *   530  multi-step star alignment -- wedges the motors on repeat, and the

@@ -236,6 +236,20 @@ photo mode. Tracking is `SP_SET_TRACK_AU_STATE` (531) with a sidereal/lunar rate
 and a full/half toggle — and the half-rate flag is inverted on the wire
 (`halfSpeed:1` = half), which the module handles.
 
+**Tilt compensation — track on an unlevel tripod.** The Astro tab surfaces
+`SP_SET_TILT_STATE` (538), a head-side setting the phone app buries three taps
+deep in a help sheet: *"When Polaris is not horizontal, turn on tilt compensation
+to compensate for the tilt angle. If it is off, be sure to level the device."*
+With it on, the head corrects for its own tilt from its attitude sensor, so
+deep-sky tracking does not need a perfectly level tripod — only a base that isn't
+moving. It is persistent and it measurably changes tracking accuracy, so the
+toggle reads the head's current value (537) when you enter astro rather than
+defaulting. Beside it, **auto-level** (549) physically drives the head to level;
+it *moves*, so it is confirm-gated and must be done **before** aligning, never
+while tracking. With tilt compensation on you can usually skip it. These are the
+two different things the app is careful to separate (`docs/APP-FEATURES.md 4.4`):
+a setting that tolerates tilt, versus an action that removes it.
+
 **Compass alignment without a phone.** The head has to know which way is north
 before it can point at a star; the app sends its handset magnetometer heading
 (`SP_SET_YAW`, 527). The browser offers three routes, best first:

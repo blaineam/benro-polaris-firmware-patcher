@@ -211,13 +211,44 @@ function speedForGear(g) {
   return table[g] || 900;
 }
 
+/* Every jog — buttons, keys, sticks — funnels through moveAxis so the 400 ms
+   lease is renewed one way. `affirm` is the sole sender; the per-axis timer is a
+   keepalive that fires only when a live speed change hasn't already sent. */
+function affirm(axis) {
+  var h = holds[axis];
+  if (!h) return;
+  h.last = Date.now();
+  post('/api/move', { axis: axis, speed: h.speed });
+}
+
+/* Set an axis's signed speed (0 stops it). Creates/updates the hold and its
+   keepalive, sending promptly on a change but throttled so a drag can't flood
+   the AP. `dir` (±1) is stored for button/key holds so a gear change can
+   recompute; a stick passes no dir and re-derives speed on its next move. */
+function moveAxis(axis, speed, btn, dir) {
+  if (S.link !== 'up') return;
+  speed = Math.round(speed) || 0;
+  if (!speed) { endHold(axis); return; }
+  var h = holds[axis], fresh = false;
+  if (!h) {
+    fresh = true;
+    h = holds[axis] = { speed: 0, last: 0, btn: null, dir: 0,
+      timer: setInterval(function () {
+        var hh = holds[axis];
+        if (hh && Date.now() - hh.last >= RENEW_MS) affirm(axis);
+      }, RENEW_MS) };
+  }
+  if (btn) { h.btn = btn; btn.classList.add('held'); }
+  if (dir !== undefined) h.dir = dir;
+  var changed = h.speed !== speed;
+  h.speed = speed;
+  if (fresh || (changed && Date.now() - h.last >= 70)) affirm(axis);
+}
+
+/* Buttons + keyboard: a fixed speed from the gear, one direction. */
 function startHold(axis, dir, btn) {
-  if (holds[axis] || S.link !== 'up') return;
-  var speed = dir * speedForGear(S.gear);
-  var tick = function () { post('/api/move', { axis: axis, speed: speed }); };
-  tick();
-  holds[axis] = { timer: setInterval(tick, RENEW_MS), btn: btn };
-  if (btn) btn.classList.add('held');
+  if (S.link !== 'up') return;
+  moveAxis(axis, dir * speedForGear(S.gear), btn, dir);
   if (navigator.vibrate) navigator.vibrate(8);
 }
 
@@ -232,13 +263,103 @@ function endHold(axis) {
   post('/api/move', { axis: axis, speed: 0 });
 }
 
+function resetSticks() {
+  $$('.stick').forEach(function (s) {
+    s.classList.remove('active');
+    var k = $('.knob', s); if (k) k.style.transform = 'translate(0,0)';
+  });
+}
+
 function stopEverything() {
   Object.keys(holds).forEach(function (a) {
     clearInterval(holds[a].timer);
     if (holds[a].btn) holds[a].btn.classList.remove('held');
     delete holds[a];
   });
+  resetSticks();
   post('/api/stop', {});
+}
+
+/* Analog joysticks — displacement -> direction AND speed, on the same lease and
+   dead-man as the pads. Past its dead-zone a stick maps to [SPEED_MIN, the
+   gear's top speed], so the speed slider caps sensitivity. */
+var STICK_DEAD = 0.14;   /* fraction of travel ignored around the centre */
+
+function stickSpeed(frac, maxSpeed) {
+  var a = Math.abs(frac);
+  if (a <= STICK_DEAD) return 0;
+  var f = (a - STICK_DEAD) / (1 - STICK_DEAD);          /* 0..1 past the dead-zone */
+  var mag = maxSpeed <= 100 ? maxSpeed : 100 + f * (maxSpeed - 100);
+  return (frac < 0 ? -1 : 1) * mag;
+}
+
+function wireSticks() {
+  $$('.stick').forEach(function (stick) {
+    var kind = stick.dataset.stick;      /* 'xy' or 'rot' */
+    var knob = $('.knob', stick);
+    var active = false, pid = null, lastTap = 0;
+
+    function place(nx, ny) {
+      var r = stick.clientWidth / 2 - knob.clientWidth / 2;
+      knob.style.transform = 'translate(' + (nx * r).toFixed(1) + 'px,' + (ny * r).toFixed(1) + 'px)';
+    }
+
+    function update(e) {
+      var rect = stick.getBoundingClientRect();
+      var rad = rect.width / 2;
+      var nx = (e.clientX - (rect.left + rect.width / 2)) / rad;
+      var ny = (e.clientY - (rect.top + rect.height / 2)) / rad;
+      if (kind === 'xy') {
+        var m = Math.hypot(nx, ny); if (m > 1) { nx /= m; ny /= m; }   /* clamp to the circle */
+        place(nx, ny);
+        var maxS = speedForGear(S.gear);
+        moveAxis('pan', stickSpeed(nx, maxS));
+        moveAxis('tilt', stickSpeed(-ny, maxS));      /* screen-up = tilt up */
+      } else {
+        if (nx > 1) nx = 1; if (nx < -1) nx = -1;
+        place(nx, 0);
+        moveAxis('rot', stickSpeed(nx, speedForGear(S.gear)));
+      }
+    }
+
+    function release() {
+      if (!active) return;
+      active = false; pid = null;
+      stick.classList.remove('active');
+      knob.style.transform = 'translate(0,0)';        /* snap back to centre */
+      if (kind === 'xy') { endHold('pan'); endHold('tilt'); }
+      else endHold('rot');
+    }
+
+    stick.addEventListener('pointerdown', function (e) {
+      e.preventDefault();
+      if (S.link !== 'up') return;
+      /* Double-tap a stick re-centres its axis (523), like the app. */
+      var now = Date.now();
+      if (now - lastTap < 300) {
+        lastTap = 0;
+        if (kind === 'xy') { send(523, 'axis:1;', true); send(523, 'axis:2;', true); }
+        else send(523, 'axis:3;', true);
+        if (navigator.vibrate) navigator.vibrate([8, 40, 8]);
+        return;
+      }
+      lastTap = now;
+      active = true; pid = e.pointerId;
+      try { stick.setPointerCapture(pid); } catch (_) {}
+      stick.classList.add('active');
+      if (navigator.vibrate) navigator.vibrate(8);
+      update(e);
+    });
+    stick.addEventListener('pointermove', function (e) {
+      if (active && e.pointerId === pid) update(e);
+    });
+    /* Release ONLY on up/cancel — a joystick finger is allowed to leave the
+       widget's bounds mid-drag, so pointerleave must NOT stop it. */
+    ['pointerup', 'pointercancel'].forEach(function (ev) {
+      stick.addEventListener(ev, release);
+    });
+    stick.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  });
 }
 
 function wireJog() {
@@ -304,11 +425,12 @@ function wireJog() {
   gear.addEventListener('input', function () {
     S.gear = parseInt(gear.value, 10);
     $('#gearout').textContent = S.gear;
-    /* Re-affirm any in-flight hold at the new speed rather than waiting for
-       the next renewal, so the gear slider feels live under a held button. */
+    /* Re-affirm any in-flight BUTTON/key hold at the new top speed rather than
+       waiting for the next renewal, so the slider feels live under a held
+       button. Stick holds (dir 0) re-derive speed on their next move. */
     Object.keys(holds).forEach(function (axis) {
-      var dirSign = holds[axis].btn && holds[axis].btn.classList.contains('held') ? 1 : 1;
-      void dirSign;
+      var h = holds[axis];
+      if (h.dir) moveAxis(axis, h.dir * speedForGear(S.gear));
     });
   });
 
@@ -351,6 +473,42 @@ function setLive(on) {
     msg.textContent = 'live view off';
     send(291, 'state:0;');
   }
+}
+
+/* ── stage: accessibility size + fullscreen preview ──
+   The size button cycles Normal -> Large -> Huge, scaling the stage, the
+   joysticks and the text together — the whole point of a browser control for
+   low-vision use. The choice persists. Fullscreen keeps the joysticks and
+   shutter overlaid, so you can frame and jog on a big image at once. */
+function applySize(sz) {
+  var root = document.documentElement;
+  if (sz === 'lg' || sz === 'xl') root.setAttribute('data-size', sz);
+  else { root.removeAttribute('data-size'); sz = ''; }
+  var b = $('#sizebtn');
+  if (b) b.textContent = sz === 'lg' ? 'A+' : sz === 'xl' ? 'A++' : 'A';
+  try { localStorage.setItem('polaris-size', sz); } catch (_) {}
+  resetSticks();   /* a size change moves the sticks — recentre any knob */
+  return sz;
+}
+
+function wireStage() {
+  var order = ['', 'lg', 'xl'], cur = '';
+  try { cur = localStorage.getItem('polaris-size') || ''; } catch (_) {}
+  cur = applySize(cur);
+
+  $('#sizebtn').addEventListener('click', function () {
+    cur = applySize(order[(order.indexOf(cur) + 1) % order.length]);
+  });
+
+  var stage = $('#stage');
+  var fsOn = function () { return !!(document.fullscreenElement || document.webkitFullscreenElement); };
+  $('#fsbtn').addEventListener('click', function () {
+    if (fsOn()) { (document.exitFullscreen || document.webkitExitFullscreen || function(){}).call(document); }
+    else { (stage.requestFullscreen || stage.webkitRequestFullscreen || function(){}).call(stage); }
+  });
+  ['fullscreenchange', 'webkitfullscreenchange'].forEach(function (ev) {
+    document.addEventListener(ev, function () { $('#fsbtn').classList.toggle('on', fsOn()); });
+  });
 }
 
 /* ─────────────────────────────── exposure ──────────────────────────────── */
@@ -910,10 +1068,35 @@ function readPhoneCompass() {
 
 function wireAstro() {
   $('#astro-enter').addEventListener('change', function () {
-    post(this.checked ? '/api/astro/enter' : '/api/astro/leave', {}).then(function (r) {
+    var entering = this.checked;
+    post(entering ? '/api/astro/enter' : '/api/astro/leave', {}).then(function (r) {
       if (r && r.ok === false) setHint('<b>Astro:</b> ' + (r.error || ''));
+      if (entering) {
+        /* Ask the head for its current tilt-compensation flag so the toggle
+           reflects reality rather than defaulting to off. */
+        send(537, '', false);
+        setTimeout(function () {
+          var t = S.ops['537']; if (t) $('#astro-tilt').checked = kv(t.args).state === '1';
+        }, 600);
+      }
       astroRefresh();
     });
+  });
+
+  /* Tilt compensation (538): the setting that lets deep-sky tracking work on an
+     unlevel tripod. Persistent, no motion — so no confirm. */
+  $('#astro-tilt').addEventListener('change', function () {
+    send(538, 'state:' + (this.checked ? 1 : 0) + ';', false);
+    setHint(this.checked
+      ? '<b>Tilt compensation on</b> — the head will correct for an unlevel base.'
+      : '<b>Tilt compensation off</b> — level the tripod by hand for accurate tracking.');
+  });
+
+  /* Auto-level (549) physically drives the head to level. It MOVES, so it is
+     confirmed, and it must not run while tracking. */
+  $('#astro-level').addEventListener('click', function () {
+    send(549, 'state:1;', true);
+    setHint('<b>Auto-levelling…</b> let the head settle before you align, and never level while tracking.');
   });
 
   /* Plate solve — the compass-free path. Kicks the solver with apply=1 and
@@ -1385,6 +1568,8 @@ function wireTabs() {
 
 wireTabs();
 wireJog();
+wireSticks();
+wireStage();
 wireExposure();
 wireShutter();
 wireSettings();
