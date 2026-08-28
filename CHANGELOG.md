@@ -278,6 +278,11 @@
   byte-identical, `CAPTURE-PATH 2.md` a stale 352-line copy of the 549-line
   canonical), and added a complete **HTTP API reference** to `docs/ASTRO.md`
   covering every `/api/*` route.
+- **Runtime site save persisted to the wrong file.** `persist_site_latlon` wrote
+  `$ASTRO/site.conf` (`/app/astro/site.conf`), but the boot script reads
+  `/app/sd/polaris-astro/site.conf` — so a saved location updated the running
+  server yet would not have survived a reboot, contradicting the UI. It now writes
+  the boot-read file (new `--site-conf`, defaulting there), preserving the other keys.
 
 ### Fixed — real-sky session, 2026-08-19
 

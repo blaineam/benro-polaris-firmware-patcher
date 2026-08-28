@@ -106,6 +106,10 @@ static const char *g_mount_host = "127.0.0.1";
 static int         g_mount_port = 9090;
 static int         g_http_port  = 8080;   /* our own port, for the autofocus job */
 static const char *g_media_root = "/app/sd";   /* where captured JPEGs land */
+/* The site.conf the BOOT SCRIPT reads (polaris-astro-boot.sh: SITE=...) and
+ * install_astro.sh writes -- NOT g_astro/site.conf. Runtime lat/lon persistence
+ * must land here or it will not survive a reboot. */
+static const char *g_site_conf = "/app/sd/polaris-astro/site.conf";
 static double g_lat = 0.0, g_lon = 0.0;
 static int    g_have_pos = 0;
 static double g_focal = 400.0;
@@ -881,10 +885,10 @@ static unsigned long media_hash(const char *s) {   /* djb2 */
  * (the boot script reads LAT=/LON= from it). Rewrites only those two lines and
  * keeps everything else — FOCAL, the start-disabled flag, etc. */
 static void persist_site_latlon(double lat, double lon) {
-    char path[PATH_MAX], tmp[PATH_MAX], line[512];
+    char tmp[PATH_MAX], line[512];
+    const char *path = g_site_conf;
     FILE *in, *out;
-    snprintf(path, sizeof path, "%s/site.conf", g_astro);
-    snprintf(tmp,  sizeof tmp,  "%s/site.conf.tmp", g_astro);
+    snprintf(tmp, sizeof tmp, "%s.tmp", g_site_conf);
     out = fopen(tmp, "w");
     if (!out) return;
     in = fopen(path, "r");
@@ -4473,6 +4477,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--indi-port") && i+1 < argc) indi_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-discovery")) discovery = 0;
         else if (!strcmp(argv[i], "--media-root") && i+1 < argc) g_media_root = argv[++i];
+        else if (!strcmp(argv[i], "--site-conf") && i+1 < argc) g_site_conf = argv[++i];
         else if (!strcmp(argv[i], "--mount-host") && i+1 < argc) g_mount_host = argv[++i];
         else if (!strcmp(argv[i], "--mount-port") && i+1 < argc) g_mount_port = atoi(argv[++i]);
         else {
