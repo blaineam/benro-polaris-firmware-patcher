@@ -1318,6 +1318,7 @@ function wireAstro() {
   wireTargets();
   wireAstroCapture();
   wireAstroAutofocus();
+  wireAstroTools();
 }
 
 /* A compact deep-sky + bright-star catalogue (J2000, degrees). Fixed coordinates
@@ -1626,6 +1627,15 @@ function wireAstroAutofocus() {
     post('/api/astro/autofocus', { stop: 1 }).then(function () { afTick(); });
   });
   afTick();   /* pick up a sweep already running (e.g. after a reload) */
+}
+
+/* Remember whether the diagnostics/bridges section is folded open. */
+function wireAstroTools() {
+  var d = $('#astro-tools'); if (!d) return;
+  try { if (localStorage.getItem('polaris-astro-tools') === '1') d.open = true; } catch (_) {}
+  d.addEventListener('toggle', function () {
+    try { localStorage.setItem('polaris-astro-tools', d.open ? '1' : ''); } catch (_) {}
+  });
 }
 
 /* ── plate solving, guiding, status — the /legacy dashboard, folded in native ──

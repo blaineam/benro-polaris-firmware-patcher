@@ -475,13 +475,34 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
    one long scroll, so the space is used and the app feels composed, not listy. */
 @media (min-width: 720px) {
   .tab { max-width: 940px; }
-  #tab-astro:not([hidden]),
+  /* Settings stays a two-column masonry — its cards are independent. */
   #tab-settings:not([hidden]) { display: block; column-count: 2; column-gap: 14px; }
-  #tab-astro:not([hidden]) > *,
   #tab-settings:not([hidden]) > * { break-inside: avoid; margin-bottom: 14px; }
-  /* the astro session block groups its own cards, so let it span both columns */
-  #astro-controls { column-span: all; }
+  /* Astro is a SEQUENCE — level → align → focus → aim → capture — so it reads
+     straight down one narrower column, not a scrambled masonry. */
+  #tab-astro:not([hidden]) { max-width: 680px; margin-inline: auto; }
 }
+
+/* Numbered step badge on the guided-flow card headings. */
+.stepn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--acc); color: #04121f; font-size: 12px; font-weight: 700;
+  margin-right: 9px; vertical-align: 2px; flex: 0 0 auto;
+}
+
+/* The diagnostics/bridges cards, folded away so the guided flow stays short. */
+.astro-tools { margin-bottom: 12px; }
+.astro-tools > summary {
+  cursor: pointer; padding: 13px 15px; border-radius: var(--r);
+  background: var(--card); border: 1px solid var(--line); color: var(--fg);
+  font-weight: 600; list-style: none;
+}
+.astro-tools > summary::-webkit-details-marker { display: none; }
+.astro-tools > summary::before { content: '▸'; margin-right: 9px; color: var(--dim); }
+.astro-tools[open] > summary::before { content: '▾'; }
+.astro-tools[open] > summary { margin-bottom: 12px; }
+.astro-tools > summary .dim { font-weight: 400; }
 
 /* Wider screens: keep the control stage from sprawling so the joysticks stay
    within thumb reach on a big monitor (its height is already max-height-capped). */
@@ -514,6 +535,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 
 /* A smaller inline toggle used inside a panel (the Sun event picker). */
 .segbar.sub { margin-bottom: 0; }
+.seggroup { margin-bottom: 10px; }
+.seggroup .segbar { margin-bottom: 0; }
+.seglabel { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--dim); margin: 0 0 5px 2px; }
 .seg2 {
   flex: 1 1 0; min-height: 38px;
   background: var(--card2); color: var(--dim);

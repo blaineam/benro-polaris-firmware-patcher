@@ -166,15 +166,25 @@
 
     <!-- The chooser, hidden while a programme runs. -->
     <div id="progpick">
-      <div class="segbar" role="tablist">
-        <button class="seg on" data-prog="lapse">Timelapse</button>
-        <button class="seg" data-prog="pano">Panorama</button>
-        <button class="seg" data-prog="hdr">HDR</button>
-        <button class="seg" data-prog="focus">Focus stack</button>
-        <button class="seg" data-prog="plc">Program</button>
-        <button class="seg" data-prog="pathlapse">Path-lapse</button>
-        <button class="seg" data-prog="sun">Sun</button>
-        <button class="seg" data-prog="grail">Holy Grail</button>
+      <!-- Grouped: interval captures that run OVER TIME, and single composite
+           SEQUENCES. Both rows share one .seg wiring (chosen by data-prog). -->
+      <div class="seggroup">
+        <span class="seglabel">Over time</span>
+        <div class="segbar" role="tablist">
+          <button class="seg on" data-prog="lapse">Timelapse</button>
+          <button class="seg" data-prog="pathlapse">Path-lapse</button>
+          <button class="seg" data-prog="sun">Sun</button>
+          <button class="seg" data-prog="grail">Holy Grail</button>
+        </div>
+      </div>
+      <div class="seggroup">
+        <span class="seglabel">Sequences</span>
+        <div class="segbar" role="tablist">
+          <button class="seg" data-prog="pano">Panorama</button>
+          <button class="seg" data-prog="hdr">HDR</button>
+          <button class="seg" data-prog="focus">Focus stack</button>
+          <button class="seg" data-prog="plc">Program</button>
+        </div>
       </div>
 
       <!-- Timelapse -->
@@ -561,7 +571,7 @@
       <!-- Level the base before aligning. Tilt compensation is the one that means
            you don't have to get the tripod perfectly level for deep sky. -->
       <div class="card">
-        <h3>Level the head</h3>
+        <h3><span class="stepn">1</span>Level the head</h3>
         <label class="switch inline">
           <input id="astro-tilt" type="checkbox">
           <span><b>Tilt compensation</b> — track on an unlevel tripod</span>
@@ -584,7 +594,7 @@
       </div>
 
       <div class="card">
-        <h3>Align</h3>
+        <h3><span class="stepn">2</span>Align</h3>
         <p class="tiny dim">
           The head needs to know which way is north before it can point at a
           star. Three ways, best first:
@@ -630,7 +640,7 @@
       </div>
 
       <div class="card">
-        <h3>Track</h3>
+        <h3><span class="stepn">3</span>Track</h3>
         <div class="row">
           <label class="seg-inline">
             Rate
@@ -652,7 +662,7 @@
 
       <!-- Astro autofocus: sweep the focuser, settle on the sharpest stars. -->
       <div class="card">
-        <h3>Auto-focus <span class="dim">— tack-sharp stars</span></h3>
+        <h3><span class="stepn">4</span>Auto-focus <span class="dim">— tack-sharp stars</span></h3>
         <p class="tiny dim">
           Sweeps the focuser and settles where the stars are tightest — smallest
           <b>HFR</b>, scored from the live view at each step, exactly how NINA and
@@ -684,7 +694,7 @@
 
       <!-- Go to a catalogue target and track it. -->
       <div class="card">
-        <h3>Go to a target</h3>
+        <h3><span class="stepn">5</span>Go to a target</h3>
         <p class="tiny dim">
           Pick a deep-sky object and the head slews to it and tracks. Plate-solve
           align first, so it lands on target.
@@ -702,7 +712,7 @@
 
       <!-- Astro capture: the head's own in-head stacking sequence. -->
       <div class="card">
-        <h3>Capture stacked images</h3>
+        <h3><span class="stepn">6</span>Capture stacked images</h3>
         <p class="tiny dim">
           Starts the head's own astro interval sequence — it shoots and stacks
           in-head. With <b>tilt compensation</b> and <b>auto-guiding</b> on
@@ -727,6 +737,11 @@
         <button id="cap-start" class="startbtn" type="button">Start astro capture</button>
       </div>
     </div>
+
+      <!-- The always-on diagnostics and machine bridges, folded away so the
+           guided flow above stays short. The details' open state persists. -->
+      <details class="astro-tools" id="astro-tools">
+        <summary>Diagnostics &amp; bridges <span class="dim">— solver, guiding, mount status, protocols</span></summary>
 
       <!-- Plate solving — the /legacy solver, folded in natively. -->
       <div class="card">
@@ -816,6 +831,7 @@
           <dt>LX200</dt><dd class="mono">this host : <span id="br-lx">10001</span></dd>
         </dl>
       </div>
+      </details>
   </section>
 
   <!-- ───────────────────────────── SETTINGS ──────────────────────────── -->
