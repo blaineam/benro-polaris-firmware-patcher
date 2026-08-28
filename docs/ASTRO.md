@@ -411,6 +411,42 @@ stubbed focuser settles on the true peak and returns exactly there). Closed-loop
 motion against a real focuser and sky is hardware-validated later — the bench has
 no head, camera, or focuser.
 
+### Media gallery
+
+Captured JPEGs land on the Polaris SD (see [CAPTURE-PATH.md](CAPTURE-PATH.md))
+under `/app/sd/{normal,starskyStack,HDR,panorama,focusStack,sun}` and
+`/app/sd/Lapse/class_*`. The **Gallery** tab browses them. The head exposes no
+thumbnail endpoint — the phone app pulls whole ~9 MB frames one at a time — so,
+running beside the files, the server makes a small colour thumbnail per photo and
+caches it (`polaris-extract --thumb`; a 6000×4000 frame → a ~2 KB 320-px thumb).
+
+- **`/api/media/list`** — the capture dirs walked, newest first, as JSON
+  (`path`, `cat`, `size`, `mtime`).
+- **`/api/media/thumb?path=<rel>`** — the cached thumbnail (generated on first
+  request; the cache key folds in the file's mtime so a re-shot frame regenerates).
+- **`/api/media/full?path=<rel>`** — the full frame, streamed in 64 KB chunks so
+  a 9 MB file is never read whole into memory on the head.
+- `--media-root` sets the root (default `/app/sd`).
+
+**Security.** `path` is attacker-controllable, so it is confined to a `.jpg`
+under one of the known capture categories, every character whitelisted to
+`[A-Za-z0-9._/-]` (no `..`, and nothing that could break out of the single-quoted
+shell argument), and the resolved file must `realpath` INSIDE the media root.
+Wifi keys, logs, and configs elsewhere on the SD are unreachable. Traversal,
+encoded traversal, non-category, non-jpg, absolute-path, and shell-metacharacter
+paths are all refused (verified).
+
+### Panorama shot-position grid
+
+The panorama panel (Programs ▸ Panorama) draws the sweep as a `cols × rows` grid
+— the planned layout with the start corner marked before you commit, and, while a
+panorama runs, each cell lighting up **shot → shooting → to-go** as the head works
+through it. The fill order follows the head's traversal for the exposed paMode-0
+grid: a boustrophedon (serpentine) from the chosen start corner, or an outward
+spiral for a centre start. Like the rest of the inferred panorama binding the UI
+labels the fill *order* as assumed — the *count* the cells fill to is the head's
+own number, from the `step:3` progress poll.
+
 ## Web UI
 
 `http://<polaris ip>:8090/` — solve status, last solution (RA/Dec, roll, pixel

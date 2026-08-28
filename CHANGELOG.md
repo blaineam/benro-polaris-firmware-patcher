@@ -230,6 +230,25 @@
   two-column masonry, with the always-on diagnostics/bridges cards folded into a
   collapsible. Programs' eight-segment chooser is grouped into "Over time" and
   "Sequences". Verified in-browser on mobile and desktop.
+- **Panorama shot-position grid.** The pano panel now draws the sweep as a
+  cols×rows grid — the planned layout with the start corner marked, and, while a
+  panorama runs, each cell lighting up shot → shooting → to-go as the head works
+  through it. The fill follows the head's traversal for the exposed paMode-0 grid
+  (a serpentine from the start corner, or an outward spiral for a centre start),
+  labelled as assumed while the count is the head's own. `prog_status_json` now
+  emits `start_dir`. Traversal verified for all corners, centre spiral, and a
+  360-cell grid.
+- **Media gallery — browse the SD with real thumbnails.** The head has no
+  thumbnail endpoint, so the phone app pulls whole ~9 MB frames to show a gallery;
+  running beside the files we generate a small colour thumbnail per photo
+  (`polaris-extract --thumb`, a 6000×4000 frame → a ~2 KB 320-px thumb) and cache
+  it. New endpoints `/api/media/{list,thumb,full}` (new `--media-root`, default
+  `/app/sd`): list walks the capture dirs newest-first, thumb serves the cached
+  thumbnail, full streams the frame in 64 KB chunks. The `path` parameter is
+  confined to a .jpg under a known capture category, character-whitelisted, and
+  realpath-checked inside the root — nothing else on the SD is reachable (seven
+  attack vectors verified refused). New **Gallery tab**: a thumbnail grid with
+  category filters and a tap-for-full lightbox.
 
 ### Fixed
 
