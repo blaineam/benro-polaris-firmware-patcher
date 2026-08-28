@@ -876,11 +876,85 @@ function panoParams() {
   };
 }
 
+/* The head sweeps a cols×rows grid; the order it visits cells decides which cell
+   a given frame count has reached. For a corner start it serpentines (across a
+   row, down, back across the next); for a centre start it spirals outward, so the
+   middle of the scene is captured first. This is the app's documented behaviour
+   for the exposed paMode 0 — but like the rest of the panorama binding it is
+   INFERRED, so the grid labels the fill order as assumed while the COUNT the
+   cells fill to is the head's own authoritative number. */
+function panoSpiral(cols, rows) {
+  var r = Math.floor((rows - 1) / 2), c = Math.floor((cols - 1) / 2);
+  var order = [], seen = {}, total = cols * rows, guard = 0;
+  function push(rr, cc) {
+    var k = rr + ',' + cc;
+    if (rr >= 0 && rr < rows && cc >= 0 && cc < cols && !seen[k]) { seen[k] = 1; order.push([rr, cc]); }
+  }
+  push(r, c);
+  var dr = [0, 1, 0, -1], dc = [1, 0, -1, 0], dir = 0, steps = 1;
+  while (order.length < total && guard++ < total * 4 + 16) {
+    for (var leg = 0; leg < 2; leg++) {
+      for (var k = 0; k < steps; k++) { r += dr[dir]; c += dc[dir]; push(r, c); }
+      dir = (dir + 1) % 4;
+    }
+    steps++;
+  }
+  return order;
+}
+function panoOrder(cols, rows, startDir) {
+  if (!(cols > 0 && rows > 0)) return [];
+  if (startDir === 0) return panoSpiral(cols, rows);          /* centre */
+  var topStart = (startDir === 1 || startDir === 2);          /* 1 UL 2 UR 3 LL 4 LR */
+  var leftStart = (startDir === 1 || startDir === 3);
+  var order = [];
+  for (var i = 0; i < rows; i++) {
+    var r = topStart ? i : rows - 1 - i;
+    var l2r = leftStart ? (i % 2 === 0) : (i % 2 === 1);       /* boustrophedon */
+    for (var j = 0; j < cols; j++) order.push([r, l2r ? j : cols - 1 - j]);
+  }
+  return order;
+}
+
+/* Draw the grid into `el`. o: {cols, rows, startDir, live, completed, stale}.
+   live=false → planning preview (start corner marked); live=true → colour cells
+   shot / shooting / to-go from `completed` (fully-shot cells). */
+function renderPanoGrid(el, o) {
+  var cols = o.cols, rows = o.rows, total = cols * rows;
+  if (!(cols > 0 && rows > 0)) { el.hidden = true; return; }
+  el.hidden = false;
+  if (total > 400) {   /* a 360×180 sweep is 64 800 cells — don't try to draw it */
+    el.className = 'panogrid toobig';
+    el.textContent = cols + ' × ' + rows + ' = ' + total + ' positions — too many to draw';
+    return;
+  }
+  el.className = 'panogrid';
+  el.style.gridTemplateColumns = 'repeat(' + cols + ', 1fr)';
+  var order = panoOrder(cols, rows, o.startDir), idxOf = {};
+  order.forEach(function (rc, i) { idxOf[rc[0] + ',' + rc[1]] = i; });
+  var html = '';
+  for (var r = 0; r < rows; r++) {
+    for (var c = 0; c < cols; c++) {
+      var oi = idxOf[r + ',' + c], cls = 'pc';
+      if (o.live) {
+        if (oi < o.completed) cls += ' shot';
+        else if (oi === o.completed) cls += (o.stale ? ' stalled' : ' active');
+        else cls += ' pending';
+      } else {
+        cls += ' plan' + (oi === 0 ? ' start' : '');
+      }
+      html += '<i class="' + cls + '"></i>';
+    }
+  }
+  el.innerHTML = html;
+}
+
 function paintPanoDerived() {
   var p = panoParams();
   $('#pa-coverage').textContent =
     (p.hangle * p.cols).toFixed(1) + '° × ' + (p.vangle * p.rows).toFixed(1) + '°';
   $('#pa-total').textContent = String(p.cols * p.rows * p.perspot);
+  renderPanoGrid($('#pa-grid'), { cols: p.cols, rows: p.rows, startDir: p.startdir, live: false });
+  $('#pa-grid-note').hidden = !(p.cols > 0 && p.rows > 0 && p.cols * p.rows <= 400);
   /* A parameter edit invalidates any preview shown for the old numbers. */
   var btn = $('#pa-start');
   if (btn.dataset.armed === '1') {
@@ -979,6 +1053,19 @@ function paintProg(d) {
     line = fmtDuration(d.elapsed_s) + ' elapsed · waiting on the head';
   }
   $('#progrun-line').textContent = line;
+
+  /* Panorama: the live shot-position grid. `taken` frames / per_spot frames a
+     cell = the number of fully-shot cells; the next cell is the one shooting. */
+  var pg = $('#pano-grid'), pgl = $('#pano-grid-legend');
+  if (d.kind === 'panorama' && d.cols > 0 && d.rows > 0) {
+    var per = d.per_spot > 0 ? d.per_spot : 1;
+    var taken = typeof d.taken === 'number' ? d.taken : 0;
+    renderPanoGrid(pg, {
+      cols: d.cols, rows: d.rows, startDir: typeof d.start_dir === 'number' ? d.start_dir : 1,
+      live: true, completed: Math.floor(taken / per), stale: !!d.stale
+    });
+    pgl.hidden = pg.classList.contains('toobig') || pg.hidden;
+  } else { pg.hidden = true; pgl.hidden = true; }
 
   var note = $('#progrun-note');
   if (d.stale) {

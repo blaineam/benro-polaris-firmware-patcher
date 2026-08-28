@@ -160,6 +160,15 @@
       <h3 id="progrun-title">running</h3>
       <div class="progbar"><span id="progfill"></span></div>
       <p id="progrun-line" class="mono"></p>
+      <!-- Panorama only: the shot-position grid, cells lighting up as the head
+           works through the sweep. -->
+      <div id="pano-grid" class="panogrid" hidden></div>
+      <div id="pano-grid-legend" class="panolegend" hidden>
+        <span><i class="pc shot"></i> shot</span>
+        <span><i class="pc active"></i> shooting</span>
+        <span><i class="pc pending"></i> to go</span>
+        <span class="dim">fill order assumed from the start corner; the count is the head's</span>
+      </div>
       <p id="progrun-note" class="tiny dim" hidden></p>
       <div class="row" id="progrun-controls"></div>
     </div>
@@ -277,6 +286,10 @@
           <dt>Coverage</dt><dd id="pa-coverage">—</dd>
           <dt>Total frames</dt><dd id="pa-total">—</dd>
         </dl>
+        <!-- The planned shot layout: cols × rows positions, the start corner
+             marked, so you see the coverage shape before committing. -->
+        <div id="pa-grid" class="panogrid" hidden></div>
+        <p id="pa-grid-note" class="tiny dim" hidden><span class="pc plan start"></span> start corner · the sweep serpentines from here</p>
         <div id="pa-preview" class="preview" hidden>
           <p class="tiny dim">This is the exact command that will be sent. Its field
             layout is confirmed from the app; the binding of the stitch/limit

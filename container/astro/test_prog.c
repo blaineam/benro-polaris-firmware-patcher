@@ -244,6 +244,12 @@ int main(void) {
         pump(120);
         ok(saw("1&271&2&step:2;para:4,2,1,0,45,15;"), "the start frame matches the documented field order");
         ok(saw("num:24;"), "num is 4*2*3");
+        {   /* the status JSON carries the grid geometry the web UI draws from */
+            char st[512]; prog_status_json(st, sizeof st);
+            ok(strstr(st, "\"cols\":4") && strstr(st, "\"rows\":2") &&
+               strstr(st, "\"per_spot\":3") && strstr(st, "\"start_dir\":1"),
+               "panorama status reports cols/rows/per_spot/start_dir for the shot-position grid");
+        }
         ok(saw("1&271&2&step:13;interval:5;"),
            "the per-spot interval is sent as its own live command, not in the start order");
         ok(prog_pano_pause(1) == 0, "pause is accepted");

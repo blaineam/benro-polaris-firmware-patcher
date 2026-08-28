@@ -1056,8 +1056,8 @@ int prog_status_json(char *out, int cap) {
         n += snprintf(out + n, cap - n, ",\"taken\":%ld", g.total - g.remaining);
     if (g.kind == PROG_PANO)
         n += snprintf(out + n, cap - n,
-            ",\"cols\":%d,\"rows\":%d,\"per_spot\":%d,\"interval_s\":%d",
-            g.pano.h_num, g.pano.v_num, g.pano.per_spot, g.pano.interval_s);
+            ",\"cols\":%d,\"rows\":%d,\"per_spot\":%d,\"interval_s\":%d,\"start_dir\":%d",
+            g.pano.h_num, g.pano.v_num, g.pano.per_spot, g.pano.interval_s, g.pano.start_dir);
     if (g.kind == PROG_LAPSE)
         n += snprintf(out + n, cap - n, ",\"interval_s\":%.3f,\"fps\":%d",
                       g.lapse.interval_s, g.lapse.fps);
