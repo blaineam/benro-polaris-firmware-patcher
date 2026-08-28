@@ -621,6 +621,36 @@ python3 tests/alpaca_conformance.py http://<polaris ip>:8090
 Note it is *our reading* of the spec -- it reported 35/35 while ConformU found
 60 real issues, including a 7-hour SiderealTime error. Trust ConformU.
 
+## INDI (native)
+
+KStars/Ekos and PHD2 are INDI-native, and LX200 cannot express what they need
+for real imaging — track state, sync as distinct from slew, an async slew you
+can abort. So the server also speaks **native INDI on TCP 7624** (add an *INDI
+Telescope* device pointing at `<polaris ip>:7624`). It is a hand-rolled minimal
+`INDI::Telescope`, the same way the Alpaca device is hand-rolled — deliberately
+**no libindi**, whose C++/cfitsio/libnova stack will not cross-compile on the
+debian:9 ARM toolchain. Like the LX200 server, each client is a forked child and
+the pointing is pushed ~1 Hz.
+
+Properties implemented, all mapped to the same `polaris-mount` commands the
+Alpaca/LX200 paths use:
+
+```
+CONNECTION                 connect (network driver, always up)
+DRIVER_INFO                DRIVER_INTERFACE = 1 (telescope)
+ON_COORD_SET               TRACK | SLEW | SYNC
+EQUATORIAL_EOD_COORD       RA/DEC -> goto-radec (slew, async Busy) or align (sync)
+TELESCOPE_ABORT_MOTION     -> polaris-mount abort (works during a slew)
+TELESCOPE_TRACK_STATE      TRACK_ON / TRACK_OFF
+GEOGRAPHIC_COORD           LAT / LONG (0-360 E) / ELEV
+TIME_UTC
+```
+
+The slew runs in the background so ABORT stays responsive, and the vector goes
+`Busy` → `Ok` when the pushed pointing lands within ~0.5° of the target (or after
+60 s). Position reads reuse `current_radec`, which is connection-safe at 1 Hz and
+never connects to an unaligned mount.
+
 ---
 
 ## What is and is not verified

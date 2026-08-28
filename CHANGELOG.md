@@ -138,6 +138,30 @@
   batch and answers its brightness poll — so the whole control loop, motion
   through every programme, is testable with no hardware attached. `test_prog.c`
   is 134 assertions.
+- **The solver dashboard, folded into the app.** The Astro tab gained native
+  panels for **plate solving** (capture/latest/apply/cancel, focal override, the
+  solved RA/Dec and the solver log), **auto-guiding** (on/off with a drift
+  sparkline and the guide log), and **mount status** (mode/aligned/tracking,
+  alt-az on demand, live attitude) — all wired to the `/api/solve|apply|cancel|
+  focal|guide|state` endpoints that used to be reachable only from `/legacy`.
+- **Dithering (540).** `SP_SET_DITHER_STATE` is surfaced as a toggle beside
+  guiding — it shifts the framing a hair between exposures so stacking averages
+  out hot pixels; a persistent setting, not confirm-gated motion (the nudges
+  happen between frames of a running capture), and the toggle reads the head's
+  real flag (539) on entry.
+- **Native INDI telescope on TCP 7624.** KStars/Ekos and PHD2 are INDI-native
+  and LX200 cannot express track-state, sync-vs-slew, or an abortable async
+  slew — so the server now speaks a hand-rolled minimal `INDI::Telescope`
+  alongside Alpaca and LX200, the same dependency-free way the Alpaca device is
+  hand-rolled (**no libindi** — its C++/cfitsio/libnova stack will not
+  cross-compile on the debian:9 ARM toolchain). CONNECTION, DRIVER_INFO,
+  ON_COORD_SET, EQUATORIAL_EOD_COORD (goto to slew async, align to sync),
+  TELESCOPE_ABORT_MOTION, TELESCOPE_TRACK_STATE, GEOGRAPHIC_COORD and TIME_UTC,
+  all mapped to the same `polaris-mount` commands; each client is a forked child
+  and the pointing is pushed ~1 Hz. Verified end-to-end with a protocol client
+  (all eight vectors defined, interface=1, SYNC/SLEW→Busy/ABORT/geo round-trip,
+  periodic push). `--indi-port` (default 7624), and the three bridges are named
+  in the app's Observatory-bridges card.
 
 ### Fixed
 

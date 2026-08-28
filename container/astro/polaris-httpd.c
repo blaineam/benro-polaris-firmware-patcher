@@ -33,6 +33,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #include "polaris-link.h"
 #include "polaris-jog.h"
@@ -1401,6 +1402,311 @@ static void lx200_session(int fd) {
             }
         }
         if (used >= sizeof buf - 1) used = 0;      /* garbage; resync */
+    }
+}
+
+/* ===========================================================================
+ * INDI over TCP (port 7624)
+ *
+ * WHY, alongside Alpaca and LX200: KStars/Ekos and PHD2 are INDI-native, and
+ * LX200 cannot express what they need for real imaging -- track state, sync as
+ * distinct from slew, an async slew you can abort. INDI is an XML property
+ * protocol over a persistent socket. Rather than pull in libindi (a C++ stack
+ * with cfitsio/libnova that will not cross-compile on the debian:9 ARM
+ * toolchain), this is a hand-rolled minimal INDI::Telescope, exactly the way the
+ * Alpaca device above is hand-rolled -- no new dependency, same toolchain.
+ *
+ * It translates INDI's standard telescope properties to the SAME polaris-mount
+ * commands the Alpaca and LX200 paths use (goto-radec to slew, align to sync,
+ * abort to stop, current_radec to report). Like LX200, each client is a forked
+ * child; position is pushed ~1 Hz on a select() timeout, and current_radec is
+ * connection-safe at that rate (5 s mount_pose cache, and it never connects
+ * while unaligned -- it falls back to the last solve).
+ *
+ * Implemented properties: CONNECTION, DRIVER_INFO, ON_COORD_SET,
+ * EQUATORIAL_EOD_COORD, TELESCOPE_ABORT_MOTION, TELESCOPE_TRACK_STATE,
+ * GEOGRAPHIC_COORD, TIME_UTC. Enough for Ekos to connect, slew, sync, track,
+ * abort, and plot the mount.
+ * =========================================================================== */
+
+#define INDI_DEV "Benro Polaris"
+
+static void indi_ts(char *out, size_t cap) {
+    time_t t = utc_now();               /* device clock corrected to real UTC */
+    struct tm g;
+    if (gmtime_r(&t, &g)) strftime(out, cap, "%Y-%m-%dT%H:%M:%S", &g);
+    else snprintf(out, cap, "2000-01-01T00:00:00");
+}
+
+static void indi_send(int fd, const char *fmt, ...) {
+    char buf[2560];
+    va_list ap; int n;
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    send_all(fd, buf, (size_t)n < sizeof buf ? (size_t)n : sizeof buf - 1);
+    send_all(fd, "\n", 1);
+}
+
+/* Extract one complete top-level XML element into `out`, removing it from buf.
+ * Returns 1 on success, 0 if more bytes are needed. INDI messages do not nest a
+ * tag inside another of the same name at top level, so a plain search for the
+ * matching close tag is safe. */
+static int indi_take(char *buf, size_t *used, char *out, size_t outcap) {
+    size_t i = 0, ts, te, j, endpos, len;
+    char tag[64]; size_t tl;
+    while (i < *used && (buf[i]==' '||buf[i]=='\n'||buf[i]=='\r'||buf[i]=='\t')) i++;
+    if (i >= *used) { if (i) { memmove(buf, buf+i, *used-i); *used-=i; } return 0; }
+    if (buf[i] != '<') {                 /* junk before an element: drop a byte */
+        memmove(buf, buf+i+1, *used-i-1); *used -= i+1; return 0;
+    }
+    ts = i+1; te = ts;
+    while (te < *used && buf[te]!=' ' && buf[te]!='>' && buf[te]!='/' &&
+           buf[te]!='\n' && buf[te]!='\r' && buf[te]!='\t') te++;
+    if (te >= *used) return 0;
+    tl = te - ts; if (tl >= sizeof tag) tl = sizeof tag - 1;
+    memcpy(tag, buf+ts, tl); tag[tl] = 0;
+    j = te;
+    while (j < *used && buf[j] != '>') j++;
+    if (j >= *used) return 0;            /* opening tag not finished */
+    if (j > ts && buf[j-1] == '/') {
+        endpos = j + 1;                  /* self-closing, e.g. <getProperties/> */
+    } else {
+        char close[72]; size_t cl, k; const char *cp = NULL;
+        snprintf(close, sizeof close, "</%s>", tag);
+        cl = strlen(close);
+        for (k = j+1; k + cl <= *used; k++)
+            if (!memcmp(buf+k, close, cl)) { cp = buf+k; break; }
+        if (!cp) return 0;               /* close tag not arrived yet */
+        endpos = (size_t)(cp - buf) + cl;
+    }
+    len = endpos - i;
+    if (len >= outcap) { memmove(buf, buf+endpos, *used-endpos); *used-=endpos; return 0; }
+    memcpy(out, buf+i, len); out[len] = 0;
+    memmove(buf, buf+endpos, *used-endpos); *used -= endpos;
+    return 1;
+}
+
+/* key="val" / key='val' attribute lookup within one element. */
+static int indi_attr(const char *el, const char *key, char *out, size_t cap) {
+    char pat[64]; const char *p; char q; size_t o = 0;
+    snprintf(pat, sizeof pat, "%s=", key);
+    for (p = strstr(el, pat); p; p = strstr(p+1, pat))
+        if (p == el || p[-1]==' ' || p[-1]=='\t' || p[-1]=='\n') break;
+    if (!p) { if (cap) out[0]=0; return 0; }
+    p += strlen(pat);
+    if (*p!='"' && *p!='\'') { if (cap) out[0]=0; return 0; }
+    q = *p++;
+    while (*p && *p!=q && o+1<cap) out[o++]=*p++;
+    out[o]=0; return 1;
+}
+
+/* Value of a child <childtag name="name">VALUE</childtag>. */
+static int indi_one(const char *el, const char *childtag, const char *name,
+                    char *out, size_t cap) {
+    const char *p = el, *gt, *v; char open[24], seg[256], nm[64]; size_t sl, o;
+    snprintf(open, sizeof open, "<%s", childtag);
+    while ((p = strstr(p, open)) != NULL) {
+        gt = strchr(p, '>'); if (!gt) break;
+        sl = (size_t)(gt - p); if (sl >= sizeof seg) sl = sizeof seg - 1;
+        memcpy(seg, p, sl); seg[sl] = 0;
+        if (indi_attr(seg, "name", nm, sizeof nm) && !strcmp(nm, name)) {
+            v = gt + 1; o = 0;
+            while (*v && *v != '<' && o+1 < cap) out[o++] = *v++;
+            while (o > 0 && (out[o-1]==' '||out[o-1]=='\n'||out[o-1]=='\r'||out[o-1]=='\t')) o--;
+            out[o] = 0;
+            { char *s = out; while (*s==' '||*s=='\n'||*s=='\r'||*s=='\t') s++;
+              if (s != out) memmove(out, s, strlen(s)+1); }
+            return 1;
+        }
+        p = gt + 1;
+    }
+    if (cap) out[0]=0; return 0;
+}
+
+static double indi_lon360(void) {
+    double l = g_lon; while (l < 0) l += 360; while (l >= 360) l -= 360; return l;
+}
+
+/* Push the current pointing. `busy` sets the vector state (slewing vs settled). */
+static void indi_push_coord(int fd, int busy) {
+    double ra = 0, dec = 0; char ts[32];
+    current_radec(&ra, &dec);
+    indi_ts(ts, sizeof ts);
+    indi_send(fd,
+        "<setNumberVector device='%s' name='EQUATORIAL_EOD_COORD' state='%s' timestamp='%s'>"
+        "<oneNumber name='RA'>%.6f</oneNumber>"
+        "<oneNumber name='DEC'>%.6f</oneNumber>"
+        "</setNumberVector>",
+        INDI_DEV, busy ? "Busy" : "Ok", ts, ra/15.0, dec);
+}
+
+static void indi_def_all(int fd) {
+    char ts[32], utc[32]; double ra = 0, dec = 0; int trk = 0, mode = -1, tk = -1;
+    indi_ts(ts, sizeof ts); indi_ts(utc, sizeof utc);
+    current_radec(&ra, &dec);
+    if (log_state(&mode, &tk) && tk >= 0) trk = (tk == 1);
+
+    indi_send(fd,
+      "<defSwitchVector device='%s' name='CONNECTION' label='Connection' group='Main Control' state='Ok' perm='rw' rule='OneOfMany' timeout='60' timestamp='%s'>"
+      "<defSwitch name='CONNECT' label='Connect'>On</defSwitch>"
+      "<defSwitch name='DISCONNECT' label='Disconnect'>Off</defSwitch></defSwitchVector>", INDI_DEV, ts);
+    indi_send(fd,
+      "<defTextVector device='%s' name='DRIVER_INFO' label='Driver Info' group='General Info' state='Ok' perm='ro' timeout='60' timestamp='%s'>"
+      "<defText name='DRIVER_NAME' label='Name'>Benro Polaris</defText>"
+      "<defText name='DRIVER_EXEC' label='Exec'>polaris-httpd</defText>"
+      "<defText name='DRIVER_VERSION' label='Version'>1.0</defText>"
+      "<defText name='DRIVER_INTERFACE' label='Interface'>1</defText></defTextVector>", INDI_DEV, ts);
+    indi_send(fd,
+      "<defSwitchVector device='%s' name='ON_COORD_SET' label='On Set' group='Main Control' state='Ok' perm='rw' rule='OneOfMany' timeout='60' timestamp='%s'>"
+      "<defSwitch name='TRACK' label='Track'>On</defSwitch>"
+      "<defSwitch name='SLEW' label='Slew'>Off</defSwitch>"
+      "<defSwitch name='SYNC' label='Sync'>Off</defSwitch></defSwitchVector>", INDI_DEV, ts);
+    indi_send(fd,
+      "<defNumberVector device='%s' name='EQUATORIAL_EOD_COORD' label='Eq. Coordinates' group='Main Control' state='Ok' perm='rw' timeout='60' timestamp='%s'>"
+      "<defNumber name='RA' label='RA (hh:mm:ss)' format='%%010.6m' min='0' max='24' step='0'>%.6f</defNumber>"
+      "<defNumber name='DEC' label='DEC (dd:mm:ss)' format='%%010.6m' min='-90' max='90' step='0'>%.6f</defNumber></defNumberVector>",
+      INDI_DEV, ts, ra/15.0, dec);
+    indi_send(fd,
+      "<defSwitchVector device='%s' name='TELESCOPE_ABORT_MOTION' label='Abort Motion' group='Main Control' state='Ok' perm='rw' rule='AtMostOne' timeout='60' timestamp='%s'>"
+      "<defSwitch name='ABORT' label='Abort'>Off</defSwitch></defSwitchVector>", INDI_DEV, ts);
+    indi_send(fd,
+      "<defSwitchVector device='%s' name='TELESCOPE_TRACK_STATE' label='Tracking' group='Main Control' state='Ok' perm='rw' rule='OneOfMany' timeout='60' timestamp='%s'>"
+      "<defSwitch name='TRACK_ON' label='On'>%s</defSwitch>"
+      "<defSwitch name='TRACK_OFF' label='Off'>%s</defSwitch></defSwitchVector>",
+      INDI_DEV, ts, trk?"On":"Off", trk?"Off":"On");
+    indi_send(fd,
+      "<defNumberVector device='%s' name='GEOGRAPHIC_COORD' label='Location' group='Site' state='Ok' perm='rw' timeout='60' timestamp='%s'>"
+      "<defNumber name='LAT' label='Lat (dd:mm:ss)' format='%%010.6m' min='-90' max='90' step='0'>%.6f</defNumber>"
+      "<defNumber name='LONG' label='Lon (dd:mm:ss)' format='%%010.6m' min='0' max='360' step='0'>%.6f</defNumber>"
+      "<defNumber name='ELEV' label='Elevation (m)' format='%%g' min='-200' max='10000' step='0'>%.0f</defNumber></defNumberVector>",
+      INDI_DEV, ts, g_lat, indi_lon360(), g_site_elev);
+    indi_send(fd,
+      "<defTextVector device='%s' name='TIME_UTC' label='UTC' group='Site' state='Ok' perm='rw' timeout='60' timestamp='%s'>"
+      "<defText name='UTC' label='UTC Time'>%s</defText>"
+      "<defText name='OFFSET' label='UTC Offset'>0</defText></defTextVector>", INDI_DEV, ts, utc);
+}
+
+static void indi_mount(const char *sub, double ra_deg, double dec_deg) {
+    char cmd[512], out[512], ub[64];
+    if (!strcmp(sub, "abort")) {
+        snprintf(cmd, sizeof cmd, "%s/polaris-mount --host %s --port %d abort 2>&1",
+                 g_astro, g_mount_host, g_mount_port);
+        run_capture(cmd, out, sizeof out); return;
+    }
+    utc_arg(ub, sizeof ub);
+    if (!strcmp(sub, "sync"))
+        snprintf(cmd, sizeof cmd,
+            "timeout -t 25 %s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s "
+            "align --solved-ra %.6f --solved-dec %.6f >/dev/null 2>&1",
+            g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ub, ra_deg, dec_deg);
+    else   /* slew: run in the BACKGROUND so ABORT stays responsive */
+        snprintf(cmd, sizeof cmd,
+            "timeout -t 60 %s/polaris-mount --host %s --port %d --lat %.6f --lon %.6f %s "
+            "goto-radec --refine-arcmin 0.1 --ra %.6f --dec %.6f >/dev/null 2>&1 &",
+            g_astro, g_mount_host, g_mount_port, g_lat, g_lon, ub, ra_deg, dec_deg);
+    if (system(cmd) == -1) {}
+}
+
+static void indi_session(int fd) {
+    char buf[8192]; size_t used = 0;
+    int coord_mode = 0;          /* 0 track, 1 slew, 2 sync                 */
+    int slewing = 0; double tgt_ra_h = 0, tgt_dec = 0, slew_started = 0;
+
+    for (;;) {
+        fd_set rf; struct timeval tv; int s;
+        FD_ZERO(&rf); FD_SET(fd, &rf);
+        tv.tv_sec = 1; tv.tv_usec = 0;
+        s = select(fd + 1, &rf, NULL, NULL, &tv);
+        if (s < 0) { if (errno == EINTR) continue; return; }
+
+        if (s > 0 && FD_ISSET(fd, &rf)) {
+            char el[8192];
+            ssize_t n = read(fd, buf + used, sizeof buf - 1 - used);
+            if (n <= 0) return;
+            used += (size_t)n; buf[used] = 0;
+            while (indi_take(buf, &used, el, sizeof el)) {
+                char pname[64], v1[64], v2[64], ts[32];
+                indi_ts(ts, sizeof ts);
+                if (!strncmp(el, "<getProperties", 14)) {
+                    indi_def_all(fd);
+                    indi_push_coord(fd, slewing);
+                } else if (!strncmp(el, "<newSwitchVector", 16)) {
+                    indi_attr(el, "name", pname, sizeof pname);
+                    if (!strcmp(pname, "ON_COORD_SET")) {
+                        if (indi_one(el, "oneSwitch", "SYNC", v1, sizeof v1) && !strcmp(v1,"On")) coord_mode = 2;
+                        else if (indi_one(el, "oneSwitch", "SLEW", v1, sizeof v1) && !strcmp(v1,"On")) coord_mode = 1;
+                        else coord_mode = 0;
+                        indi_send(fd, "<setSwitchVector device='%s' name='ON_COORD_SET' state='Ok' timestamp='%s'>"
+                            "<oneSwitch name='TRACK'>%s</oneSwitch><oneSwitch name='SLEW'>%s</oneSwitch>"
+                            "<oneSwitch name='SYNC'>%s</oneSwitch></setSwitchVector>", INDI_DEV, ts,
+                            coord_mode==0?"On":"Off", coord_mode==1?"On":"Off", coord_mode==2?"On":"Off");
+                    } else if (!strcmp(pname, "TELESCOPE_ABORT_MOTION")) {
+                        indi_mount("abort", 0, 0); slewing = 0;
+                        indi_send(fd, "<setSwitchVector device='%s' name='TELESCOPE_ABORT_MOTION' state='Ok' timestamp='%s'>"
+                            "<oneSwitch name='ABORT'>Off</oneSwitch></setSwitchVector>", INDI_DEV, ts);
+                        indi_push_coord(fd, 0);
+                    } else if (!strcmp(pname, "TELESCOPE_TRACK_STATE")) {
+                        int on = indi_one(el, "oneSwitch", "TRACK_ON", v1, sizeof v1) && !strcmp(v1,"On");
+                        if (!on) { indi_mount("abort", 0, 0); slewing = 0; }
+                        indi_send(fd, "<setSwitchVector device='%s' name='TELESCOPE_TRACK_STATE' state='Ok' timestamp='%s'>"
+                            "<oneSwitch name='TRACK_ON'>%s</oneSwitch><oneSwitch name='TRACK_OFF'>%s</oneSwitch>"
+                            "</setSwitchVector>", INDI_DEV, ts, on?"On":"Off", on?"Off":"On");
+                    } else if (!strcmp(pname, "CONNECTION")) {
+                        indi_send(fd, "<setSwitchVector device='%s' name='CONNECTION' state='Ok' timestamp='%s'>"
+                            "<oneSwitch name='CONNECT'>On</oneSwitch><oneSwitch name='DISCONNECT'>Off</oneSwitch>"
+                            "</setSwitchVector>", INDI_DEV, ts);
+                    }
+                } else if (!strncmp(el, "<newNumberVector", 16)) {
+                    indi_attr(el, "name", pname, sizeof pname);
+                    if (!strcmp(pname, "EQUATORIAL_EOD_COORD")) {
+                        if (indi_one(el, "oneNumber", "RA", v1, sizeof v1) &&
+                            indi_one(el, "oneNumber", "DEC", v2, sizeof v2)) {
+                            tgt_ra_h = atof(v1); tgt_dec = atof(v2);
+                            if (coord_mode == 2) {
+                                indi_mount("sync", tgt_ra_h*15.0, tgt_dec);
+                                slewing = 0; indi_push_coord(fd, 0);
+                            } else {
+                                indi_mount("slew", tgt_ra_h*15.0, tgt_dec);
+                                slewing = 1; slew_started = stage2_now_ms();
+                                indi_send(fd, "<setNumberVector device='%s' name='EQUATORIAL_EOD_COORD' state='Busy' timestamp='%s'>"
+                                    "<oneNumber name='RA'>%.6f</oneNumber><oneNumber name='DEC'>%.6f</oneNumber>"
+                                    "</setNumberVector>", INDI_DEV, ts, tgt_ra_h, tgt_dec);
+                            }
+                        }
+                    } else if (!strcmp(pname, "GEOGRAPHIC_COORD")) {
+                        if (indi_one(el, "oneNumber", "LAT", v1, sizeof v1)) g_lat = atof(v1);
+                        if (indi_one(el, "oneNumber", "LONG", v2, sizeof v2)) {
+                            double L = atof(v2); if (L > 180) L -= 360; g_lon = L;
+                        }
+                        if (indi_one(el, "oneNumber", "ELEV", v1, sizeof v1)) g_site_elev = atof(v1);
+                        g_have_pos = 1;
+                        indi_send(fd, "<setNumberVector device='%s' name='GEOGRAPHIC_COORD' state='Ok' timestamp='%s'>"
+                            "<oneNumber name='LAT'>%.6f</oneNumber><oneNumber name='LONG'>%.6f</oneNumber>"
+                            "<oneNumber name='ELEV'>%.0f</oneNumber></setNumberVector>",
+                            INDI_DEV, ts, g_lat, indi_lon360(), g_site_elev);
+                    }
+                } else if (!strncmp(el, "<newTextVector", 14)) {
+                    indi_attr(el, "name", pname, sizeof pname);
+                    if (!strcmp(pname, "TIME_UTC"))     /* accepted; device clock is separate */
+                        indi_send(fd, "<setTextVector device='%s' name='TIME_UTC' state='Ok' timestamp='%s'/>", INDI_DEV, ts);
+                }
+                /* <enableBLOB> and anything else: ignored, as a driver may. */
+            }
+        } else {
+            /* 1 Hz: a slew settles when the pointing is within ~0.05 h / 0.5 deg
+             * of the target, or after 60 s; then the vector goes Ok. */
+            if (slewing) {
+                double ra = 0, dec = 0; current_radec(&ra, &dec);
+                double dra = fabs(ra/15.0 - tgt_ra_h), ddec = fabs(dec - tgt_dec);
+                if (dra > 12) dra = 24 - dra;
+                if ((dra < 0.05 && ddec < 0.5) || stage2_now_ms() - slew_started > 60000)
+                    slewing = 0;
+            }
+            indi_push_coord(fd, slewing);
+        }
+        if (used >= sizeof buf - 1) used = 0;   /* oversized garbage; resync */
     }
 }
 
@@ -3275,6 +3581,7 @@ static int make_listener(int port) {
 int main(int argc, char **argv) {
     int port = PORT_DEFAULT, sfd, i;
     int lx_port = 10001, lxfd = -1, dfd = -1, discovery = 1;
+    int indi_port = 7624, indifd = -1;
     struct sockaddr_in a;
 
     for (i = 1; i < argc; i++) {
@@ -3284,6 +3591,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--focal") && i+1 < argc) g_focal = atof(argv[++i]);
         else if (!strcmp(argv[i], "--astro") && i+1 < argc) g_astro = argv[++i];
         else if (!strcmp(argv[i], "--lx200-port") && i+1 < argc) lx_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--indi-port") && i+1 < argc) indi_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-discovery")) discovery = 0;
         else if (!strcmp(argv[i], "--mount-host") && i+1 < argc) g_mount_host = argv[++i];
         else if (!strcmp(argv[i], "--mount-port") && i+1 < argc) g_mount_port = atoi(argv[++i]);
@@ -3308,6 +3616,10 @@ int main(int argc, char **argv) {
         lxfd = make_listener(lx_port);
         if (lxfd < 0) fprintf(stderr, "could not bind LX200 port %d (continuing)\n", lx_port);
     }
+    if (indi_port > 0) {
+        indifd = make_listener(indi_port);
+        if (indifd < 0) fprintf(stderr, "could not bind INDI port %d (continuing)\n", indi_port);
+    }
     if (discovery) {
         dfd = make_discovery_socket();
         if (dfd < 0) fprintf(stderr, "could not bind Alpaca discovery :%d (continuing)\n",
@@ -3319,6 +3631,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "polaris-httpd on :%d  (lat %.5f lon %.5f focal %.0fmm, mount %s:%d)\n",
             port, g_lat, g_lon, g_focal, g_mount_host, g_mount_port);
     if (lxfd >= 0) fprintf(stderr, "LX200 on :%d\n", lx_port);
+    if (indifd >= 0) fprintf(stderr, "INDI on :%d\n", indi_port);
     if (dfd  >= 0) fprintf(stderr, "Alpaca discovery on udp:%d\n", ALPACA_DISCOVERY_PORT);
 
     for (;;) {
@@ -3328,6 +3641,7 @@ int main(int argc, char **argv) {
         FD_ZERO(&rf);
         FD_SET(sfd, &rf);
         if (lxfd >= 0) { FD_SET(lxfd, &rf); if (lxfd > mx) mx = lxfd; }
+        if (indifd >= 0) { FD_SET(indifd, &rf); if (indifd > mx) mx = indifd; }
         if (dfd  >= 0) { FD_SET(dfd,  &rf); if (dfd  > mx) mx = dfd;  }
         /* The control link rides the same loop: its socket joins the read set
          * so pushed telemetry is absorbed the moment it lands, and the timeout
@@ -3387,6 +3701,19 @@ int main(int argc, char **argv) {
                     close(c);
                     _exit(0);
                 }
+                close(c);
+                if (pid > 0) { int st; waitpid(pid, &st, WNOHANG); }
+            }
+        }
+        if (indifd >= 0 && FD_ISSET(indifd, &rf)) {
+            int c = accept(indifd, NULL, NULL);
+            if (c >= 0) fcntl(c, F_SETFD, FD_CLOEXEC);
+            if (c >= 0) {
+                /* INDI, like LX200, is a persistent socket the client polls; run
+                 * each in its own child so a long Ekos session never blocks the
+                 * HTTP server. */
+                pid_t pid = fork();
+                if (pid == 0) { close(sfd); indi_session(c); close(c); _exit(0); }
                 close(c);
                 if (pid > 0) { int st; waitpid(pid, &st, WNOHANG); }
             }

@@ -691,14 +691,18 @@
       <div class="card">
         <h3>Observatory bridges</h3>
         <p class="tiny dim">
-          This server also speaks <b>ASCOM Alpaca</b> (auto-discovered on the
-          network) and <b>LX200</b> over TCP, so Stellarium, NINA, and — via the
-          LX200-generic driver — <b>KStars/Ekos</b> and <b>PHD2</b> can drive the
-          mount. The original solver dashboard is still at <a href="/legacy">/legacy</a>.
+          This server speaks three mount protocols at once, so most astronomy
+          software can drive the Polaris directly: <b>ASCOM Alpaca</b>
+          (auto-discovered — NINA, Stellarium), a native <b>INDI</b> telescope
+          (KStars/Ekos, PHD2 — connect the <i>INDI Telescope</i> to this host and
+          port), and <b>LX200</b> over TCP (Stellarium, SkySafari, or the
+          LX200-generic driver). The original solver dashboard is still at
+          <a href="/legacy">/legacy</a>.
         </p>
         <dl class="kv">
-          <dt>Alpaca</dt><dd class="mono">this host, port <span id="br-port">—</span> · UDP discovery</dd>
-          <dt>LX200</dt><dd class="mono">this host, port <span id="br-lx">—</span></dd>
+          <dt>Alpaca</dt><dd class="mono">this host : <span id="br-port">—</span> · UDP discovery</dd>
+          <dt>INDI</dt><dd class="mono">this host : <span id="br-indi">7624</span></dd>
+          <dt>LX200</dt><dd class="mono">this host : <span id="br-lx">10001</span></dd>
         </dl>
       </div>
   </section>
