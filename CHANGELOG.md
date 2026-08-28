@@ -283,6 +283,13 @@
   `/app/sd/polaris-astro/site.conf` — so a saved location updated the running
   server yet would not have survived a reboot, contradicting the UI. It now writes
   the boot-read file (new `--site-conf`, defaulting there), preserving the other keys.
+- **A misleading-indentation warning in the device build.** `indi_one` had
+  `if (cap) out[0]=0; return 0;` on one line — harmless, but gcc's
+  `-Wmisleading-indentation` (which the ARM cross-build sees but host clang did
+  not) flagged it. Split onto two lines, and the cross-build now compiles the
+  first-party tools with **`-Werror`**, so a warning fails the build the way the
+  host tests already do. Verified: `build-astro.sh` produces the full SD bundle
+  clean, with `autofocus.sh` and all new endpoints in it.
 
 ### Fixed — real-sky session, 2026-08-19
 

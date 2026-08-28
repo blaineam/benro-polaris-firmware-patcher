@@ -1917,7 +1917,8 @@ static int indi_one(const char *el, const char *childtag, const char *name,
         }
         p = gt + 1;
     }
-    if (cap) out[0]=0; return 0;
+    if (cap) out[0] = 0;
+    return 0;
 }
 
 static double indi_lon360(void) {
