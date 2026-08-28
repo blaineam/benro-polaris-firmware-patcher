@@ -629,6 +629,10 @@
         <input id="tgt-search" type="text" placeholder="search — M42, Andromeda, ring…" autocomplete="off" class="tgtsearch">
         <select id="tgt-select" size="6" class="tgtlist"></select>
         <dl class="kv"><dt>Selected</dt><dd id="tgt-info" class="mono">—</dd></dl>
+        <div id="tgt-danger" class="danger" hidden>
+          <label class="switch"><input id="tgt-solar-ok" type="checkbox"><span>⚠ A certified solar filter is fitted</span></label>
+          <p class="tiny">Pointing the camera at the Sun without a proper solar filter destroys the sensor in seconds. GOTO stays locked until you confirm the filter is on.</p>
+        </div>
         <button id="tgt-goto" class="startbtn" type="button" disabled>Choose a target</button>
         <p id="tgt-msg" class="tiny dim" hidden></p>
       </div>
@@ -753,6 +757,29 @@
 
   <!-- ───────────────────────────── SETTINGS ──────────────────────────── -->
   <section id="tab-settings" class="tab" hidden>
+
+    <div class="card">
+      <h3>Head settings</h3>
+      <label class="switch"><input id="camdir" type="checkbox"><span>Rotate the camera plate</span></label>
+      <p class="tiny dim">
+        Flips the camera-plate orientation (portrait ⇄ landscape). It moves the
+        head a little; a small, safe re-orient.
+      </p>
+
+      <hr class="hair">
+      <label class="switch"><input id="limits" type="checkbox"><span>Release rotation limits (restricted angle)</span></label>
+      <p class="tiny dim">
+        Off keeps the head's travel limits enforced — the safe default. Turn this
+        on <b>only</b> to shoot the zenith or a ground angle with the Astro Kit,
+        and only after you've physically checked the kit clears the pitch axis and
+        the tripod. <b>With limits released the head can swing into its own
+        accessory.</b>
+      </p>
+      <div id="limits-danger" class="danger" hidden>
+        <label class="switch"><input id="limits-ok" type="checkbox"><span>⚠ I have physically checked the clearance</span></label>
+        <p class="tiny">Watch the Astro Kit against the pitch axis and the tripod in real time — the head can collide.</p>
+      </div>
+    </div>
 
     <div class="card">
       <h3>Wi-Fi</h3>

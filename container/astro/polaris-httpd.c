@@ -2458,6 +2458,11 @@ static const opcode_policy_t OPCODES[] = {
      * capture -- so it is a setting, not confirm-gated motion. (539 get / 540 set) */
     { 539, "dither-get",    3, 0, "read the dithering flag -> state:<0|1>" },
     { 540, "dither",        3, 0, "state:<0|1> -- dither between frames (stacking); persistent" },
+    /* Camera-plate direction: re-orients the plate (e.g. portrait/landscape). It
+     * MOVES, so it is confirmed, but it is benign -- unlike 542 it cannot drive
+     * the head into its own accessory. (545 read / 546 set) */
+    { 545, "camera-dir-get", 3, 0, "read the camera-plate direction -> dir:<0|1>" },
+    { 546, "camera-dir",     3, 1, "dir:<0|1> -- re-orient the camera plate" },
 
     /* NOT LISTED, DELIBERATELY:
      *   530  multi-step star alignment -- wedges the motors on repeat, and the
@@ -3143,6 +3148,49 @@ static void handle(int fd) {
         n += prog_status_json(out+n, (int)sizeof out - n);
         snprintf(out+n, sizeof out - n, "}");
         respond_json(fd, out); return;
+    }
+
+    /* Restricted-angle (travel-limit) state. RELEASING the limits (state:1) lets
+     * the head reach the zenith or ground angle -- and lets it swing into its
+     * own Astro Kit or the tripod. So 542 is deliberately NOT in the generic
+     * send allowlist; this dedicated route is the only way to release it, and a
+     * release REQUIRES a physical-attestation flag (attest=1) -- exactly as the
+     * app makes the user confirm "Aligned Manually. Enable It". Re-enforcing the
+     * limits (state:0) is always safe and needs no attestation. Polarity is
+     * inverted: state:0 = limits ENFORCED (safe), state:1 = RELEASED. */
+    if (!strcmp(path, "/api/astro/limits")) {
+        char st[8]="", at[8]="", out[512];
+        if (!strcmp(method, "GET")) {
+            const plink_slot_t *s;
+            int released = -1;
+            if (plink_status() == PLINK_UP) plink_send(541, 3, "");   /* prime a fresh read */
+            s = plink_get(541);
+            if (s) released = (int)plink_arg_num(s->args, "state", -1);
+            snprintf(out, sizeof out, "{\"ok\":true,\"released\":%s}",
+                     released == 1 ? "true" : released == 0 ? "false" : "null");
+            respond_json(fd, out); return;
+        }
+        if (!param(qs,"state",st,sizeof st) && body) param(body,"state",st,sizeof st);
+        if (!param(qs,"attest",at,sizeof at) && body) param(body,"attest",at,sizeof at);
+        {
+            int want   = (st[0]=='1' || !strcmp(st,"true")) ? 1 : 0;
+            int attest = (at[0]=='1' || !strcmp(at,"true")) ? 1 : 0;
+            const char *msg;
+            if (plink_status() != PLINK_UP) {
+                msg = "{\"ok\":false,\"error\":\"control link is down\"}";
+                respond(fd, 503, "application/json", msg, strlen(msg)); return;
+            }
+            if (want && !attest) {
+                msg = "{\"ok\":false,\"error\":\"releasing the travel limits lets the head swing into its "
+                      "own Astro Kit or the tripod — confirm you have physically checked the clearance, "
+                      "then retry with attest=1\"}";
+                respond(fd, 409, "application/json", msg, strlen(msg)); return;
+            }
+            plink_send(542, 3, want ? "state:1;" : "state:0;");
+            fprintf(stderr, "[astro] travel limits %s\n", want ? "RELEASED (attested)" : "enforced");
+            snprintf(out, sizeof out, "{\"ok\":true,\"released\":%s}", want ? "true" : "false");
+            respond_json(fd, out); return;
+        }
     }
 
     /* --------------------------------------------------- free program (283) */

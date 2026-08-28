@@ -113,6 +113,8 @@ class Mount:
         self.grail = False                     # Holy Grail ramp configured on
         self.tilt_comp = False                 # tilt compensation (unlevel base)
         self.dither = False                    # dithering between frames
+        self.cam_dir = False                   # camera-plate direction
+        self.limits_released = False           # travel limits released (restricted angle)
         self.aligned = False
         self.t0 = time.time()
         self.moves = 0
@@ -468,6 +470,18 @@ class Handler(socketserver.BaseRequestHandler):
             self.send("540@ret:0;")
         elif cmd == "549":            # auto-level — MOVES; sim just acks
             self.send("549@ret:0;")
+        elif cmd == "545":            # GET camera-plate direction
+            self.send(f"545@dir:{1 if mount.cam_dir else 0};")
+        elif cmd == "546":            # SET camera-plate direction (MOVES)
+            with mount.lock:
+                mount.cam_dir = args.get("dir", "0") == "1"
+            self.send("546@ret:0;")
+        elif cmd == "541":            # GET travel-limit state
+            self.send(f"541@state:{1 if mount.limits_released else 0};")
+        elif cmd == "542":            # SET travel-limit state (0 enforced, 1 released)
+            with mount.lock:
+                mount.limits_released = args.get("state", "0") == "1"
+            self.send("542@ret:0;")
         elif cmd == "517":            # mechanical pose, radians
             with mount.lock:
                 az, alt = mount.reported()

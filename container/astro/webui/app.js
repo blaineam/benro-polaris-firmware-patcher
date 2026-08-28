@@ -639,6 +639,64 @@ function wireShutter() {
 
 /* ─────────────────────────────── settings ──────────────────────────────── */
 
+/* Head settings: camera-plate direction (546, a benign move) and the restricted-
+   angle / travel-limit release (542, dangerous — attestation-gated). */
+function headSettingsRefresh() {
+  send(545, '', false);   /* prime the camera-plate direction read */
+  setTimeout(function () {
+    var d = S.ops['545']; if (d) $('#camdir').checked = kv(d.args).dir === '1';
+  }, 600);
+  var reflect = function (r) {
+    if (r && typeof r.released === 'boolean') {
+      $('#limits').checked = r.released;
+      $('#limits-danger').hidden = !r.released;
+      $('#limits-ok').checked = r.released;
+    }
+  };
+  var getLimits = function () {
+    return fetch('/api/astro/limits', { cache: 'no-store' }).then(function (r) { return r.json(); });
+  };
+  /* First read primes the head's 541; the reply lands a beat later, so read
+     again to reflect the true state (a safety toggle mustn't show stale). */
+  getLimits().then(reflect).catch(function () {});
+  setTimeout(function () { getLimits().then(reflect).catch(function () {}); }, 700);
+}
+
+function wireHeadSettings() {
+  $('#camdir').addEventListener('change', function () {
+    send(546, 'dir:' + (this.checked ? 1 : 0) + ';', true);   /* MOVES -> confirm=1 */
+    setHint('<b>Rotating the camera plate…</b>');
+  });
+  /* Restricted angle: toggling ON only REVEALS the attestation; the actual
+     release fires when the clearance box is ticked. Toggling OFF enforces the
+     limits immediately (always safe). */
+  $('#limits').addEventListener('change', function () {
+    if (this.checked) {
+      $('#limits-danger').hidden = false;
+    } else {
+      $('#limits-danger').hidden = true; $('#limits-ok').checked = false;
+      post('/api/astro/limits', { state: 0 }).then(function () {
+        setHint('<b>Rotation limits enforced</b> — the safe default.');
+      });
+    }
+  });
+  $('#limits-ok').addEventListener('change', function () {
+    if (!this.checked) { post('/api/astro/limits', { state: 0 }); return; }
+    post('/api/astro/limits', { state: 1, attest: 1 }).then(function (r) {
+      if (r && r.ok === false) {
+        setHint('<b>Limits:</b> ' + (r.error || ''));
+        $('#limits').checked = false; $('#limits-danger').hidden = true; $('#limits-ok').checked = false;
+      } else {
+        setHint('<b>Rotation limits RELEASED.</b> Watch the Astro Kit clearance in real time — the head can collide with it.');
+      }
+    });
+  });
+  $$('#tabs button').forEach(function (b) {
+    if (b.dataset.tab === 'settings') b.addEventListener('click', headSettingsRefresh);
+  });
+  headSettingsRefresh();
+}
+
 function wireSettings() {
   $('#aboutstream').textContent = streamURL();
 
@@ -1171,6 +1229,7 @@ function wireAstro() {
    app for now; these are the objects you actually image. */
 var ASTRO_TARGETS = [
   { n: 'Moon', t: 'moon', dyn: 'moon', a: 'luna' },
+  { n: 'Sun', t: 'sun', dyn: 'sun', a: 'solar', danger: 'solar' },
   { n: 'Mars', t: 'planet', dyn: 'mars', a: '' },
   { n: 'Jupiter', t: 'planet', dyn: 'jupiter', a: '' },
   { n: 'Saturn', t: 'planet', dyn: 'saturn', a: '' },
@@ -1242,6 +1301,7 @@ function ephem(body, date) {
   var lonsun = rev(Math.atan2(yvs, xvs) / RAD + ws), rsun = Math.sqrt(xvs * xvs + yvs * yvs);
   var xs = rsun * cosd(lonsun), ys = rsun * sind(lonsun);
 
+  if (body === 'sun') return radec(xs, ys, 0);
   if (body === 'moon') {
     var N = rev(125.1228 - 0.0529538083 * d), i = 5.1454, w = rev(318.0634 + 0.1643573223 * d);
     var a = 60.2666, e = 0.054900, M = rev(115.3654 + 13.0649929509 * d);
@@ -1316,17 +1376,29 @@ function wireTargets() {
   }
   render('');
   search.addEventListener('input', function () { render(this.value); });
+  function refreshGoState() {
+    var o = ASTRO_TARGETS[parseInt(sel.value, 10)]; if (!o) return;
+    var danger = o.danger === 'solar';
+    $('#tgt-danger').hidden = !danger;
+    go.disabled = danger && !$('#tgt-solar-ok').checked;
+    go.dataset.armed = '0'; go.classList.remove('armed');
+    go.textContent = 'Go to ' + o.n.split(' ')[0];
+  }
   sel.addEventListener('change', function () {
     var o = ASTRO_TARGETS[parseInt(this.value, 10)]; if (!o) return;
     var c = resolveTarget(o);
     info.textContent = o.n + '  ·  RA ' + (c.ra / 15).toFixed(2) + 'h  Dec ' + c.dec.toFixed(1) + '°' +
                        (c.dyn ? '  · now' : '');
-    go.disabled = false; go.dataset.armed = '0'; go.classList.remove('armed');
-    go.textContent = 'Go to ' + o.n.split(' ')[0];
+    if (o.danger !== 'solar') $('#tgt-solar-ok').checked = false;
+    refreshGoState();
   });
+  $('#tgt-solar-ok').addEventListener('change', refreshGoState);
   go.addEventListener('click', function () {
     var o = ASTRO_TARGETS[parseInt(sel.value, 10)]; if (!o) return;
     var msg = $('#tgt-msg'), c = resolveTarget(o);   /* fresh coords each tap for the Moon/planets */
+    if (o.danger === 'solar' && !$('#tgt-solar-ok').checked) {
+      setHint('<b>Sun:</b> confirm a solar filter is fitted first.'); return;
+    }
     if (go.dataset.armed !== '1') {
       post('/api/astro/goto', { ra: c.ra, dec: c.dec, name: o.n }).then(function (r) {
         if (r && r.valid === false) { setHint('<b>Go to:</b> ' + (r.error || '')); return; }
@@ -1934,6 +2006,7 @@ wireStage();
 wireExposure();
 wireShutter();
 wireSettings();
+wireHeadSettings();
 wirePrograms();
 wireAstro();
 wirePlc();
