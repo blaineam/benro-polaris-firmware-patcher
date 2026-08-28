@@ -447,6 +447,25 @@ spiral for a centre start. Like the rest of the inferred panorama binding the UI
 labels the fill *order* as assumed — the *count* the cells fill to is the head's
 own number, from the `step:3` progress poll.
 
+### Focus mode, observing site, device info
+
+- **AF/MF toggle** (Control tab, in the exposure strip) sends `262 SP_SET_FOCUS`.
+  MF is what the focus jog, the focus stack and Astro auto-focus all need — they
+  drive `311`, which only moves the lens in manual focus. The mode *value* is
+  inferred (`mod:1` = MF, `mod:0` = AF, matching `311`'s `mode:1` = MF-adjust);
+  it is benign to send and a one-line flip if hardware disagrees. **Confirm the
+  `mod` values on hardware.**
+- **Observing site** (Settings) is the latitude/longitude the solver hint,
+  Alpaca's site, and every alt/az conversion read from `g_lat`/`g_lon`. New
+  `/api/site` GET/POST sets them at runtime and persists to `site.conf` (rewriting
+  only `LAT=`/`LON=`, keeping `FOCAL` and the rest) so a reboot keeps them. A
+  "Use my location" button fills the fields from the browser's Geolocation API —
+  which browsers only expose on a secure (https) or localhost page, so over the
+  head's plain-http address it falls back to manual entry, with a message saying so.
+- **Device card** (Settings) shows firmware / hardware / Astro-Kit-axis / `sv` and
+  the device clock, from `780 SP_GET_DEVICE_VERSION` (`hw:;sw:;exAxis:;sv:;`) and
+  `781 SP_GET_SYSTEM_TIME`, both read-only and pulled from the `/api/link` dump.
+
 ## Web UI
 
 `http://<polaris ip>:8090/` — solve status, last solution (RA/Dec, roll, pixel

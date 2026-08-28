@@ -249,8 +249,25 @@
   realpath-checked inside the root — nothing else on the SD is reachable (seven
   attack vectors verified refused). New **Gallery tab**: a thumbnail grid with
   category filters and a tap-for-full lightbox.
+- **AF/MF toggle** in the exposure strip, like the app's `[ MF AF ]` chips —
+  sends `262 SP_SET_FOCUS` (already allowlisted, no motion). MF is what the focus
+  jog, focus stack and Astro auto-focus all need. The mode value is inferred
+  (`mod:1`=MF, `mod:0`=AF) — flagged to confirm on hardware.
+- **Runtime observing site** (Settings). New `/api/site` GET/POST sets the
+  latitude/longitude the solver hint, Alpaca and every alt/az conversion use, at
+  runtime, and persists to `site.conf` (rewriting only `LAT=`/`LON=`) so a reboot
+  keeps it. A **"Use my location"** button fills it from the browser's GPS, with a
+  graceful fallback (browsers only allow geolocation on a secure/localhost page).
+- **Device card** (Settings) — firmware / hardware / Astro-Kit axis / clock, from
+  `780 SP_GET_DEVICE_VERSION` + `781 SP_GET_SYSTEM_TIME` (added to the allowlist).
 
 ### Fixed
+
+- **A selectless exposure slot halted the boot script.** The new AF/MF control is
+  an `.exposlot` with no `<select>`, and the exposure loader swept every
+  `.exposlot` doing `select.addEventListener` — throwing on it and stopping the
+  boot before the later wiring ran. The three exposure sweeps are now scoped to
+  `.exposlot[data-get]`.
 
 ### Fixed — real-sky session, 2026-08-19
 
