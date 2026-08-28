@@ -175,8 +175,9 @@
   protocol client: two devices, CCD BLOB round-trips exactly.
 - **A guided target workflow, end to end.** The Astro tab now closes the loop:
   enter astro (tilt compensation handles an unlevel tripod) → plate-solve align
-  → **pick a target from a built-in catalogue** (Messier / NGC / IC highlights
-  plus bright alignment stars, searchable) → **Go to** it (a native GOTO that
+  → **pick a target from a built-in catalogue** (Messier / NGC / IC highlights,
+  bright alignment stars, and the **Moon + planets** computed live from a
+  client-side low-precision ephemeris, searchable) → **Go to** it (a native GOTO that
   slews and tracks, using the same `goto-radec` the bridges use, alignment-gated
   and two-tap) → auto-guiding holds it → **start the in-head astro capture**
   (a 272 interval sequence — the head shoots and stacks itself). The capture step
