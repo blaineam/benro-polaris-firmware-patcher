@@ -267,6 +267,16 @@
   for next boot. No `site.conf` editing, no SSH. The Astro tab shows a **"set your
   observing location"** prompt until it is set, and alignment/go-to are gated on it,
   while framing, focus, the gallery and the programmes work without it.
+- **Zero-SSH astro install** — `patch-polaris.sh --astro-autostart`. Bakes a
+  fail-safe, idempotent boot hook (`astro-autoinstall.sh`) into the patched
+  firmware; on boot the device self-installs the astro SD bundle to `/app/astro`
+  and starts the web server, so there is **no `install_astro.sh` by hand and no
+  SSH**. Put the card in, power on, open the page, set your location. Idempotent
+  (an SD swap with newer binaries updates in place), fail-safe (a problem there
+  cannot stop the rest of boot), and it chains a `--ssh-key` hook if both are
+  requested. Opt-in, and it requires re-flashing the patched firmware; the hook's
+  install/skip/update/chain/fail-safe logic is verified on a simulated filesystem,
+  but the on-hardware boot has not yet been exercised.
 
 ### Fixed
 

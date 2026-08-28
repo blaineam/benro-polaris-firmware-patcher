@@ -47,9 +47,8 @@ if [ ! -f "$CONF" ]; then
     if [ -f "$SRC/site.conf.example" ]; then
         cp "$SRC/site.conf.example" "$CONF"
         echo "[astro] created $CONF from the example"
-        echo "[astro] *** EDIT IT: LAT and LON are REQUIRED and are not guessable."
-        echo "[astro]     Without them the solver has no hint and Alpaca reports"
-        echo "[astro]     the wrong site."
+        echo "[astro]     Your location is OPTIONAL here — set it in the web app"
+        echo "[astro]     (Settings > Observing site, GPS or by hand) and it is saved back."
     fi
 else
     echo "[astro] kept your existing $CONF"
@@ -88,9 +87,10 @@ fi
 cat <<TXT
 
 [astro] Next:
-    1. Edit $CONF  (LAT, LON are required)
-    2. Reboot, or run: $HOOK
-    3. Open http://<polaris ip>:8090/
+    1. Reboot, or run: $HOOK
+    2. Open http://<polaris ip>:8090/
+    3. Set your location in the web app (Settings > Observing site) — optional,
+       needed only for alignment and go-to; saved to $CONF automatically.
 
 [astro] Solve a frame by hand (focal is read from EXIF; pass one to override):
     $DEST/polaris-align.sh /app/sd/normal/SP_0001.jpg

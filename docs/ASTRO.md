@@ -51,8 +51,31 @@ Polaris' microSD card:
 <SD root>/polaris-astro/site.conf         your configuration
 ```
 
-Then create `site.conf` (see below) and reboot. The boot hook installs the
-binaries to `/app/astro` and starts whatever you enabled.
+Then run `install_astro.sh` on the device once (over SSH), or — with no SSH at
+all — patch the firmware with `--astro-autostart` (below) so it self-installs.
+A `site.conf` is optional now: the location can be set from the web app.
+
+### Zero-SSH install
+
+Patch the firmware with the auto-install boot hook and you never touch a shell:
+
+```sh
+./patch-polaris.sh --fwpkt FwPkt.bin --astro-autostart
+```
+
+Flash that firmware, put the SD card (with the bundle above) in, and power on.
+On boot the device copies the bundle to `/app/astro` and starts the web server on
+`:8090` on its own — open the page and set your location. The hook is:
+
+- **idempotent** — safe every boot; it reinstalls only when `/app/astro` is
+  missing or the SD carries a newer `polaris-httpd`, so swapping in a freshly
+  built card updates the device in place;
+- **fail-safe** — any error there cannot stop the rest of the stock boot; and
+- it **chains a `--ssh-key` hook** if you asked for both.
+
+It requires re-flashing the patched firmware (an SD swap alone won't add the
+hook). The install/skip/update/chain/fail-safe logic is verified on a simulated
+filesystem; the on-hardware boot has not yet been exercised.
 
 ---
 

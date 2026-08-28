@@ -21,6 +21,10 @@
 #                          root login (path to a .pub / authorized_keys file, or
 #                          the key line itself). Adds one new appfs file; the
 #                          stock firmware already runs sshd. Repeatable.
+#     --astro-autostart    bake in a ZERO-SSH boot hook: on boot the device
+#                          self-installs the astro SD bundle and starts the web
+#                          server — no install_astro.sh by hand, no SSH. Requires
+#                          re-flashing this patched firmware. Fail-safe + opt-in.
 #     --image NAME         docker image tag              (default polaris-patcher)
 #
 #  READ THE README AND DISCLAIMERS FIRST.  Tested ONLY against FwVer 4.0.0.32
@@ -31,6 +35,7 @@ set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 FWPKT=""; VER="2.5.34"; OUT="$HERE/out"; SELFTEST=0; FIXTYPO=1; SWAPUSB1=1; IMG="polaris-patcher"; MODE="full"
 SSHKEY=""
+ASTROAUTO=0
 
 # These default FROM THE ENVIRONMENT so both forms work:
 #   LIBGPHOTO2_REF=my-branch ./patch-polaris.sh ...
@@ -57,6 +62,7 @@ while [ $# -gt 0 ]; do
     --selftest) SELFTEST=1; shift;;
     --no-fix-typo) FIXTYPO=0; shift;;
     --no-usb1) SWAPUSB1=0; shift;;
+    --astro-autostart) ASTROAUTO=1; shift;;
     --ssh-key)
       [ -n "${2:-}" ] || { echo "error: --ssh-key needs a value" >&2; exit 1; }
       if [ -f "$2" ]; then K="$(cat "$2")"
@@ -116,6 +122,7 @@ docker run --rm \
   -e KEEP_RESET_USB="$KEEPRESET" \
   -e SWAP_USB1="$SWAPUSB1" \
   -e SSH_PUBKEY="$SSHKEY" \
+  -e ASTRO_AUTOINSTALL="$ASTROAUTO" \
   -v "$IN":/in:ro -v "$OUT":/out \
   "$IMG"
 

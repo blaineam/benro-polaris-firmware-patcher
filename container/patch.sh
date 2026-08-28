@@ -421,6 +421,40 @@ if [ -n "${SSH_PUBKEY:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 7b. OPTIONAL (ASTRO_AUTOINSTALL): make the astro stack ZERO-SSH. Install the
+#     self-installing boot hook the stock /app/bootapp already calls; on boot it
+#     copies the SD bundle to /app/astro (idempotently) and starts the web
+#     server — no SSH, no install_astro.sh by hand. The hook is fail-safe: any
+#     error there cannot stop the rest of boot. If SSH was ALSO requested above,
+#     its hook is handed to the bootstrap as the chained pre-hook so both survive.
+# ---------------------------------------------------------------------------
+if [ "${ASTRO_AUTOINSTALL:-0}" = "1" ]; then
+  log "astro: installing the zero-SSH auto-install boot hook…"
+  BOOTAPP="$APP/bootapp"
+  [ -f "$BOOTAPP" ] || die "ASTRO_AUTOINSTALL set but /app/bootapp is missing from this appfs — refusing to guess a boot hook"
+  [ -f /opt/patcher/ondisk/astro-autoinstall.sh ] || die "ASTRO_AUTOINSTALL: /opt/patcher/ondisk/astro-autoinstall.sh missing from the patcher"
+  A_UID="$(stat -c %u "$BOOTAPP")"; A_GID="$(stat -c %g "$BOOTAPP")"; A_MODE="$(stat -c %a "$BOOTAPP")"
+
+  ASTRO_SLOT=""
+  if [ -n "$SSH_HOOK" ]; then
+    # SSH just claimed a slot: preserve its script as the bootstrap's pre-hook and
+    # reuse the same slot for the bootstrap, so the key is still appended at boot.
+    install -m "$A_MODE" -o "$A_UID" -g "$A_GID" "$APP/$SSH_HOOK" "$APP/astro-autoinstall.pre.sh"
+    ASTRO_SLOT="$SSH_HOOK"
+    log "  ssh-key hook chained as /app/astro-autoinstall.pre.sh (runs first at boot)"
+  else
+    for cand in network_telnetd.sh start_agent.sh; do
+      grep -q "$cand" "$BOOTAPP" || continue          # bootapp must actually call it
+      [ -e "$APP/$cand" ] && continue                 # do not clobber an existing hook
+      ASTRO_SLOT="$cand"; break
+    done
+    [ -n "$ASTRO_SLOT" ] || die "ASTRO_AUTOINSTALL: no free boot hook that /app/bootapp calls (network_telnetd.sh, start_agent.sh)"
+  fi
+  install -m "$A_MODE" -o "$A_UID" -g "$A_GID" /opt/patcher/ondisk/astro-autoinstall.sh "$APP/$ASTRO_SLOT"
+  log "  added /app/$ASTRO_SLOT ($A_MODE $A_UID:$A_GID — same as bootapp) — self-installs the SD bundle + starts the astro stack at boot, no SSH"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. Repack appfs (geometry read from the stock image) + regenerate firmwareInfo
 # ---------------------------------------------------------------------------
 /opt/patcher/repack_appfs.sh "$STOCK_APPFS" "$APP" "$W/out/appfs.ubifs"
