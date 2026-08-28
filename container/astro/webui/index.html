@@ -847,6 +847,28 @@
       </details>
   </section>
 
+  <!-- ───────────────────────────── GALLERY ───────────────────────────── -->
+  <section id="tab-gallery" class="tab" hidden>
+    <div class="galtop">
+      <p class="dim" style="margin:0">
+        Frames captured to the Polaris SD. Thumbnails are made <b>here</b>, on the
+        head, so a grid loads in seconds — the phone app has to pull whole frames
+        one at a time. Full-size copies still live on the camera card too.
+      </p>
+      <button id="gal-refresh" class="ghost sm" type="button">Refresh</button>
+    </div>
+    <div id="gal-filter" class="segbar"></div>
+    <div id="gal-empty" class="card dim" hidden>No captured frames on the SD yet.</div>
+    <div id="gal-grid" class="galgrid"></div>
+
+    <!-- Tap a thumbnail for the full frame. -->
+    <div id="gal-lightbox" class="lightbox" hidden>
+      <button id="gal-lb-close" class="gbtn lbclose" type="button" aria-label="close full view">✕</button>
+      <img id="gal-lb-img" alt="">
+      <div id="gal-lb-cap" class="lbcap mono"></div>
+    </div>
+  </section>
+
   <!-- ───────────────────────────── SETTINGS ──────────────────────────── -->
   <section id="tab-settings" class="tab" hidden>
 
@@ -919,6 +941,7 @@
   <button class="on" data-tab="control">Control</button>
   <button data-tab="programs">Programs</button>
   <button data-tab="astro">Astro</button>
+  <button data-tab="gallery">Gallery</button>
   <button data-tab="settings">Settings</button>
 </nav>
 

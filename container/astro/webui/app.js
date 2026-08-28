@@ -2266,7 +2266,71 @@ function wireTabs() {
       if (b.dataset.tab !== 'control') stopEverything();
       if (b.dataset.tab === 'programs') progPoll(); else clearTimeout(progTimer);
       if (b.dataset.tab === 'astro') astroPollStart(); else clearInterval(astroPoll);
+      if (b.dataset.tab === 'gallery') galleryLoad();
     });
+  });
+}
+
+/* ─────────────────────────────── gallery ───────────────────────────────
+   Thumbnails come from /api/media/thumb (a cached colour thumbnail the head
+   generates once); lazy-loading means only the visible ones are fetched, so a
+   big card doesn't spool up a hundred generations at once. Tap for the full
+   frame from /api/media/full. */
+var galItems = [], galCat = 'all';
+var GAL_LABELS = { normal: 'Photos', starskyStack: 'Astro', HDR: 'HDR',
+  panorama: 'Pano', focusStack: 'Focus', sun: 'Sun', Lapse: 'Timelapse' };
+function galLabel(c) { return GAL_LABELS[c] || c; }
+
+function galleryLoad() {
+  fetch('/api/media/list', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { galItems = (d && d.items) || []; galRenderFilter(); galRenderGrid(); })
+    .catch(function () {});
+}
+
+function galRenderFilter() {
+  var cats = {};
+  galItems.forEach(function (it) { cats[it.cat] = (cats[it.cat] || 0) + 1; });
+  if (!cats[galCat] && galCat !== 'all') galCat = 'all';
+  var html = '<button class="seg' + (galCat === 'all' ? ' on' : '') + '" data-cat="all">All ' + galItems.length + '</button>';
+  Object.keys(cats).sort().forEach(function (c) {
+    html += '<button class="seg' + (galCat === c ? ' on' : '') + '" data-cat="' + c + '">' + galLabel(c) + ' ' + cats[c] + '</button>';
+  });
+  var f = $('#gal-filter');
+  f.hidden = galItems.length === 0;
+  f.innerHTML = html;
+  $$('#gal-filter .seg').forEach(function (b) {
+    b.onclick = function () { galCat = b.dataset.cat; galRenderFilter(); galRenderGrid(); };
+  });
+}
+
+function galRenderGrid() {
+  var items = galCat === 'all' ? galItems : galItems.filter(function (it) { return it.cat === galCat; });
+  $('#gal-empty').hidden = items.length > 0;
+  $('#gal-grid').innerHTML = items.map(function (it) {
+    var p = encodeURIComponent(it.path);
+    return '<button class="galcell" data-path="' + p + '">' +
+      '<img loading="lazy" src="/api/media/thumb?path=' + p + '" alt="">' +
+      '<span class="galcat">' + galLabel(it.cat) + '</span></button>';
+  }).join('');
+  $$('#gal-grid .galcell').forEach(function (b) {
+    b.onclick = function () { galOpen(b.dataset.path); };
+  });
+}
+
+function galOpen(pathEnc) {
+  $('#gal-lb-img').src = '/api/media/full?path=' + pathEnc;
+  $('#gal-lb-cap').textContent = decodeURIComponent(pathEnc);
+  $('#gal-lightbox').hidden = false;
+}
+function galClose() { $('#gal-lightbox').hidden = true; $('#gal-lb-img').removeAttribute('src'); }
+
+function wireGallery() {
+  $('#gal-refresh').onclick = galleryLoad;
+  $('#gal-lb-close').onclick = galClose;
+  $('#gal-lightbox').onclick = function (e) { if (e.target === this) galClose(); };
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !$('#gal-lightbox').hidden) galClose();
   });
 }
 
@@ -2277,6 +2341,7 @@ wireJog();
 wireSticks();
 wireStage();
 wireOverlays();
+wireGallery();
 wireExposure();
 wireShutter();
 wireSettings();

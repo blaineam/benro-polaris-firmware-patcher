@@ -62,6 +62,8 @@ static void usage(const char* me) {
 "  --max-stars N     keep the brightest N       (default 300)\n"
 "  --focus-metric    print one autofocus line \"focus score=.. hfr=.. stars=.. sharp=..\"\n"
 "                    (score to MAXIMISE, median HFR of the brightest stars) and stop\n"
+"  --thumb MAXDIM    write a colour JPEG thumbnail (<=MAXDIM px on the long side)\n"
+"                    to stdout and stop -- for the web gallery\n"
 "  --margin PX       ignore blobs within PX of the edge, full-res (default 16)\n"
 "  --tile PX         background tile size at the DECODED scale (default 64).\n"
 "                    Background and noise are measured per tile and\n"
@@ -142,11 +144,77 @@ static double exif_focal_mm(const unsigned char* d, unsigned len)
     return 0.0;
 }
 
+/* Colour JPEG thumbnail to stdout: decode at the cheapest 1/N that still clears
+ * `maxdim` (libjpeg does the shrink in the IDCT), nearest-neighbour box down to
+ * fit maxdim, re-encode small. This is what the web gallery serves per photo, so
+ * a phone loads a grid of 30 KB thumbs instead of 30 nine-megabyte frames. It is
+ * a fully SEPARATE libjpeg pass from the grayscale star path below. */
+static int emit_thumbnail(const char* fn, int maxdim) {
+    struct jpeg_decompress_struct din; struct jpeg_error_mgr derr;
+    struct jpeg_compress_struct   cout; struct jpeg_error_mgr cerr;
+    FILE* f = fopen(fn, "rb");
+    int longest, denom = 1, sw, sh, comp, dw, dh, x, y;
+    unsigned char *src, *dst;
+    if (!f) { fprintf(stderr, "cannot open %s\n", fn); return 1; }
+    din.err = jpeg_std_error(&derr);
+    jpeg_create_decompress(&din);
+    jpeg_stdio_src(&din, f);
+    jpeg_read_header(&din, TRUE);
+    longest = din.image_width > din.image_height ? (int)din.image_width : (int)din.image_height;
+    while (denom < 8 && longest / (denom * 2) >= maxdim) denom *= 2;
+    din.scale_num = 1; din.scale_denom = denom;
+    din.out_color_space = JCS_RGB;               /* normalise YCbCr/greyscale -> RGB */
+    din.dct_method = JDCT_IFAST;
+    jpeg_start_decompress(&din);
+    sw = (int)din.output_width; sh = (int)din.output_height; comp = din.output_components;
+    src = (unsigned char*)malloc((size_t)sw * sh * comp);
+    if (!src) { fprintf(stderr, "oom thumb %dx%d\n", sw, sh); jpeg_destroy_decompress(&din); fclose(f); return 1; }
+    while (din.output_scanline < (unsigned)sh) {
+        unsigned char* rp = src + (size_t)din.output_scanline * sw * comp;
+        jpeg_read_scanlines(&din, &rp, 1);
+    }
+    jpeg_finish_decompress(&din);
+    jpeg_destroy_decompress(&din);
+    fclose(f);
+
+    if (sw >= sh) { dw = sw > maxdim ? maxdim : sw; dh = (int)((long)sh * dw / sw); }
+    else          { dh = sh > maxdim ? maxdim : sh; dw = (int)((long)sw * dh / sh); }
+    if (dw < 1) dw = 1; if (dh < 1) dh = 1;
+    dst = (unsigned char*)malloc((size_t)dw * dh * comp);
+    if (!dst) { fprintf(stderr, "oom thumb out\n"); free(src); return 1; }
+    for (y = 0; y < dh; y++) {
+        int sy = (int)((long)y * sh / dh);
+        for (x = 0; x < dw; x++) {
+            int sx = (int)((long)x * sw / dw);
+            memcpy(dst + ((size_t)y * dw + x) * comp, src + ((size_t)sy * sw + sx) * comp, (size_t)comp);
+        }
+    }
+    free(src);
+
+    cout.err = jpeg_std_error(&cerr);
+    jpeg_create_compress(&cout);
+    jpeg_stdio_dest(&cout, stdout);
+    cout.image_width = dw; cout.image_height = dh;
+    cout.input_components = comp; cout.in_color_space = (comp == 1) ? JCS_GRAYSCALE : JCS_RGB;
+    jpeg_set_defaults(&cout);
+    jpeg_set_quality(&cout, 72, TRUE);
+    jpeg_start_compress(&cout, TRUE);
+    while (cout.next_scanline < (unsigned)dh) {
+        unsigned char* rp = dst + (size_t)cout.next_scanline * dw * comp;
+        jpeg_write_scanlines(&cout, &rp, 1);
+    }
+    jpeg_finish_compress(&cout);
+    jpeg_destroy_compress(&cout);
+    free(dst);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const char* fn = NULL;
     int ds = 4, minpix = 3, maxpix = 500, maxstars = 300, margin = 16, stats = 0;
     int gray_pgm = 0;   /* dump the decoded grayscale as a binary PGM, no stars */
     int focus_metric = 0;   /* print one sharpness line for autofocus, no stars */
+    int thumb_max = 0;      /* >0: emit a colour JPEG thumbnail of this max dim, no stars */
     double focal_mm = 0.0;                 /* from EXIF; 0 = unknown */
     char focalbuf[32];
     int y_bottom = 1;                 /* FITS convention by default */
@@ -180,11 +248,14 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--stats"))      stats = 1;
         else if (!strcmp(a, "--gray-pgm"))   gray_pgm = 1;
         else if (!strcmp(a, "--focus-metric")) focus_metric = 1;
+        else if (!strcmp(a, "--thumb"))      thumb_max = atoi(NEXT());
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option: %s\n", a); usage(argv[0]); return 2; }
         #undef NEXT
     }
     if (!fn) { usage(argv[0]); return 2; }
+    /* --thumb short-circuits the whole star pipeline: it is its own colour pass. */
+    if (thumb_max > 0) return emit_thumbnail(fn, thumb_max);
     if (ds != 1 && ds != 2 && ds != 4 && ds != 8) {
         fprintf(stderr, "--downsample must be 1, 2, 4 or 8\n"); return 2;
     }

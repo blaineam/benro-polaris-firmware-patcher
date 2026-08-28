@@ -34,6 +34,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <limits.h>
 
 #include "polaris-link.h"
 #include "polaris-jog.h"
@@ -104,6 +105,7 @@ static const char *g_astro = ASTRO_DIR;
 static const char *g_mount_host = "127.0.0.1";
 static int         g_mount_port = 9090;
 static int         g_http_port  = 8080;   /* our own port, for the autofocus job */
+static const char *g_media_root = "/app/sd";   /* where captured JPEGs land */
 static double g_lat = 0.0, g_lon = 0.0;
 static int    g_have_pos = 0;
 static double g_focal = 400.0;
@@ -777,6 +779,102 @@ static void serve_snapshot(int fd) {
     fclose(f);
     respond(fd, 200, "image/jpeg", buf, (size_t)sz);
     free(buf);
+}
+
+/* ===========================================================================
+ * Media gallery
+ *
+ * Captured JPEGs land on the Polaris SD next to us (docs/CAPTURE-PATH.md):
+ *   /app/sd/{normal,starskyStack,HDR,panorama,focusStack,sun} and
+ *   /app/sd/Lapse/class_* . We list them, serve a small cached colour thumbnail
+ * per photo (polaris-extract --thumb), and stream the full frame on demand. The
+ * head exposes no thumbnail endpoint, so the phone app pulls whole ~9 MB frames
+ * one at a time; running beside the files we do much better.
+ *
+ * SECURITY: `path` is attacker-controlled. It is confined to a .jpg under one of
+ * the known capture categories, every character whitelisted to [A-Za-z0-9._/-]
+ * (so it can never break out of the single-quoted shell argument, and no "..",
+ * space, or metacharacter survives), and the resolved file must realpath INSIDE
+ * the media root. Nothing else on the SD (wifi keys, logs, configs) is reachable.
+ * =========================================================================== */
+
+static const char *MEDIA_CATS[] = { "normal","starskyStack","HDR","panorama","focusStack","sun","Lapse" };
+#define MEDIA_NCATS 7
+#define MEDIA_THUMB_DIR "/tmp/polaris-thumb"
+
+static int ends_jpg(const char *s) {
+    size_t n = strlen(s);
+    return (n > 4 && !strcasecmp(s + n - 4, ".jpg")) || (n > 5 && !strcasecmp(s + n - 5, ".jpeg"));
+}
+
+/* Validate a client path and build the absolute file path. Returns 1 if safe. */
+static int media_resolve(const char *rel, char *abs, size_t abscap) {
+    size_t i, L; int catok = 0; char real[PATH_MAX], rroot[PATH_MAX];
+    if (!rel || !rel[0] || rel[0] == '/' || strlen(rel) > 512) return 0;
+    if (strstr(rel, "..")) return 0;
+    for (i = 0; rel[i]; i++) {
+        char c = rel[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '/' || c == '-'))
+            return 0;                          /* strict whitelist — no shell metachars */
+    }
+    if (!ends_jpg(rel)) return 0;
+    for (i = 0; i < MEDIA_NCATS; i++) {        /* first component must be a known category */
+        L = strlen(MEDIA_CATS[i]);
+        if (!strncmp(rel, MEDIA_CATS[i], L) && rel[L] == '/') { catok = 1; break; }
+    }
+    if (!catok) return 0;
+    if ((size_t)snprintf(abs, abscap, "%s/%s", g_media_root, rel) >= abscap) return 0;
+    if (!realpath(abs, real) || !realpath(g_media_root, rroot)) return 0;
+    L = strlen(rroot);
+    if (strncmp(real, rroot, L) || (real[L] != '/' && real[L] != 0)) return 0;
+    return 1;
+}
+
+/* Stream a file to the client in bounded chunks — the full frames are ~9 MB and
+ * must not be read whole into memory on the head. */
+static void serve_file_streamed(int fd, const char *path, const char *ctype) {
+    FILE *f = fopen(path, "rb");
+    long sz; char hdr[320], buf[65536]; size_t r;
+    if (!f) { respond(fd, 404, "text/plain", "not found", 9); return; }
+    fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz < 0) { fclose(f); respond(fd, 500, "text/plain", "stat", 4); return; }
+    snprintf(hdr, sizeof hdr,
+        "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
+        "Cache-Control: max-age=60\r\nConnection: close\r\n\r\n", ctype, sz);
+    send_all(fd, hdr, strlen(hdr));
+    while ((r = fread(buf, 1, sizeof buf, f)) > 0) send_all(fd, buf, r);
+    fclose(f);
+}
+
+typedef struct { char rel[600]; long mtime; long size; } media_ent_t;
+
+static int media_cmp(const void *a, const void *b) {   /* newest first */
+    long d = ((const media_ent_t *)b)->mtime - ((const media_ent_t *)a)->mtime;
+    return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+
+/* Collect the .jpg regular files directly inside <root>/<catrel> into ents. */
+static void media_scan_dir(const char *catrel, media_ent_t *ents, int *n, int cap) {
+    char dp[PATH_MAX]; DIR *d; struct dirent *e;
+    snprintf(dp, sizeof dp, "%s/%s", g_media_root, catrel);
+    d = opendir(dp); if (!d) return;
+    while (*n < cap && (e = readdir(d))) {
+        char fp[PATH_MAX + 300]; struct stat st;
+        if (e->d_name[0] == '.' || !ends_jpg(e->d_name)) continue;
+        snprintf(fp, sizeof fp, "%s/%s", dp, e->d_name);
+        if (stat(fp, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        snprintf(ents[*n].rel, sizeof ents[*n].rel, "%s/%s", catrel, e->d_name);
+        ents[*n].mtime = (long)st.st_mtime; ents[*n].size = (long)st.st_size;
+        (*n)++;
+    }
+    closedir(d);
+}
+
+static unsigned long media_hash(const char *s) {   /* djb2 */
+    unsigned long h = 5381; int c;
+    while ((c = (unsigned char)*s++)) h = ((h << 5) + h) + (unsigned long)c;
+    return h;
 }
 
 /* Serve the captured PGM as an ASCOM ImageArray (Type Int32, Rank 2, mono).
@@ -2754,6 +2852,80 @@ static void handle(int fd) {
     /* One live-view frame, same-origin, so the overlays can read its pixels. */
     if (!strcmp(path, "/api/snapshot")) { serve_snapshot(fd); return; }
 
+    /* Gallery: list the captured JPEGs, newest first, across the capture dirs. */
+    if (!strcmp(path, "/api/media/list")) {
+        int cap = 400, n = 0, i; media_ent_t *ents; char *out; size_t o, ocap;
+        ents = malloc((size_t)cap * sizeof *ents);
+        if (!ents) { respond(fd, 500, "text/plain", "oom", 3); return; }
+        for (i = 0; i < MEDIA_NCATS; i++) {
+            if (!strcmp(MEDIA_CATS[i], "Lapse")) {           /* Lapse/class_* subdirs */
+                char lp[PATH_MAX]; DIR *ld; struct dirent *le;
+                snprintf(lp, sizeof lp, "%s/Lapse", g_media_root);
+                ld = opendir(lp);
+                if (ld) {
+                    while (n < cap && (le = readdir(ld))) {
+                        char sub[640], full[PATH_MAX]; struct stat s2;
+                        if (le->d_name[0] == '.') continue;
+                        snprintf(sub, sizeof sub, "Lapse/%s", le->d_name);
+                        snprintf(full, sizeof full, "%s/%s", g_media_root, sub);
+                        if (stat(full, &s2) == 0 && S_ISDIR(s2.st_mode))
+                            media_scan_dir(sub, ents, &n, cap);
+                    }
+                    closedir(ld);
+                }
+            } else media_scan_dir(MEDIA_CATS[i], ents, &n, cap);
+        }
+        qsort(ents, (size_t)n, sizeof *ents, media_cmp);
+        ocap = (size_t)n * 760 + 128;
+        out = malloc(ocap);
+        if (!out) { free(ents); respond(fd, 500, "text/plain", "oom", 3); return; }
+        o = (size_t)snprintf(out, ocap, "{\"ok\":true,\"count\":%d,\"items\":[", n);
+        for (i = 0; i < n; i++) {
+            char esc[1210], cat[40]; const char *slash = strchr(ents[i].rel, '/');
+            size_t cl = slash ? (size_t)(slash - ents[i].rel) : 0;
+            if (cl >= sizeof cat) cl = sizeof cat - 1;
+            memcpy(cat, ents[i].rel, cl); cat[cl] = 0;
+            json_escape(ents[i].rel, esc, sizeof esc);
+            o += (size_t)snprintf(out + o, ocap - o,
+                "%s{\"path\":\"%s\",\"cat\":\"%s\",\"size\":%ld,\"mtime\":%ld}",
+                i ? "," : "", esc, cat, ents[i].size, ents[i].mtime);
+        }
+        o += (size_t)snprintf(out + o, ocap - o, "]}");
+        respond(fd, 200, "application/json", out, o);
+        free(out); free(ents);
+        return;
+    }
+
+    /* A cached colour thumbnail for one photo. Generated once by polaris-extract
+     * --thumb; the cache key folds in the file's mtime so a re-shot frame with
+     * the same name regenerates. */
+    if (!strcmp(path, "/api/media/thumb")) {
+        char rel[600] = "", abs[PATH_MAX], cache[PATH_MAX], cmd[PATH_MAX * 2 + 64];
+        struct stat sa, sc;
+        if (!param(qs, "path", rel, sizeof rel)) { respond_400(fd, "path required"); return; }
+        if (!media_resolve(rel, abs, sizeof abs)) { respond(fd, 403, "text/plain", "forbidden", 9); return; }
+        if (stat(abs, &sa) != 0) { respond(fd, 404, "text/plain", "not found", 9); return; }
+        mkdir(MEDIA_THUMB_DIR, 0755);
+        snprintf(cache, sizeof cache, "%s/%lu_%ld.jpg", MEDIA_THUMB_DIR, media_hash(rel), (long)sa.st_mtime);
+        if (stat(cache, &sc) != 0 || sc.st_size == 0) {
+            snprintf(cmd, sizeof cmd,
+                "%s/polaris-extract --jpeg '%s' --thumb 320 > '%s' 2>/dev/null",
+                g_astro, abs, cache);
+            if (system(cmd) == -1) {}
+        }
+        serve_file_streamed(fd, cache, "image/jpeg");
+        return;
+    }
+
+    /* The full frame, streamed (they are ~9 MB — not read whole into memory). */
+    if (!strcmp(path, "/api/media/full")) {
+        char rel[600] = "", abs[PATH_MAX];
+        if (!param(qs, "path", rel, sizeof rel)) { respond_400(fd, "path required"); return; }
+        if (!media_resolve(rel, abs, sizeof abs)) { respond(fd, 403, "text/plain", "forbidden", 9); return; }
+        serve_file_streamed(fd, abs, "image/jpeg");
+        return;
+    }
+
     /* ------------------------------------------------------ control link */
 
     /* Everything the link has heard, plus its own health. One request, so the
@@ -4244,6 +4416,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--lx200-port") && i+1 < argc) lx_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--indi-port") && i+1 < argc) indi_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-discovery")) discovery = 0;
+        else if (!strcmp(argv[i], "--media-root") && i+1 < argc) g_media_root = argv[++i];
         else if (!strcmp(argv[i], "--mount-host") && i+1 < argc) g_mount_host = argv[++i];
         else if (!strcmp(argv[i], "--mount-port") && i+1 < argc) g_mount_port = atoi(argv[++i]);
         else {
