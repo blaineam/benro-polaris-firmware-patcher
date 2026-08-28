@@ -877,6 +877,30 @@ static unsigned long media_hash(const char *s) {   /* djb2 */
     return h;
 }
 
+/* Persist the observing site to site.conf so a runtime change survives a reboot
+ * (the boot script reads LAT=/LON= from it). Rewrites only those two lines and
+ * keeps everything else — FOCAL, the start-disabled flag, etc. */
+static void persist_site_latlon(double lat, double lon) {
+    char path[PATH_MAX], tmp[PATH_MAX], line[512];
+    FILE *in, *out;
+    snprintf(path, sizeof path, "%s/site.conf", g_astro);
+    snprintf(tmp,  sizeof tmp,  "%s/site.conf.tmp", g_astro);
+    out = fopen(tmp, "w");
+    if (!out) return;
+    in = fopen(path, "r");
+    if (in) {
+        while (fgets(line, sizeof line, in)) {
+            const char *p = line; while (*p == ' ' || *p == '\t') p++;
+            if (!strncmp(p, "LAT=", 4) || !strncmp(p, "LON=", 4)) continue;   /* drop old */
+            fputs(line, out);
+        }
+        fclose(in);
+    }
+    fprintf(out, "LAT=%.6f\nLON=%.6f\n", lat, lon);
+    fclose(out);
+    rename(tmp, path);
+}
+
 /* Serve the captured PGM as an ASCOM ImageArray (Type Int32, Rank 2, mono).
  * ImageArray[x][y]; the PGM is row-major, so column x = px[y*w + x]. */
 static void alpaca_cam_imagearray(int fd, const char *qs) {
@@ -2649,6 +2673,11 @@ static const opcode_policy_t OPCODES[] = {
      * the head into its own accessory. (545 read / 546 set) */
     { 545, "camera-dir-get", 3, 0, "read the camera-plate direction -> dir:<0|1>" },
     { 546, "camera-dir",     3, 1, "dir:<0|1> -- re-orient the camera plate" },
+    /* Device identity + clock, read-only. 780 replies hw:;sw:;exAxis:;sv:; (the
+     * firmware version and whether the Astro Kit / external axis is attached);
+     * 781 the device system time. The client reads both from the /api/link dump. */
+    { 780, "device-version", 2, 0, "read hw/sw/exAxis/sv version" },
+    { 781, "system-time",    2, 0, "read the device system time" },
 
     /* NOT LISTED, DELIBERATELY:
      *   530  multi-step star alignment -- wedges the motors on repeat, and the
@@ -2851,6 +2880,33 @@ static void handle(int fd) {
 
     /* One live-view frame, same-origin, so the overlays can read its pixels. */
     if (!strcmp(path, "/api/snapshot")) { serve_snapshot(fd); return; }
+
+    /* Observing site (lat/lon). The solver hint, Alpaca's site, and every
+     * alt/az conversion read g_lat/g_lon; GET reports them, POST sets them at
+     * runtime and persists to site.conf so a reboot keeps them. */
+    if (!strcmp(path, "/api/site")) {
+        char out[192];
+        if (!strcmp(method, "GET")) {
+            snprintf(out, sizeof out,
+                "{\"ok\":true,\"have_pos\":%s,\"lat\":%.6f,\"lon\":%.6f}",
+                g_have_pos ? "true" : "false", g_lat, g_lon);
+            respond_json(fd, out); return;
+        }
+        {
+            char la[32] = "", lo[32] = ""; double lat, lon;
+            if (!param(qs, "lat", la, sizeof la) && body) param(body, "lat", la, sizeof la);
+            if (!param(qs, "lon", lo, sizeof lo) && body) param(body, "lon", lo, sizeof lo);
+            if (!la[0] || !lo[0]) { respond_400(fd, "lat and lon required"); return; }
+            lat = atof(la); lon = atof(lo);
+            if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+                respond_400(fd, "lat -90..90, lon -180..180"); return; }
+            g_lat = lat; g_lon = lon; g_have_pos = 1;
+            persist_site_latlon(lat, lon);
+            fprintf(stderr, "[site] position set to %.6f, %.6f (persisted)\n", lat, lon);
+            snprintf(out, sizeof out, "{\"ok\":true,\"lat\":%.6f,\"lon\":%.6f}", lat, lon);
+            respond_json(fd, out); return;
+        }
+    }
 
     /* Gallery: list the captured JPEGs, newest first, across the capture dirs. */
     if (!strcmp(path, "/api/media/list")) {

@@ -631,14 +631,14 @@ function parseOptions(args) {
 function fetchExposure() {
   S.lastExpoFetch = Date.now();
   /* The app refreshes all five together, rate-limited to once per 2 s. */
-  var gets = $$('.exposlot').map(function (slot) { return slot.dataset.get; });
+  var gets = $$('.exposlot[data-get]').map(function (slot) { return slot.dataset.get; });
   Promise.all(gets.map(function (g) { return send(g, ''); }))
     .then(function () { setTimeout(paintExposure, 700); });
 }
 
 function paintExposure() {
   var any = false;
-  $$('.exposlot').forEach(function (slot) {
+  $$('.exposlot[data-get]').forEach(function (slot) {
     var got = S.ops[slot.dataset.get];
     var sel = $('select', slot);
     if (!got) { sel.disabled = true; return; }
@@ -660,8 +660,32 @@ function paintExposure() {
   if (any) S.expoLoaded = true;
 }
 
+/* AF/MF toggle — 262 SP_SET_FOCUS mod:<m>. The MODE VALUE is inferred (the
+   decompiled focus-mode enum is not in our sources): mod:1 = MF, mod:0 = AF, to
+   match 311's mode:1 = MF-adjust. It is benign to send (no motion) and a one-line
+   flip if hardware says otherwise. Tracked client-side — 262 has no read-back, so
+   the toggle shows the last EXPLICIT choice, defaulting to MF (which the focus
+   jog, the focus stack and Astro auto-focus all require). */
+var FM_MODE = { mf: 1, af: 0 };
+function paintFocusMode(m) {
+  $('#fm-mf').classList.toggle('on', m === 'mf');
+  $('#fm-af').classList.toggle('on', m === 'af');
+}
+function setFocusMode(m) {
+  send(262, 'mod:' + FM_MODE[m] + ';f:0;');
+  paintFocusMode(m);
+  try { localStorage.setItem('polaris-focusmode', m); } catch (_) {}
+}
+function wireFocusMode() {
+  $('#fm-mf').addEventListener('click', function () { setFocusMode('mf'); });
+  $('#fm-af').addEventListener('click', function () { setFocusMode('af'); });
+  var m = 'mf';
+  try { m = localStorage.getItem('polaris-focusmode') || 'mf'; } catch (_) {}
+  paintFocusMode(m);   /* reflect only — do not send on load */
+}
+
 function wireExposure() {
-  $$('.exposlot').forEach(function (slot) {
+  $$('.exposlot[data-get]').forEach(function (slot) {
     $('select', slot).addEventListener('change', function (e) {
       /* Set by INDEX into the camera's own list — never by the label. */
       send(slot.dataset.set, slot.dataset.key + ':' + e.target.value + ';')
@@ -2267,6 +2291,7 @@ function wireTabs() {
       if (b.dataset.tab === 'programs') progPoll(); else clearTimeout(progTimer);
       if (b.dataset.tab === 'astro') astroPollStart(); else clearInterval(astroPoll);
       if (b.dataset.tab === 'gallery') galleryLoad();
+      if (b.dataset.tab === 'settings') { siteLoad(); deviceRefresh(); }
     });
   });
 }
@@ -2334,6 +2359,79 @@ function wireGallery() {
   });
 }
 
+/* ── observing site: lat/lon, with the browser's GPS to fill it ──
+   Geolocation needs a secure context, so on a plain-http link to the head the
+   browser may refuse it; we fall back to manual entry and say why. Saving hits
+   /api/site, which updates the running server and persists to site.conf. */
+function siteMsg(html, bad) {
+  var m = $('#site-msg'); m.hidden = false; m.innerHTML = html;
+  m.style.color = bad ? 'var(--err)' : '';
+}
+function siteLoad() {
+  fetch('/api/site', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+    if (d && d.have_pos) { $('#site-lat').value = (+d.lat).toFixed(4); $('#site-lon').value = (+d.lon).toFixed(4); }
+  }).catch(function () {});
+}
+function wireSite() {
+  $('#site-gps').addEventListener('click', function () {
+    if (!navigator.geolocation) { siteMsg('This browser has no location API — type it in.', true); return; }
+    siteMsg('Getting your location…');
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      $('#site-lat').value = pos.coords.latitude.toFixed(4);
+      $('#site-lon').value = pos.coords.longitude.toFixed(4);
+      siteMsg('Filled from your device — tap <b>Save site</b> to store it.');
+    }, function (err) {
+      siteMsg('Location unavailable (' + ((err && err.message) || 'denied') + '). Browsers ' +
+        'only allow it on a secure (https) or localhost page, so over the head’s plain-http ' +
+        'address you’ll need to type it in.', true);
+    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+  });
+  $('#site-save').addEventListener('click', function () {
+    var lat = parseFloat($('#site-lat').value), lon = parseFloat($('#site-lon').value);
+    if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      siteMsg('Enter a latitude (−90…90) and longitude (−180…180).', true); return;
+    }
+    post('/api/site', { lat: lat, lon: lon }).then(function (r) {
+      if (r && r.ok) siteMsg('Saved ' + lat.toFixed(4) + '°, ' + lon.toFixed(4) + '° — it survives a reboot.');
+      else siteMsg('Could not save: ' + ((r && r.error) || 'unknown'), true);
+    });
+  });
+  siteLoad();
+}
+
+/* ── device: firmware / hardware / Astro Kit / clock, from 780 + 781 ── */
+function htmlesc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function kv2obj(s) {
+  var o = {}; (s || '').split(';').forEach(function (kv) { var i = kv.indexOf(':'); if (i > 0) o[kv.slice(0, i)] = kv.slice(i + 1); });
+  return o;
+}
+function deviceRefresh() {
+  var el = $('#dev-info');
+  if (S.link !== 'up') {
+    el.innerHTML = '<dd class="dim">The control link is down — align the mount, then Refresh.</dd>'; return;
+  }
+  send(780); send(781);
+  setTimeout(function () {
+    fetch('/api/link', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      var ops = (d && d.opcodes) || {};
+      var v = kv2obj(ops['780'] && ops['780'].args);
+      var t = ops['781'] && ops['781'].args;
+      var rows = '';
+      if (v.sw) rows += '<dt>Firmware</dt><dd class="mono">' + htmlesc(v.sw) + '</dd>';
+      if (v.hw) rows += '<dt>Hardware</dt><dd class="mono">' + htmlesc(v.hw) + '</dd>';
+      if (v.exAxis !== undefined) rows += '<dt>Astro Kit / axis</dt><dd class="mono">' + htmlesc(v.exAxis || '—') + '</dd>';
+      if (v.sv) rows += '<dt>sv</dt><dd class="mono">' + htmlesc(v.sv) + '</dd>';
+      if (t) {
+        var tk = kv2obj(t);
+        var tstr = (tk.date && tk.time) ? (tk.date + ' ' + tk.time) : t.replace(/;+$/, '');
+        rows += '<dt>Device time</dt><dd class="mono">' + htmlesc(tstr) + '</dd>';
+      }
+      el.innerHTML = rows || '<dd class="dim">No reply yet — try Refresh.</dd>';
+    }).catch(function () {});
+  }, 600);
+}
+function wireDevice() { $('#dev-refresh').addEventListener('click', deviceRefresh); }
+
 /* ──────────────────────────────── boot ─────────────────────────────────── */
 
 wireTabs();
@@ -2342,7 +2440,10 @@ wireSticks();
 wireStage();
 wireOverlays();
 wireGallery();
+wireSite();
+wireDevice();
 wireExposure();
+wireFocusMode();
 wireShutter();
 wireSettings();
 wireHeadSettings();

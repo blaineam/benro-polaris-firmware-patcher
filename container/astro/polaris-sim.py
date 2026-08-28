@@ -396,6 +396,10 @@ class Handler(socketserver.BaseRequestHandler):
             self.send("778@capacity:82;charge:0;")
         elif cmd == "775":
             self.send("775@status:1;totalspace:62914560;freespace:41943040;usespace:20971520;")
+        elif cmd == "780":                              # SP_GET_DEVICE_VERSION
+            self.send("780@hw:1.2;sw:6.03.10;exAxis:1;sv:2;")
+        elif cmd == "781":                              # SP_GET_SYSTEM_TIME
+            self.send("781@date:2026-08-27;time:22:41:03;")
         elif cmd in ("265", "266", "267", "268", "275"):
             # Camera option lists: RD:0=available, V=selected index, R=csv.
             lists = {

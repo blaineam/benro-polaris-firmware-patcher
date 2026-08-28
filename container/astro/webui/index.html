@@ -103,6 +103,15 @@
       <div class="exposlot" data-get="265" data-set="258" data-key="iso"><span class="lbl">ISO</span><select disabled></select></div>
       <div class="exposlot" data-get="267" data-set="260" data-key="ev"><span class="lbl">EV</span><select disabled></select></div>
       <div class="exposlot" data-get="266" data-set="259" data-key="wb"><span class="lbl">WB</span><select disabled></select></div>
+      <!-- AF/MF, like the app's [ MF AF ] chips. MF is what the focus jog, the
+           focus stack and Astro auto-focus all need (they drive 311). -->
+      <div class="exposlot">
+        <span class="lbl">focus mode</span>
+        <div class="afmf" role="group" aria-label="autofocus / manual focus">
+          <button id="fm-mf" class="afmf-btn on" type="button" data-mode="mf">MF</button>
+          <button id="fm-af" class="afmf-btn" type="button" data-mode="af">AF</button>
+        </div>
+      </div>
     </div>
 
     <!-- Manual focus jog — the same 311 focus-adjust the focus-stack rack uses,
@@ -871,6 +880,41 @@
 
   <!-- ───────────────────────────── SETTINGS ──────────────────────────── -->
   <section id="tab-settings" class="tab" hidden>
+
+    <!-- Observing site: the lat/lon the solver hint, Alpaca and every alt/az
+         conversion use. Runtime-settable and persisted to site.conf. -->
+    <div class="card">
+      <h3>Observing site</h3>
+      <p class="tiny dim">
+        Your latitude and longitude — the plate solver's search hint, the Alpaca
+        site, and every go-to alt/az conversion use them. Saved on the head, so it
+        survives a reboot.
+      </p>
+      <div class="siterow">
+        <div class="field">
+          <label for="site-lat">Latitude</label>
+          <div class="fieldrow"><input id="site-lat" type="number" min="-90" max="90" step="0.0001" placeholder="40.0000"><span class="unit">°N</span></div>
+        </div>
+        <div class="field">
+          <label for="site-lon">Longitude</label>
+          <div class="fieldrow"><input id="site-lon" type="number" min="-180" max="180" step="0.0001" placeholder="-111.9000"><span class="unit">°E</span></div>
+        </div>
+      </div>
+      <div class="markrow">
+        <button id="site-gps" class="ghost" type="button">Use my location</button>
+        <button id="site-save" class="startbtn" type="button">Save site</button>
+      </div>
+      <p id="site-msg" class="tiny dim" hidden></p>
+    </div>
+
+    <!-- Device identity + clock, read from 780/781. -->
+    <div class="card">
+      <div class="cardhead">
+        <h3>Device</h3>
+        <button id="dev-refresh" class="ghost sm" type="button">Refresh</button>
+      </div>
+      <dl class="kv" id="dev-info"><dd class="dim">Reads from the head when the control link is up.</dd></dl>
+    </div>
 
     <div class="card">
       <h3>Head settings</h3>
