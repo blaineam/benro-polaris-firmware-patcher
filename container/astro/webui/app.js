@@ -283,12 +283,17 @@ function stopEverything() {
 /* Analog joysticks — displacement -> direction AND speed, on the same lease and
    dead-man as the pads. Past its dead-zone a stick maps to [SPEED_MIN, the
    gear's top speed], so the speed slider caps sensitivity. */
-var STICK_DEAD = 0.14;   /* fraction of travel ignored around the centre */
+var STICK_DEAD  = 0.14;   /* fraction of travel ignored around the centre       */
+var STICK_EXPO  = 1.9;    /* >1 = fine control near centre, ramps up at the edge */
 
 function stickSpeed(frac, maxSpeed) {
   var a = Math.abs(frac);
   if (a <= STICK_DEAD) return 0;
   var f = (a - STICK_DEAD) / (1 - STICK_DEAD);          /* 0..1 past the dead-zone */
+  /* Expo curve: a small push barely moves (fine framing), and only the top of
+     the throw reaches full speed. Astro framing needs the slow end usable — a
+     linear map spends most of the travel too fast to place a star. */
+  f = Math.pow(f, STICK_EXPO);
   var mag = maxSpeed <= 100 ? maxSpeed : 100 + f * (maxSpeed - 100);
   return (frac < 0 ? -1 : 1) * mag;
 }
@@ -1148,13 +1153,143 @@ function wireAstro() {
       setTimeout(astroRefresh, 300);
     });
   });
+
+  wireObservatoryTools();
+}
+
+/* ── plate solving, guiding, status — the /legacy dashboard, folded in native ──
+   All read-only polls hit files on the server (no mount connection), so they are
+   safe to run on a timer; only the explicit "Read position" opens a link, and
+   only when aligned. */
+
+function fmtRaDec(sol) {
+  if (!sol || sol.solved !== true) return '—';
+  var ra = sol.ra_deg, dec = sol.dec_deg;
+  if (typeof ra !== 'number' || typeof dec !== 'number') return 'solved';
+  var h = ra / 15, hh = Math.floor(h), mm = Math.floor((h - hh) * 60), ss = Math.round((((h - hh) * 60) - mm) * 60);
+  var sign = dec < 0 ? '-' : '+', da = Math.abs(dec), dd = Math.floor(da), dm = Math.round((da - dd) * 60);
+  return 'RA ' + hh + 'h' + mm + 'm' + ss + 's · Dec ' + sign + dd + '°' + dm + "'";
+}
+
+function paintSolveState(st) {
+  if (!st) return;
+  $('#solve-status').textContent = st.status +
+    (st.status === 'running' && st.elapsed_sec ? ' (' + st.elapsed_sec + 's)' : '');
+  $('#solve-cancel').hidden = st.status !== 'running';
+  var sol = (st.solution && st.solution !== null && typeof st.solution === 'object') ? st.solution : null;
+  $('#solve-solution').textContent = sol ? fmtRaDec(sol) : (st.solution ? 'solved' : '—');
+  if (st.log != null) { var lp = $('#solve-log'); lp.textContent = st.log || '—'; lp.scrollTop = lp.scrollHeight; }
+  /* Status card rides the same reply. */
+  var m = S.ops['284'] ? kv(S.ops['284'].args) : {};
+  $('#st-mode').textContent = m.mode || '—';
+  $('#st-aligned').textContent = st.aligned ? 'yes' : (st.mount_blocked ? 'unknown (unaligned)' : 'no');
+  $('#st-tracking').textContent = st.tracking ? 'yes' : 'no';
+  if (st.mount_read) $('#st-altaz').textContent = st.alt.toFixed(3) + '° / ' + st.az.toFixed(3) + '°';
+  var p = S.ops['517'] ? kv(S.ops['517'].args) : {};
+  if (p.pitch !== undefined)
+    $('#st-att').textContent = 'pitch ' + (parseFloat(p.pitch) * 180 / Math.PI).toFixed(1) +
+                               '° · roll ' + (parseFloat(p.roll || 0) * 180 / Math.PI).toFixed(1) + '°';
+}
+
+function solveGet(mount) {
+  return fetch('/api/state' + (mount ? '?mount=1' : ''), { cache: 'no-store' })
+    .then(function (r) { return r.json(); }).then(paintSolveState).catch(function () {});
+}
+
+function drawSpark(pts) {
+  var c = $('#guide-spark'); if (!c || !c.getContext) return;
+  c.hidden = pts.length < 2;
+  if (pts.length < 2) return;
+  var ctx = c.getContext('2d'), W = c.width, H = c.height, max = 1;
+  pts.forEach(function (p) { max = Math.max(max, Math.abs(p.d)); });
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255,255,255,.12)';
+  ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+  ctx.strokeStyle = '#5aa9e6'; ctx.lineWidth = 1.5; ctx.beginPath();
+  pts.forEach(function (p, i) {
+    var x = i / (pts.length - 1) * W, y = H / 2 - (p.d / max) * (H / 2 - 5);
+    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = '#e0a852';
+  pts.forEach(function (p, i) {
+    if (!p.c) return;
+    var x = i / (pts.length - 1) * W, y = H / 2 - (p.d / max) * (H / 2 - 5);
+    ctx.beginPath(); ctx.arc(x, y, 2.6, 0, 6.3); ctx.fill();
+  });
+}
+
+function paintGuide(g) {
+  if (!g) return;
+  if (document.activeElement !== $('#guide-on')) $('#guide-on').checked = !!g.running;
+  $('#guide-state').textContent = g.running ? 'guiding' : 'off';
+  $('#guide-drift').textContent = (typeof g.last_drift === 'number' && g.last_drift >= 0)
+    ? g.last_drift.toFixed(1) + '″' : '—';
+  $('#guide-params').textContent = 'every ' + g.interval + 's · > ' + g.threshold + '″';
+  if (g.log != null) { var lp = $('#guide-log'); lp.textContent = g.log || '—'; lp.scrollTop = lp.scrollHeight; }
+  drawSpark(g.points || []);
+}
+
+function guideGet() {
+  return fetch('/api/guide', { cache: 'no-store' })
+    .then(function (r) { return r.json(); }).then(paintGuide).catch(function () {});
+}
+
+function focalGet() {
+  return fetch('/api/focal', { cache: 'no-store' })
+    .then(function (r) { return r.json(); }).then(function (f) {
+      if (!f) return;
+      $('#solve-focal-note').textContent = 'using ' + (
+        f.override != null ? f.override + ' mm (manual override)'
+        : f.exif_cache != null ? f.exif_cache + ' mm (from the last frame’s EXIF)'
+        : f.config + ' mm (config default)');
+      if (f.override != null && document.activeElement !== $('#solve-focal'))
+        $('#solve-focal').value = f.override;
+    }).catch(function () {});
+}
+
+function wireObservatoryTools() {
+  var solve = function (mode) {
+    var apply = $('#solve-align').checked ? 1 : 0;
+    post('/api/solve?mode=' + mode + '&apply=' + apply, {}).then(function (r) {
+      if (r && r.started === false) setHint('<b>Solve:</b> ' + (r.reason || 'already running'));
+      solveGet();
+    });
+  };
+  $('#solve-now').addEventListener('click', function () { solve('capture'); });
+  $('#solve-latest').addEventListener('click', function () { solve('latest'); });
+  $('#solve-apply').addEventListener('click', function () {
+    post('/api/apply', {}).then(function (r) {
+      if (r && r.ok === false) setHint('<b>Apply:</b> ' + (r.error || ''));
+      solveGet();
+    });
+  });
+  $('#solve-cancel').addEventListener('click', function () { post('/api/cancel', {}).then(function () { solveGet(); }); });
+  $('#solve-focal-set').addEventListener('click', function () {
+    post('/api/focal', { focal: $('#solve-focal').value || 'auto' }).then(function (r) {
+      if (r && r.ok === false) setHint('<b>Focal:</b> ' + (r.error || ''));
+      focalGet();
+    });
+  });
+  $('#guide-on').addEventListener('change', function () {
+    var on = this.checked;
+    post('/api/guide', { on: on ? 1 : 0 }).then(function (r) {
+      if (r && r.ok === false) { setHint('<b>Guiding:</b> ' + (r.error || '')); $('#guide-on').checked = false; }
+      guideGet();
+    });
+  });
+  $('#st-refresh').addEventListener('click', function () { solveGet(true); });
+  $('#br-port').textContent = location.port || '80';
+  $('#br-lx').textContent = '10001';
+  focalGet();
 }
 
 function astroPollStart() {
   clearInterval(astroPoll);
   if ($('#tab-astro').hidden) return;
-  astroRefresh();
-  astroPoll = setInterval(astroRefresh, 1500);
+  var tick = function () { astroRefresh(); solveGet(); guideGet(); };
+  tick();
+  astroPoll = setInterval(tick, 2000);
 }
 
 /* ─────────────────────────────── free program ──────────────────────────── */

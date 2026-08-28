@@ -620,11 +620,79 @@
       </div>
     </div>
 
-    <div class="card">
-      <h3>More astro tools</h3>
-      <p><a class="btn" href="/legacy">Open the solver dashboard</a></p>
-      <p class="tiny dim">Auto-alignment, guiding and the Alpaca/LX200 bridges keep their existing controls there.</p>
-    </div>
+      <!-- Plate solving — the /legacy solver, folded in natively. -->
+      <div class="card">
+        <h3>Plate solving</h3>
+        <p class="tiny dim">
+          Solve a frame against the star catalogue and optionally write the
+          result as the alignment — no compass, more accurate than one.
+        </p>
+        <div class="btnrow">
+          <button id="solve-now" class="ghost" type="button">Capture &amp; solve</button>
+          <button id="solve-latest" class="ghost" type="button">Solve latest frame</button>
+          <button id="solve-apply" class="ghost" type="button">Apply last</button>
+          <button id="solve-cancel" class="ghost" type="button" hidden>Cancel solve</button>
+        </div>
+        <label class="switch inline"><input id="solve-align" type="checkbox" checked><span>Write the solution as the alignment</span></label>
+        <dl class="kv">
+          <dt>Solver</dt><dd id="solve-status">idle</dd>
+          <dt>Solution</dt><dd id="solve-solution" class="mono">—</dd>
+        </dl>
+        <div class="fieldrow">
+          <label for="solve-focal" class="minilbl">Focal</label>
+          <input id="solve-focal" type="text" inputmode="decimal" placeholder="auto" class="focalin">
+          <span class="unit">mm</span>
+          <button id="solve-focal-set" class="ghost sm" type="button">set</button>
+        </div>
+        <p id="solve-focal-note" class="tiny dim"></p>
+        <details class="logbox"><summary>Solver log</summary><pre id="solve-log" class="logpre">—</pre></details>
+      </div>
+
+      <!-- Auto-guiding -->
+      <div class="card">
+        <h3>Auto-guiding</h3>
+        <p class="tiny dim">
+          Once a frame is solved, the guider re-solves on an interval and nudges
+          the mount back when drift crosses the threshold — holding a target
+          centred through long exposures. Needs a solution to guide on.
+        </p>
+        <label class="switch"><input id="guide-on" type="checkbox"><span>Guiding on</span></label>
+        <dl class="kv">
+          <dt>State</dt><dd id="guide-state">off</dd>
+          <dt>Last drift</dt><dd id="guide-drift" class="mono">—</dd>
+          <dt>Every / threshold</dt><dd id="guide-params" class="mono">—</dd>
+        </dl>
+        <canvas id="guide-spark" class="spark" width="320" height="56" hidden></canvas>
+        <details class="logbox"><summary>Guide log</summary><pre id="guide-log" class="logpre">—</pre></details>
+      </div>
+
+      <!-- Live status -->
+      <div class="card">
+        <h3>Mount status</h3>
+        <dl class="kv">
+          <dt>Mode</dt><dd id="st-mode">—</dd>
+          <dt>Aligned</dt><dd id="st-aligned">—</dd>
+          <dt>Tracking</dt><dd id="st-tracking">—</dd>
+          <dt>Alt / Az</dt><dd id="st-altaz" class="mono">—</dd>
+          <dt>Attitude</dt><dd id="st-att" class="mono">—</dd>
+        </dl>
+        <button id="st-refresh" class="ghost sm" type="button">Read position</button>
+        <p class="tiny dim">Reading the position opens a brief connection to the head; it is refused while unaligned, to avoid nudging the Benro app into a compass-calibration prompt.</p>
+      </div>
+
+      <div class="card">
+        <h3>Observatory bridges</h3>
+        <p class="tiny dim">
+          This server also speaks <b>ASCOM Alpaca</b> (auto-discovered on the
+          network) and <b>LX200</b> over TCP, so Stellarium, NINA, and — via the
+          LX200-generic driver — <b>KStars/Ekos</b> and <b>PHD2</b> can drive the
+          mount. The original solver dashboard is still at <a href="/legacy">/legacy</a>.
+        </p>
+        <dl class="kv">
+          <dt>Alpaca</dt><dd class="mono">this host, port <span id="br-port">—</span> · UDP discovery</dd>
+          <dt>LX200</dt><dd class="mono">this host, port <span id="br-lx">—</span></dd>
+        </dl>
+      </div>
   </section>
 
   <!-- ───────────────────────────── SETTINGS ──────────────────────────── -->
