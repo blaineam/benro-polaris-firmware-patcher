@@ -76,6 +76,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <sys/time.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <errno.h>
@@ -361,6 +362,350 @@ static stage2_gp_widget_get_child_by_name_fn g_real_gp_widget_get_child_by_name 
 static stage2_gp_widget_get_name_fn          g_real_gp_widget_get_name         = NULL;
 static stage2_gp_widget_get_value_fn         g_real_gp_widget_get_value        = NULL;
 static stage2_gp_widget_set_value_fn         g_real_gp_widget_set_value        = NULL;
+
+
+/* ===========================================================================
+ * SHIM #4 + #5 -- card-target capture (interop; MIT).
+ *
+ * Benro fires the shutter with ARG_TRIGGER_CAPTURE and then polls for
+ * GP_EVENT_FILE_ADDED (read from the DWARF reconstruction):
+ *
+ *     delayMax = ((shutter + 1) * 100 * 2 + 500)   in 10 ms polls
+ *     do { wait_and_handle_event(10, &evtype, 0); ... } while (...);
+ *     if (fileCount < 1) -> "capture image timeout", ret = -1
+ *
+ * With capturetarget = Memory card that event never arrives on this rig, so the
+ * shot fires and the download never happens. A desktop
+ * `--capture-image-and-download` does not hit this because libgphoto2 does the
+ * waiting internally -- same library version, different code path.
+ *
+ * Rather than replace Benro's capture logic, we supply the one fact it is
+ * missing: on a timeout we look at the camera's card ourselves, and if a file
+ * is there that was not there when the shutter fired, we return
+ * GP_EVENT_FILE_ADDED for it. Benro's own download path then runs unchanged.
+ *
+ * This is exposure-independent on purpose: the file reaches the card a second
+ * or two after the shutter whatever the settings, and the poll does not care
+ * whether the event exists. Fail-open throughout -- any error hands back
+ * exactly what the real call returned.
+ *
+ *   STAGE2_CARD_CAPTURE=1   enable the synthesis (default OFF)
+ *   STAGE2_CAPTURE_DEBUG=1  log every event with timings (instrumentation)
+ * ======================================================================== */
+
+/* CameraEventType, from gphoto2-camera.h */
+#define STAGE2_EV_UNKNOWN          0
+#define STAGE2_EV_TIMEOUT          1
+#define STAGE2_EV_FILE_ADDED       2
+#define STAGE2_EV_FOLDER_ADDED     3
+#define STAGE2_EV_CAPTURE_COMPLETE 4
+
+/* CameraFilePath, from gphoto2-camera.h: two fixed char arrays. */
+typedef struct { char name[128]; char folder[1024]; } stage2_CameraFilePath;
+
+typedef int (*stage2_wait_for_event_fn)(void *, int, int *, void **, void *);
+typedef int (*stage2_trigger_capture_fn)(void *, void *);
+typedef int (*stage2_folder_list_files_fn)(void *, const char *, void *, void *);
+typedef int (*stage2_folder_list_folders_fn)(void *, const char *, void *, void *);
+typedef int (*stage2_list_new_fn)(void **);
+typedef int (*stage2_list_free_fn)(void *);
+typedef int (*stage2_list_count_fn)(void *);
+typedef int (*stage2_list_get_name_fn)(void *, int, const char **);
+
+static stage2_wait_for_event_fn      g_real_wait_for_event      = NULL;
+static stage2_trigger_capture_fn     g_real_trigger_capture     = NULL;
+static stage2_folder_list_files_fn   g_real_folder_list_files   = NULL;
+static stage2_folder_list_folders_fn g_real_folder_list_folders = NULL;
+static stage2_list_new_fn            g_real_list_new            = NULL;
+static stage2_list_free_fn           g_real_list_free           = NULL;
+static stage2_list_count_fn          g_real_list_count          = NULL;
+static stage2_list_get_name_fn       g_real_list_get_name       = NULL;
+
+static int    g_cap_pending   = 0;
+static double g_cap_started   = 0.0;
+static double g_cap_lastpoll  = 0.0;
+static int    g_cap_basecount = -1;
+static char   g_cap_folder[1024];
+
+static double stage2_now(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec + tv.tv_usec * 1e-6;
+}
+static int stage2_card_capture_on(void) {
+    const char *e = getenv("STAGE2_CARD_CAPTURE");
+    return e && e[0] == '1';
+}
+static int stage2_capture_debug_on(void) {
+    const char *e = getenv("STAGE2_CAPTURE_DEBUG");
+    return e && e[0] == '1';
+}
+
+static void stage2_bind_capture_fns(void) {
+    if (!g_stage2_core) return;
+    if (!g_real_folder_list_files)
+        g_real_folder_list_files = (stage2_folder_list_files_fn)
+            dlsym(g_stage2_core, "gp_camera_folder_list_files");
+    if (!g_real_folder_list_folders)
+        g_real_folder_list_folders = (stage2_folder_list_folders_fn)
+            dlsym(g_stage2_core, "gp_camera_folder_list_folders");
+    if (!g_real_list_new)
+        g_real_list_new = (stage2_list_new_fn)dlsym(g_stage2_core, "gp_list_new");
+    if (!g_real_list_free)
+        g_real_list_free = (stage2_list_free_fn)dlsym(g_stage2_core, "gp_list_free");
+    if (!g_real_list_count)
+        g_real_list_count = (stage2_list_count_fn)dlsym(g_stage2_core, "gp_list_count");
+    if (!g_real_list_get_name)
+        g_real_list_get_name = (stage2_list_get_name_fn)
+            dlsym(g_stage2_core, "gp_list_get_name");
+}
+
+/* Find the newest-looking DCIM folder on the camera, i.e. the last
+ * /store.../DCIM/1xxCANON.
+ * One listing per level, never a recursive walk -- this project removed the
+ * eager full-card scan for good reason. Returns 0 on success. */
+static int stage2_find_capture_folder(void *camera, void *context, char *out, size_t outsz) {
+    void *l = NULL;
+    const char *nm = NULL;
+    char store[256], dcim[512];
+    int n, rc = -1;
+    if (!g_real_folder_list_folders || !g_real_list_new) return -1;
+
+    if (g_real_list_new(&l) < 0) return -1;
+    if (g_real_folder_list_folders(camera, "/", l, context) < 0) goto done;
+    n = g_real_list_count(l);
+    if (n < 1) goto done;
+    if (g_real_list_get_name(l, n - 1, &nm) < 0 || !nm) goto done;
+    snprintf(store, sizeof(store), "/%s/DCIM", nm);
+    g_real_list_free(l); l = NULL;
+
+    if (g_real_list_new(&l) < 0) return -1;
+    if (g_real_folder_list_folders(camera, store, l, context) < 0) goto done;
+    n = g_real_list_count(l);
+    if (n < 1) goto done;
+    if (g_real_list_get_name(l, n - 1, &nm) < 0 || !nm) goto done;
+    snprintf(dcim, sizeof(dcim), "%s/%s", store, nm);
+    snprintf(out, outsz, "%s", dcim);
+    rc = 0;
+done:
+    if (l) g_real_list_free(l);
+    return rc;
+}
+
+static int stage2_count_files(void *camera, void *context, const char *folder,
+                              char *lastname, size_t lnsz) {
+    void *l = NULL;
+    const char *nm = NULL;
+    int n = -1;
+    if (!g_real_folder_list_files || !g_real_list_new) return -1;
+    if (g_real_list_new(&l) < 0) return -1;
+    if (g_real_folder_list_files(camera, folder, l, context) < 0) { g_real_list_free(l); return -1; }
+    n = g_real_list_count(l);
+    if (lastname && lnsz && n > 0 &&
+        g_real_list_get_name(l, n - 1, &nm) >= 0 && nm)
+        snprintf(lastname, lnsz, "%s", nm);
+    g_real_list_free(l);
+    return n;
+}
+
+/* SHIM #4 -- note that a capture has started, and what the card looked like. */
+static int stage2_shim_gp_camera_trigger_capture(void *camera, void *context) {
+    int ret;
+    if (!g_real_trigger_capture && g_stage2_core)
+        g_real_trigger_capture = (stage2_trigger_capture_fn)
+            dlsym(g_stage2_core, "gp_camera_trigger_capture");
+    if (!g_real_trigger_capture) return -1;
+
+    {   /* Snapshotting the card here is ALSO PTP traffic around the shutter, so
+         * it only happens when the (off-by-default) poll path is enabled. */
+        const char *fp = getenv("STAGE2_CARD_POLL");
+        if (stage2_card_capture_on() && fp && fp[0] == '1') {
+        stage2_bind_capture_fns();
+        g_cap_folder[0] = 0;
+        g_cap_basecount = -1;
+        if (stage2_find_capture_folder(camera, context, g_cap_folder, sizeof(g_cap_folder)) == 0)
+            g_cap_basecount = stage2_count_files(camera, context, g_cap_folder, NULL, 0);
+        }
+        if (stage2_capture_debug_on())
+            fprintf(stderr, "[stage2] capture: trigger; folder='%s' files=%d\n",
+                    g_cap_folder, g_cap_basecount);
+    }
+    ret = g_real_trigger_capture(camera, context);
+    g_cap_pending  = 1;
+    g_cap_started  = stage2_now();
+    g_cap_lastpoll = 0.0;
+    return ret;
+}
+
+/* SHIM #5 -- pass real events through; on timeout, look at the card. */
+/* ---- libgphoto2's OWN debug log -------------------------------------------
+ *
+ * pgphoto never installs a gp_log handler, so every GP_LOG_D in the camlib is
+ * discarded. That blinded us: from outside we could see only *that* an event
+ * was empty, never *which* branch ran. ptp2 logs "object added: handle 0x%x,
+ * name %s" exactly at the branch that is supposed to raise GP_EVENT_FILE_ADDED,
+ * and logs each EOS event it decodes -- which tells us whether the camera is
+ * sending ObjectAdded at all in card mode.
+ *
+ * Registered only when STAGE2_GPLOG=1. GP_LOG_ALL is 4. */
+typedef void (*stage2_log_func)(int, const char *, const char *, void *);
+typedef int  (*stage2_log_add_fn)(int, stage2_log_func, void *);
+
+static void stage2_gplog_cb(int level, const char *domain, const char *str,
+                            void *data) {
+    (void)level; (void)data;
+    /* Keep it to the PTP traffic we care about; the full firehose is enormous
+     * and Mlog.txt is truncated by the app every few seconds. */
+    if (!domain || !str) return;
+    /* "POLARIS" is in this list deliberately. Our own patched messages are the
+     * whole point of enabling this, and two of them -- "host capacity declared"
+     * and "pchddcapacity failed" -- contain none of the other keywords, so they
+     * were being dropped by the very filter meant to surface them. That made a
+     * cold-start capture log unreadable: "declaration ran and succeeded" and
+     * "declaration never ran" produced identical output (nothing), which is the
+     * worst possible property for a diagnostic. */
+    if (strstr(str, "object added") || strstr(str, "eos event") ||
+        strstr(str, "unhandled eos") || strstr(str, "ObjectAdded") ||
+        strstr(str, "capture") || strstr(str, "Capture") ||
+        strstr(str, "POLARIS") || strstr(str, "capacity"))
+        fprintf(stderr, "[gplog] %s: %.180s\n", domain, str);
+}
+
+static void stage2_gplog_install(void) {
+    static int done = 0;
+    const char *e;
+    stage2_log_add_fn add;
+    if (done || !g_stage2_core) return;
+    done = 1;
+    e = getenv("STAGE2_GPLOG");
+    if (!e || e[0] != '1') return;
+    add = (stage2_log_add_fn)dlsym(g_stage2_core, "gp_log_add_func");
+    if (!add) { fprintf(stderr, "[gplog] gp_log_add_func not found\n"); return; }
+    add(4 /* GP_LOG_ALL */, stage2_gplog_cb, NULL);
+    fprintf(stderr, "[gplog] installed\n");
+}
+
+static int stage2_shim_gp_camera_wait_for_event(void *camera, int timeout,
+                                                int *eventtype, void **eventdata,
+                                                void *context) {
+    int ret;
+    if (!g_real_wait_for_event && g_stage2_core)
+        g_real_wait_for_event = (stage2_wait_for_event_fn)
+            dlsym(g_stage2_core, "gp_camera_wait_for_event");
+    if (!g_real_wait_for_event) return -1;
+    stage2_gplog_install();
+
+    ret = g_real_wait_for_event(camera, timeout, eventtype, eventdata, context);
+
+    /* STRETCH THE WAIT, do not add traffic.
+     *
+     * First attempt polled the camera's filesystem while a capture was in
+     * flight. PTP is a single-session protocol and Canon's capture state
+     * machine does not tolerate an interleaved folder listing: on hardware that
+     * produced a stuck card-read light, a shot that reported success but was
+     * not on the camera, and a SECOND frame firing. Never again.
+     *
+     * Benro's loop is `wait_and_handle_event(10ms)` then delayCount++, giving up
+     * at delayMax (7 s for a short exposure). So instead of talking to the
+     * camera, we simply keep calling the SAME real wait until either a genuine
+     * event arrives or STAGE2_WAIT_STRETCH_MS has passed. Benro's counter then
+     * advances ~20x slower and its effective budget becomes minutes, with zero
+     * extra PTP commands and a real event still returned the instant it lands.
+     *
+     * This directly tests "the event is late" versus "the event is absent". */
+    if (stage2_card_capture_on() && g_cap_pending && ret >= 0 && eventtype &&
+        *eventtype == STAGE2_EV_TIMEOUT) {
+        const char *ms = getenv("STAGE2_WAIT_STRETCH_MS");
+        double budget = (ms && *ms) ? atof(ms) / 1000.0 : 0.20;
+        double t0 = stage2_now();
+        while (stage2_now() - t0 < budget) {
+            ret = g_real_wait_for_event(camera, timeout, eventtype, eventdata, context);
+            if (ret < 0) break;
+            if (*eventtype != STAGE2_EV_TIMEOUT) {
+                if (stage2_capture_debug_on())
+                    fprintf(stderr, "[stage2] capture: t+%.3fs event=%d (during stretch)\n",
+                            stage2_now() - g_cap_started, *eventtype);
+                break;
+            }
+        }
+    }
+
+    /* Is the 6s gap the CAMERA being silent, or pgphoto not asking? A gap in the
+     * event log looks identical either way. Count the empty polls and report
+     * once a second while a capture is pending: steady counts mean we ARE
+     * polling and the body is genuinely quiet; a stalled counter means nobody
+     * is calling wait_for_event and the latency is on Benro's side. */
+    if (stage2_capture_debug_on() && g_cap_pending && eventtype &&
+        *eventtype == STAGE2_EV_TIMEOUT) {
+        static double last_report = 0.0;
+        static long   polls = 0;
+        double now = stage2_now();
+        polls++;
+        if (now - last_report >= 1.0) {
+            fprintf(stderr, "[stage2] capture: t+%.3fs polling, %ld empty waits\n",
+                    now - g_cap_started, polls);
+            last_report = now;
+            polls = 0;
+        }
+    }
+
+    if (stage2_capture_debug_on() && eventtype && *eventtype != STAGE2_EV_TIMEOUT) {
+        /* GP_EVENT_UNKNOWN carries an asprintf()'d description in *eventdata
+         * (ptp2 emits e.g. "PTP Property 0xd1xx changed" and, for card-target
+         * shots, an ObjectAddedEx line carrying the new object handle).
+         *
+         * This is the whole question: the bytes DO reach the SD card, so ptp2
+         * is processing ObjectAddedEx and merely downgrading the event type.
+         * If the handle/name is present in this payload we can relabel
+         * UNKNOWN -> FILE_ADDED with ZERO extra PTP traffic. If it is not, the
+         * fix has to move into the ptp2 EOS event handler instead. */
+        const char *payload = "";
+        if (*eventtype == STAGE2_EV_UNKNOWN && eventdata && *eventdata)
+            payload = (const char *)*eventdata;
+        fprintf(stderr, "[stage2] capture: t+%.3fs event=%d ret=%d%s%.200s\n",
+                g_cap_pending ? stage2_now() - g_cap_started : 0.0, *eventtype, ret,
+                payload[0] ? " data=" : "", payload);
+    }
+
+    if (ret < 0 || !eventtype || !eventdata) return ret;
+    if (*eventtype == STAGE2_EV_FILE_ADDED) { g_cap_pending = 0; return ret; }
+    if (!g_cap_pending || *eventtype != STAGE2_EV_TIMEOUT) return ret;
+    /* The filesystem poll is OFF by default: it talks to the camera mid-capture,
+     * which broke real captures. Only enable it deliberately, and never while a
+     * shutter is in flight. */
+    {
+        const char *fp = getenv("STAGE2_CARD_POLL");
+        if (!fp || fp[0] != '1') return ret;
+    }
+    if (!stage2_card_capture_on() || g_cap_basecount < 0 || !g_cap_folder[0]) return ret;
+
+    {   /* poll the card at most a few times a second */
+        double now = stage2_now();
+        char lastname[128];
+        int n;
+        if (now - g_cap_started < 0.25) return ret;
+        if (now - g_cap_lastpoll < 0.4) return ret;
+        g_cap_lastpoll = now;
+        lastname[0] = 0;
+        n = stage2_count_files(camera, context, g_cap_folder, lastname, sizeof(lastname));
+        if (n <= g_cap_basecount || !lastname[0]) return ret;
+
+        {   /* a file appeared that was not there when the shutter fired */
+            stage2_CameraFilePath *p =
+                (stage2_CameraFilePath *)calloc(1, sizeof(stage2_CameraFilePath));
+            if (!p) return ret;                     /* fail open */
+            snprintf(p->name, sizeof(p->name), "%s", lastname);
+            snprintf(p->folder, sizeof(p->folder), "%s", g_cap_folder);
+            *eventtype = STAGE2_EV_FILE_ADDED;
+            *eventdata = p;
+            g_cap_basecount = n;
+            fprintf(stderr, "[stage2] capture: synthesised FILE_ADDED %s/%s "
+                            "at t+%.2fs (card poll; the camera never announced it)\n",
+                    p->folder, p->name, now - g_cap_started);
+            return 0;
+        }
+    }
+}
 
 /* SHIM #3 -- gp_camera_set_single_config wrapper (shares Shim #2's widget helpers
  * and capturetarget constants).  Benro's app sets INDIVIDUAL configs via
@@ -850,6 +1195,25 @@ static void stage2_ondisk_init(void)
                        (void *)&stage2_shim_gp_camera_set_single_config);
             fprintf(stderr, "[stage2] capturetarget: gp_camera_set_single_config "
                             "slot -> shim (real core fn cached for pass-through)\n");
+            filled++;
+            continue;
+        }
+        /* SHIM #4/#5: card-target capture. gp_camera_trigger_capture records
+         * what the card held when the shutter fired; gp_camera_wait_for_event
+         * passes real events through and, on timeout, synthesises the
+         * GP_EVENT_FILE_ADDED that Benro's loop is waiting for. Both are inert
+         * unless STAGE2_CARD_CAPTURE=1. */
+        if (strcmp(name, "gp_camera_trigger_capture") == 0) {
+            slot_store(STAGE2_SLOTS[i].slot,
+                       (void *)&stage2_shim_gp_camera_trigger_capture);
+            fprintf(stderr, "[stage2] card-capture: gp_camera_trigger_capture slot -> shim\n");
+            filled++;
+            continue;
+        }
+        if (strcmp(name, "gp_camera_wait_for_event") == 0) {
+            slot_store(STAGE2_SLOTS[i].slot,
+                       (void *)&stage2_shim_gp_camera_wait_for_event);
+            fprintf(stderr, "[stage2] card-capture: gp_camera_wait_for_event slot -> shim\n");
             filled++;
             continue;
         }

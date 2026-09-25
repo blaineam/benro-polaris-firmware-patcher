@@ -1,0 +1,1001 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Polaris</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Polaris">
+<meta name="theme-color" content="#0b0e14">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!-- The link state is the one thing that is always true or always a lie, so it
+     lives above everything and is never hidden. -->
+<header id="bar">
+  <span id="linkdot" class="dot" title="control link"></span>
+  <strong id="linktext">connecting…</strong>
+  <span class="grow"></span>
+  <span id="battery" class="chip" hidden></span>
+  <span id="card" class="chip" hidden></span>
+  <button id="estop" class="estop" type="button" title="Stop all motion (Esc)">STOP</button>
+</header>
+
+<!-- A blocking condition always carries its own fix, the way the app's hint
+     banner does. Empty and hidden when there is nothing to say. -->
+<div id="hint" class="hint" hidden></div>
+
+<main>
+
+  <!-- ───────────────────────────── CONTROL ───────────────────────────── -->
+  <section id="tab-control" class="tab">
+
+    <!-- Immersive stage: the live view fills it and the controls float on top,
+         the way the phone app composes its screen — joysticks under both thumbs,
+         status top-left, stage buttons top-right. Big by default, and the size
+         button scales the whole thing for low-vision use at the scope. -->
+    <div id="stage" class="stage">
+      <img id="live" alt="">
+      <!-- Focus-peaking sits directly over the frame; it is fed same-origin
+           snapshots (/api/snapshot) so its canvas can read pixels — the raw
+           :8080 stream is cross-origin and would taint the canvas. -->
+      <canvas id="peak" class="peakcanvas" hidden></canvas>
+      <!-- Framing grid: pure overlay, no pixel access needed. -->
+      <div id="grid" class="gridovl" hidden aria-hidden="true">
+        <span class="gl v1"></span><span class="gl v2"></span>
+        <span class="gl h1"></span><span class="gl h2"></span>
+        <span class="gl cx"></span><span class="gl cy"></span>
+      </div>
+      <div id="livemsg" class="livemsg">live view off</div>
+
+      <!-- Live histogram of the same snapshot the peaking reads. -->
+      <div id="histbox" class="histbox" hidden><canvas id="hist" width="256" height="48"></canvas></div>
+
+      <div class="ovl tl"><span id="camname" class="stagechip" hidden></span></div>
+      <div class="ovl tr">
+        <button id="previewtoggle" class="gbtn" type="button" title="live view on/off" aria-label="live view">live</button>
+        <button id="gridbtn" class="gbtn" type="button" title="framing grid" aria-label="framing grid">#</button>
+        <button id="peakbtn" class="gbtn" type="button" title="focus peaking &amp; histogram" aria-label="focus peaking">◎</button>
+        <button id="sizebtn" class="gbtn" type="button" title="control &amp; text size" aria-label="control size">A+</button>
+        <button id="fsbtn" class="gbtn" type="button" title="fullscreen preview" aria-label="fullscreen preview">⤢</button>
+      </div>
+
+      <!-- Analog joysticks: displacement maps to direction AND speed, like the
+           phone app's sticks, on the SAME 400 ms lease + server dead-man — drag
+           to move, let go (or the browser dies) and the head stops. Pan/tilt
+           left, rotation right, under both thumbs. -->
+      <div class="stick xy" data-stick="xy" role="application" aria-label="pan and tilt joystick" tabindex="-1">
+        <div class="knob"></div><span class="axhint">pan · tilt</span>
+      </div>
+      <div class="stick rot" data-stick="rot" role="application" aria-label="rotation joystick" tabindex="-1">
+        <div class="knob"></div><span class="axhint">rotate</span>
+      </div>
+    </div>
+
+    <!-- Shutter + record, big, right under the preview. -->
+    <div class="shutterrow">
+      <button id="shoot" class="shutter" type="button">
+        <span class="ring"></span><span class="label">hold to shoot</span>
+      </button>
+      <button id="rec" class="ghost rec" type="button">● rec</button>
+    </div>
+
+    <!-- Speed (the stick's top speed) + level — a slim bar. -->
+    <div class="row underrow">
+      <label class="gear">
+        speed
+        <input id="gear" type="range" min="1" max="5" value="3" step="1">
+        <output id="gearout">3</output>
+      </label>
+      <button id="level" class="ghost" type="button" title="level the head">auto level</button>
+    </div>
+
+    <!-- Exposure. Every option list is fetched from the camera: the set
+         commands take an INDEX into the camera's own list, so a hardcoded
+         table would silently set the wrong exposure on a different body. -->
+    <div id="expo" class="expo">
+      <div class="exposlot" data-get="268" data-set="261" data-key="s"><span class="lbl">shutter</span><select disabled></select></div>
+      <div class="exposlot" data-get="275" data-set="276" data-key="fNum"><span class="lbl">aperture</span><select disabled></select></div>
+      <div class="exposlot" data-get="265" data-set="258" data-key="iso"><span class="lbl">ISO</span><select disabled></select></div>
+      <div class="exposlot" data-get="267" data-set="260" data-key="ev"><span class="lbl">EV</span><select disabled></select></div>
+      <div class="exposlot" data-get="266" data-set="259" data-key="wb"><span class="lbl">WB</span><select disabled></select></div>
+      <!-- AF/MF, like the app's [ MF AF ] chips. MF is what the focus jog, the
+           focus stack and Astro auto-focus all need (they drive 311). -->
+      <div class="exposlot">
+        <span class="lbl">focus mode</span>
+        <div class="afmf" role="group" aria-label="autofocus / manual focus">
+          <button id="fm-mf" class="afmf-btn on" type="button" data-mode="mf">MF</button>
+          <button id="fm-af" class="afmf-btn" type="button" data-mode="af">AF</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual focus jog — the same 311 focus-adjust the focus-stack rack uses,
+         but standalone, so you can pull a star down to a hard point of light or
+         nail framing focus without opening a programme. Hold-repeats. For an
+         automatic focus that optimises the stars, use Astro ▸ Auto-focus. -->
+    <div class="focusbar">
+      <span class="lbl">focus</span>
+      <div class="focusjog">
+        <button class="ghost sm mf" data-adj="-4" type="button" aria-label="focus nearer, fast" title="nearer (fast)">◄◄</button>
+        <button class="ghost sm mf" data-adj="-1" type="button" aria-label="focus nearer" title="nearer">◄</button>
+        <span class="mfhint">near · far</span>
+        <button class="ghost sm mf" data-adj="1"  type="button" aria-label="focus farther" title="farther">►</button>
+        <button class="ghost sm mf" data-adj="4"  type="button" aria-label="focus farther, fast" title="farther (fast)">►►</button>
+      </div>
+      <span class="mfnote dim">camera on manual focus</span>
+    </div>
+
+    <!-- Precise single-axis pads + keyboard, tucked away — the sticks are the
+         primary control, these are the fallback for a fine nudge. -->
+    <details class="precise">
+      <summary>Precise nudge &amp; keyboard</summary>
+      <div class="pads">
+        <div class="pad" data-axis="tilt" aria-label="tilt">
+          <button class="jog up"   data-dir="1"  type="button" aria-label="tilt up">▲</button>
+          <button class="recentre" data-axis-id="2" type="button" title="re-zero tilt">◎</button>
+          <button class="jog down" data-dir="-1" type="button" aria-label="tilt down">▼</button>
+        </div>
+        <div class="pad wide" data-axis="pan" aria-label="pan">
+          <button class="jog left"  data-dir="-1" type="button" aria-label="pan left">◀</button>
+          <button class="recentre" data-axis-id="1" type="button" title="re-zero pan">◎</button>
+          <button class="jog right" data-dir="1"  type="button" aria-label="pan right">▶</button>
+        </div>
+        <div class="pad" data-axis="rot" aria-label="rotation">
+          <button class="jog ccw" data-dir="-1" type="button" aria-label="rotate anticlockwise">↺</button>
+          <button class="recentre" data-axis-id="3" type="button" title="re-zero rotation">◎</button>
+          <button class="jog cw"  data-dir="1"  type="button" aria-label="rotate clockwise">↻</button>
+        </div>
+      </div>
+      <p class="tiny dim">Arrow keys jog pan/tilt, “,” / “.” rotate, Esc stops. Double-tap a stick to re-centre that axis.</p>
+    </details>
+  </section>
+
+  <!-- ──────────────────────────── PROGRAMS ───────────────────────────── -->
+  <section id="tab-programs" class="tab" hidden>
+    <p class="dim pad-note">
+      Timelapse and panorama run <b>on the head</b>, so a programme keeps going —
+      and keeps being watchable here — whether or not this page stays open, which
+      the phone app cannot do.
+    </p>
+
+    <!-- Live progress, shown only while something runs. Replaces the whole
+         picker so there is one clear state on screen at a time. -->
+    <div id="progrun" class="card" hidden>
+      <h3 id="progrun-title">running</h3>
+      <div class="progbar"><span id="progfill"></span></div>
+      <p id="progrun-line" class="mono"></p>
+      <!-- Panorama only: the shot-position grid, cells lighting up as the head
+           works through the sweep. -->
+      <div id="pano-grid" class="panogrid" hidden></div>
+      <div id="pano-grid-legend" class="panolegend" hidden>
+        <span><i class="pc shot"></i> shot</span>
+        <span><i class="pc active"></i> shooting</span>
+        <span><i class="pc pending"></i> to go</span>
+        <span class="dim">fill order assumed from the start corner; the count is the head's</span>
+      </div>
+      <p id="progrun-note" class="tiny dim" hidden></p>
+      <div class="row" id="progrun-controls"></div>
+    </div>
+
+    <!-- The chooser, hidden while a programme runs. -->
+    <div id="progpick">
+      <!-- Grouped: interval captures that run OVER TIME, and single composite
+           SEQUENCES. Both rows share one .seg wiring (chosen by data-prog). -->
+      <div class="seggroup">
+        <span class="seglabel">Over time</span>
+        <div class="segbar" role="tablist">
+          <button class="seg on" data-prog="lapse">Timelapse</button>
+          <button class="seg" data-prog="pathlapse">Path-lapse</button>
+          <button class="seg" data-prog="sun">Sun</button>
+          <button class="seg" data-prog="grail">Holy Grail</button>
+        </div>
+      </div>
+      <div class="seggroup">
+        <span class="seglabel">Sequences</span>
+        <div class="segbar" role="tablist">
+          <button class="seg" data-prog="pano">Panorama</button>
+          <button class="seg" data-prog="hdr">HDR</button>
+          <button class="seg" data-prog="focus">Focus stack</button>
+          <button class="seg" data-prog="plc">Program</button>
+        </div>
+      </div>
+
+      <!-- Timelapse -->
+      <div class="card progpanel" data-prog="lapse">
+        <div class="field">
+          <label for="tl-interval">Interval between frames</label>
+          <div class="fieldrow">
+            <input id="tl-interval" type="number" min="0.5" max="3600" step="0.5" value="4">
+            <span class="unit">s</span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="tl-shots">Frames</label>
+          <div class="fieldrow">
+            <input id="tl-shots" type="number" min="1" max="100000" step="1" placeholder="∞">
+            <button id="tl-inf" class="ghost sm" type="button">∞ unlimited</button>
+          </div>
+          <p class="tiny dim">Blank or ∞ runs until you stop it or the card fills — the app's own default.</p>
+        </div>
+        <div class="field">
+          <label for="tl-bulb">Bulb exposure <span class="dim">(0 = camera's own shutter)</span></label>
+          <div class="fieldrow">
+            <input id="tl-bulb" type="number" min="0" max="3600" step="0.5" value="0">
+            <span class="unit">s</span>
+          </div>
+        </div>
+        <div class="field">
+          <label for="tl-fps">Video frame rate</label>
+          <div class="fieldrow">
+            <select id="tl-fps">
+              <option>24</option><option>25</option><option>30</option><option>60</option>
+            </select>
+            <span class="unit">fps</span>
+          </div>
+        </div>
+        <dl class="kv derived">
+          <dt>Shooting time</dt><dd id="tl-shoot">—</dd>
+          <dt>Finished video</dt><dd id="tl-video">—</dd>
+        </dl>
+        <p class="tiny dim">
+          These are lower bounds — the head reports no allowance for the shutter
+          or the camera writing each frame, so a real run always takes at least
+          this long.
+        </p>
+        <button id="tl-start" class="startbtn" type="button">Start timelapse</button>
+      </div>
+
+      <!-- Panorama -->
+      <div class="card progpanel" data-prog="pano" hidden>
+        <div class="grid2">
+          <div class="field">
+            <label for="pa-cols">Columns</label>
+            <input id="pa-cols" type="number" min="1" max="360" step="1" value="6">
+          </div>
+          <div class="field">
+            <label for="pa-rows">Rows</label>
+            <input id="pa-rows" type="number" min="1" max="180" step="1" value="3">
+          </div>
+          <div class="field">
+            <label for="pa-hangle">Step between columns</label>
+            <div class="fieldrow"><input id="pa-hangle" type="number" min="0.1" max="90" step="0.1" value="30"><span class="unit">°</span></div>
+          </div>
+          <div class="field">
+            <label for="pa-vangle">Step between rows</label>
+            <div class="fieldrow"><input id="pa-vangle" type="number" min="0" max="90" step="0.1" value="20"><span class="unit">°</span></div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="pa-startdir">Start corner</label>
+          <select id="pa-startdir">
+            <option value="1">Upper-left</option>
+            <option value="2">Upper-right</option>
+            <option value="3">Lower-left</option>
+            <option value="4">Lower-right</option>
+            <option value="0">Centre</option>
+          </select>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="pa-perspot">Frames per position</label>
+            <input id="pa-perspot" type="number" min="1" max="99" step="1" value="1">
+          </div>
+          <div class="field">
+            <label for="pa-interval">Interval per position</label>
+            <div class="fieldrow"><input id="pa-interval" type="number" min="0" max="20" step="1" value="0"><span class="unit">s</span></div>
+          </div>
+        </div>
+        <label class="switch"><input id="pa-isp" type="checkbox" checked><span>Stitch in the head (auto-synthesis)</span></label>
+        <dl class="kv derived">
+          <dt>Coverage</dt><dd id="pa-coverage">—</dd>
+          <dt>Total frames</dt><dd id="pa-total">—</dd>
+        </dl>
+        <!-- The planned shot layout: cols × rows positions, the start corner
+             marked, so you see the coverage shape before committing. -->
+        <div id="pa-grid" class="panogrid" hidden></div>
+        <p id="pa-grid-note" class="tiny dim" hidden><span class="pc plan start"></span> start corner · the sweep serpentines from here</p>
+        <div id="pa-preview" class="preview" hidden>
+          <p class="tiny dim">This is the exact command that will be sent. Its field
+            layout is confirmed from the app; the binding of the stitch/limit
+            flags is <b>inferred</b> and not yet verified on hardware — watch the
+            first run.</p>
+          <code id="pa-frame" class="framebox"></code>
+        </div>
+        <button id="pa-start" class="startbtn" type="button">Preview panorama</button>
+      </div>
+
+      <!-- HDR -->
+      <div class="card progpanel" data-prog="hdr" hidden>
+        <p class="tiny dim">
+          A three-frame bracket around the camera's current exposure, walking the
+          <b>shutter</b> a chosen number of steps either way and holding aperture,
+          ISO, EV and white balance where they are. Set the base exposure on the
+          Control tab first.
+        </p>
+        <div class="field">
+          <label for="hdr-spread">Bracket spread <span class="dim">(shutter-list steps between frames)</span></label>
+          <div class="fieldrow">
+            <input id="hdr-spread" type="number" min="1" max="30" step="1" value="3">
+            <span class="unit">steps</span>
+          </div>
+        </div>
+        <label class="switch"><input id="hdr-isp" type="checkbox"><span>Merge in the head</span></label>
+        <div id="hdr-preview" class="preview" hidden>
+          <p class="tiny dim">The three shutter speeds this will actually use, read
+            from your camera:</p>
+          <code id="hdr-shutters" class="framebox"></code>
+        </div>
+        <button id="hdr-start" class="startbtn" type="button">Preview HDR</button>
+      </div>
+
+      <!-- Focus stack -->
+      <div class="card progpanel" data-prog="focus" hidden>
+        <p class="tiny dim">
+          Set the camera to <b>manual focus</b>. Rack to the near limit and mark
+          it, rack to the far limit and mark it, then start — the head walks the
+          focus between the two and stitches an all-in-focus frame.
+        </p>
+        <div class="field">
+          <label>Rack focus</label>
+          <div class="rackrow">
+            <button class="ghost sm rack" data-adj="-4" type="button">◄◄ near</button>
+            <button class="ghost sm rack" data-adj="-1" type="button">◄ near</button>
+            <button class="ghost sm rack" data-adj="1"  type="button">far ►</button>
+            <button class="ghost sm rack" data-adj="4"  type="button">far ►►</button>
+          </div>
+          <p class="tiny dim">Hold-repeats while pressed. The head relays focus to the camera over its own tether.</p>
+        </div>
+        <div class="markrow">
+          <button id="fs-mark-near" class="ghost" type="button">Set near limit</button>
+          <button id="fs-mark-far" class="ghost" type="button">Set far limit</button>
+        </div>
+        <div class="field">
+          <label for="fs-shots">Frames</label>
+          <div class="fieldrow">
+            <input id="fs-shots" type="number" min="2" max="200" step="1" value="14">
+            <span class="unit">shots</span>
+          </div>
+        </div>
+        <label class="switch"><input id="fs-isp" type="checkbox" checked><span>Stitch all-in-focus in the head</span></label>
+        <div class="markrow">
+          <button id="fs-preview" class="ghost" type="button">Dry preview</button>
+          <button id="fs-start" class="startbtn" type="button">Start focus stack</button>
+        </div>
+      </div>
+
+      <!-- FREE PROGRAM: a keyframe timeline you fly by hand -->
+      <div class="card progpanel" data-prog="plc" hidden>
+        <p class="tiny dim">
+          A programmable move: fly the head to a position with the Control jog,
+          capture it as a keyframe, fly to the next, capture again. The head then
+          walks the whole path on its own — and, being head-side, it runs whether
+          or not this page stays open. Optionally shoot a frame every so often
+          along the way.
+        </p>
+        <div class="field">
+          <label>Keyframes</label>
+          <ol id="plc-keys" class="keylist"><li class="dim">none yet — jog the head, then capture a pose</li></ol>
+          <div class="markrow">
+            <button id="plc-capture" class="ghost" type="button">Capture current pose</button>
+            <button id="plc-clear" class="ghost" type="button">Clear all</button>
+          </div>
+          <p class="tiny dim">Each keyframe is timed from the start of the run; capture them in order.</p>
+        </div>
+        <div class="field">
+          <label for="plc-segdur">Seconds to reach the next keyframe</label>
+          <div class="fieldrow">
+            <input id="plc-segdur" type="number" min="1" max="3600" step="1" value="10">
+            <span class="unit">s</span>
+          </div>
+        </div>
+        <label class="switch"><input id="plc-hold"><span>Hold at each keyframe (step), instead of gliding between them (linear)</span></label>
+        <div class="grid2">
+          <div class="field">
+            <label for="plc-photo-iv">Photo interval <span class="dim">(0 = motion only)</span></label>
+            <div class="fieldrow"><input id="plc-photo-iv" type="number" min="0" max="3600" step="1" value="0"><span class="unit">s</span></div>
+          </div>
+          <div class="field">
+            <label for="plc-photo-n">Photo count</label>
+            <div class="fieldrow"><input id="plc-photo-n" type="number" min="1" max="100000" step="1" placeholder="∞"><button id="plc-photo-inf" class="ghost sm" type="button">∞</button></div>
+          </div>
+        </div>
+        <div id="plc-preview" class="preview" hidden>
+          <p class="tiny dim">The timeline that will be uploaded to the head:</p>
+          <code id="plc-frame" class="framebox"></code>
+        </div>
+        <button id="plc-start" class="startbtn" type="button" disabled>Add at least two keyframes</button>
+      </div>
+
+      <!-- PATH-LAPSE: a moving timelapse through captured waypoints -->
+      <div class="card progpanel" data-prog="pathlapse" hidden>
+        <p class="tiny dim">
+          A moving timelapse. Fly the head to a framing with the Control jog and
+          capture it as a waypoint; set how many frames to shoot on the way to
+          the next one, fly there, capture again (2–8 waypoints). The head glides
+          the path and fires as it goes — and, being head-side, it keeps running
+          whether or not this page stays open.
+        </p>
+        <div class="field">
+          <label>Waypoints</label>
+          <ol id="pl-wps" class="keylist"><li class="dim">none yet — jog the head, then capture a waypoint</li></ol>
+          <div class="markrow">
+            <button id="pl-capture" class="ghost" type="button">Capture waypoint</button>
+            <button id="pl-clear" class="ghost" type="button">Clear all</button>
+          </div>
+          <p class="tiny dim">The first waypoint is just the start; each later one carries the frames shot on the leg into it.</p>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="pl-interval">Interval between frames</label>
+            <div class="fieldrow"><input id="pl-interval" type="number" min="0.5" max="3600" step="0.5" value="4"><span class="unit">s</span></div>
+          </div>
+          <div class="field">
+            <label for="pl-legframes">Frames to reach the next waypoint</label>
+            <div class="fieldrow"><input id="pl-legframes" type="number" min="1" max="9999" step="1" value="50"><button id="pl-leg-inf" class="ghost sm" type="button">∞</button></div>
+          </div>
+        </div>
+        <dl class="kv derived">
+          <dt>Total frames</dt><dd id="pl-frames">—</dd>
+          <dt>Shooting time</dt><dd id="pl-time">—</dd>
+        </dl>
+        <div id="pl-preview" class="preview" hidden>
+          <p class="tiny dim">The waypoint timeline that will be uploaded to the head:</p>
+          <code id="pl-frame" class="framebox"></code>
+        </div>
+        <button id="pl-start" class="startbtn" type="button" disabled>Add at least two waypoints</button>
+      </div>
+
+      <!-- SUN: a scheduled sunrise/sunset lapse -->
+      <div class="card progpanel" data-prog="sun" hidden>
+        <p class="tiny dim">
+          The head points at the rising or setting sun and shoots a timelapse
+          across a time window, doing the solar GOTO itself and parking when the
+          window ends. The window has to be within an hour of now and at least
+          three minutes long — the head enforces both.
+        </p>
+        <div class="field">
+          <label>Event</label>
+          <div class="segbar sub" role="tablist">
+            <button class="seg2 on" data-sun="0" type="button">Sunrise</button>
+            <button class="seg2" data-sun="1" type="button">Sunset</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="sun-interval">Interval between frames</label>
+          <div class="fieldrow"><input id="sun-interval" type="number" min="1" max="3600" step="1" value="10"><span class="unit">s</span></div>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="sun-start">Start</label>
+            <input id="sun-start" type="datetime-local" step="1">
+          </div>
+          <div class="field">
+            <label for="sun-end">End</label>
+            <input id="sun-end" type="datetime-local" step="1">
+          </div>
+        </div>
+        <div class="markrow">
+          <button id="sun-fill" class="ghost sm" type="button">Now → +30 min</button>
+        </div>
+        <dl class="kv derived">
+          <dt>Window</dt><dd id="sun-window">—</dd>
+          <dt>Frames</dt><dd id="sun-frames">—</dd>
+        </dl>
+        <div id="sun-preview" class="preview" hidden>
+          <p class="tiny dim">The exact command that will be sent to the head:</p>
+          <code id="sun-frame" class="framebox"></code>
+        </div>
+        <button id="sun-start-btn" class="startbtn" type="button">Preview sun lapse</button>
+      </div>
+
+      <!-- HOLY GRAIL: the day->night exposure ramp (configuration, not a run) -->
+      <div class="card progpanel" data-prog="grail" hidden>
+        <p class="tiny dim">
+          <b>Day-to-night exposure ramp.</b> This doesn't shoot on its own — it
+          uploads a target-brightness curve the head follows <b>while a Timelapse
+          or Path-lapse runs</b>, ramping exposure from daylight into night. The
+          head meters the light with the external <b>Optical Matrix Sensor
+          Module</b> accessory; without it, it can't ramp. The exposure-limit and
+          priority encodings are inferred, so the exact commands are shown for you
+          to read before they're sent.
+        </p>
+
+        <label class="switch"><input id="hg-enable" type="checkbox"><span>Enable the ramp</span></label>
+
+        <div class="field">
+          <label>Target brightness curve <span class="dim">(target EV over time, from the start)</span></label>
+          <ol id="hg-nodes" class="keylist"></ol>
+          <div class="grid2">
+            <div class="field">
+              <label for="hg-node-min">Minutes from start <span class="dim">(0 = the anchor)</span></label>
+              <div class="fieldrow"><input id="hg-node-min" type="number" min="0" max="1440" step="30" value="30"><span class="unit">min</span></div>
+            </div>
+            <div class="field">
+              <label for="hg-node-ev">Target EV</label>
+              <div class="fieldrow"><input id="hg-node-ev" type="number" min="-5" max="5" step="0.5" value="-1.5"><span class="unit">EV</span></div>
+            </div>
+          </div>
+          <div class="markrow">
+            <button id="hg-node-add" class="ghost" type="button">Add point</button>
+            <button id="hg-node-reset" class="ghost" type="button">Reset curve</button>
+          </div>
+          <p class="tiny dim">The point at 0 is the mandatory anchor — set its EV in the list. Offsets snap to 30 min, EV to 0.5, over 24 h.</p>
+        </div>
+
+        <details class="hg-adv">
+          <summary>Exposure limits &amp; priority <span class="dim">(optional)</span></summary>
+          <p class="tiny dim">Ranges are picked from your camera's own lists — open the Control tab once so they load. ISO is capped at 6400.</p>
+          <div class="field">
+            <label class="switch"><input id="hg-s-en" type="checkbox"><span>Limit shutter <span class="dim">(safe span ⊃ working span)</span></span></label>
+            <div class="grid2 hg-mini">
+              <label class="mini"><span>Safe low</span><select id="hg-s0"></select></label>
+              <label class="mini"><span>Span low</span><select id="hg-s1"></select></label>
+              <label class="mini"><span>Span high</span><select id="hg-s2"></select></label>
+              <label class="mini"><span>Safe high</span><select id="hg-s3"></select></label>
+            </div>
+          </div>
+          <div class="field">
+            <label class="switch"><input id="hg-iso-en" type="checkbox"><span>Limit ISO</span></label>
+            <div class="grid2 hg-mini">
+              <label class="mini"><span>Low</span><select id="hg-iso-lo"></select></label>
+              <label class="mini"><span>High</span><select id="hg-iso-hi"></select></label>
+            </div>
+          </div>
+          <div class="field">
+            <label class="switch"><input id="hg-f-en" type="checkbox"><span>Limit aperture</span></label>
+            <div class="grid2 hg-mini">
+              <label class="mini"><span>Low</span><select id="hg-f-lo"></select></label>
+              <label class="mini"><span>High</span><select id="hg-f-hi"></select></label>
+            </div>
+          </div>
+          <label class="switch"><input id="hg-prio-en" type="checkbox"><span>Send axis priority — Shutter → ISO → Aperture <span class="dim">(the app's default; codes inferred)</span></span></label>
+        </details>
+
+        <dl class="kv derived">
+          <dt>Runtime brightness <span class="dim">(needs the accessory)</span></dt><dd id="hg-brightness">—</dd>
+        </dl>
+
+        <div id="hg-preview" class="preview" hidden>
+          <p class="tiny dim">The exact 305 batch that will be uploaded — encodings inferred, read before sending:</p>
+          <code id="hg-frame" class="framebox"></code>
+        </div>
+        <div class="markrow">
+          <button id="hg-off" class="ghost" type="button">Turn ramp off</button>
+          <button id="hg-apply" class="startbtn" type="button">Preview ramp config</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ────────────────────────────── ASTRO ────────────────────────────── -->
+  <section id="tab-astro" class="tab" hidden>
+
+    <!-- Shown until an observing location is set: alignment and go-to need it. -->
+    <div id="astro-nopos" class="card nopos" hidden>
+      <b>Set your observing location.</b> Plate-solve alignment and go-to need to
+      know where you are. Framing, focus and the programmes work without it.
+      <button id="astro-nopos-go" class="ghost sm" type="button">Set location</button>
+    </div>
+
+    <div class="card">
+      <h3>Celestial mode</h3>
+      <label class="switch">
+        <input id="astro-enter" type="checkbox">
+        <span>Enter astro tracking mode</span>
+      </label>
+      <p class="tiny dim">
+        Puts the head in astro mode and keeps its attitude stream alive (the
+        server re-arms it every few seconds — a browser can't be trusted to).
+        Leaving stops tracking and returns to photo mode.
+      </p>
+      <dl id="mountstate" class="kv"><dt>reading…</dt><dd></dd></dl>
+    </div>
+
+    <div id="astro-controls" hidden>
+      <!-- Level the base before aligning. Tilt compensation is the one that means
+           you don't have to get the tripod perfectly level for deep sky. -->
+      <div class="card">
+        <h3><span class="stepn">1</span>Level the head</h3>
+        <label class="switch inline">
+          <input id="astro-tilt" type="checkbox">
+          <span><b>Tilt compensation</b> — track on an unlevel tripod</span>
+        </label>
+        <p class="tiny dim">
+          When it's on, the head corrects for its own tilt from its attitude
+          sensor, so deep-sky tracking doesn't need a perfectly level tripod — it
+          just needs to know which way is down, which it does. Turn it
+          <b>off</b> only if you've levelled the base by hand. It persists on the
+          head and measurably changes tracking accuracy.
+        </p>
+        <div class="markrow">
+          <button id="astro-level" class="ghost" type="button">Auto-level the head now</button>
+        </div>
+        <p class="tiny dim">
+          Auto-level physically drives the head to level — do it <b>before</b> you
+          align, never while tracking (it moves the head). With tilt compensation
+          on you can usually skip it.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3><span class="stepn">2</span>Align</h3>
+        <p class="tiny dim">
+          The head needs to know which way is north before it can point at a
+          star. Three ways, best first:
+        </p>
+
+        <!-- 1. Plate solve — no compass at all -->
+        <div class="alignmethod">
+          <div class="alignhead"><b>Solve the sky</b> <span class="dim">— most accurate, no compass</span></div>
+          <p class="tiny dim">
+            Take a frame of the night sky and let the solver work out exactly
+            where the head is pointing, then write that as the alignment. This is
+            the dream path — it needs no compass and no phone sensors.
+          </p>
+          <button id="astro-solve" class="startbtn" type="button">Solve &amp; align</button>
+          <p id="astro-solve-msg" class="tiny dim" hidden></p>
+        </div>
+
+        <!-- 2. Phone compass -->
+        <div class="alignmethod">
+          <div class="alignhead"><b>Phone compass</b> <span class="dim">— if this browser is on a phone</span></div>
+          <p class="tiny dim">
+            Hold the phone flat against the head, pointing the same way the camera
+            does, and read its magnetometer. Only works on a phone, and a
+            magnetometer is never as good as a solve.
+          </p>
+          <div class="fieldrow">
+            <button id="astro-compass" class="ghost" type="button">Read phone compass</button>
+            <span id="astro-compass-val" class="mono dim">—</span>
+          </div>
+          <button id="astro-compass-align" class="ghost" type="button" disabled>Align to this heading</button>
+        </div>
+
+        <!-- 3. Manual bearing -->
+        <div class="alignmethod">
+          <div class="alignhead"><b>Type a bearing</b> <span class="dim">— from a real compass</span></div>
+          <div class="fieldrow">
+            <input id="astro-manual" type="number" min="0" max="360" step="0.5" placeholder="0–360°">
+            <span class="unit">°</span>
+            <button id="astro-manual-align" class="ghost" type="button">Align</button>
+          </div>
+          <p class="tiny dim">The true bearing the camera points at (magnetic compass corrected for declination).</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="stepn">3</span>Track</h3>
+        <div class="row">
+          <label class="seg-inline">
+            Rate
+            <select id="astro-rate">
+              <option value="0">Sidereal (stars)</option>
+              <option value="2">Lunar (Moon)</option>
+            </select>
+          </label>
+          <label class="switch inline"><input id="astro-half" type="checkbox"><span>Half rate</span></label>
+        </div>
+        <p class="tiny dim">
+          Half rate splits the drift between sky and ground so each trails half as
+          much — the landscape-astro compromise. Tracking needs the Astro Kit
+          fitted and the head aligned; without the kit it can point and align but
+          not track.
+        </p>
+        <button id="astro-track" class="startbtn" type="button">Start tracking</button>
+      </div>
+
+      <!-- Astro autofocus: sweep the focuser, settle on the sharpest stars. -->
+      <div class="card">
+        <h3><span class="stepn">4</span>Auto-focus <span class="dim">— tack-sharp stars</span></h3>
+        <p class="tiny dim">
+          Sweeps the focuser and settles where the stars are tightest — smallest
+          <b>HFR</b>, scored from the live view at each step, exactly how NINA and
+          Ekos focus. Put the camera on <b>manual focus</b>, aim at a starfield,
+          and turn live view on first. The head reports no focuser position, so
+          this is a <i>relative</i> sweep that returns from one side to take up
+          backlash — run it again if a pass lands short.
+        </p>
+        <div class="afrow">
+          <button id="af-run" class="startbtn" type="button">Run auto-focus</button>
+          <button id="af-stop" class="ghost" type="button" hidden>Stop</button>
+        </div>
+        <details class="af-adv">
+          <summary>Sweep settings</summary>
+          <div class="afgrid">
+            <label>Steps<input id="af-steps" type="number" min="3" max="40" step="1" value="12"></label>
+            <label>Step size<input id="af-adj" type="number" min="1" max="10" step="1" value="1"></label>
+            <label>Settle (s)<input id="af-settle" type="number" min="0" max="5" step="0.1" value="0.8"></label>
+            <label>Backlash<input id="af-backlash" type="number" min="0" max="20" step="1" value="3"></label>
+          </div>
+          <p class="tiny dim">More steps or a larger step size widen the search; settle gives the lens and preview time between moves.</p>
+        </details>
+        <p id="af-msg" class="tiny dim" hidden></p>
+        <div id="af-curvebox" class="af-curvebox" hidden>
+          <svg id="af-curve" viewBox="0 0 300 90" preserveAspectRatio="none" aria-label="focus curve"></svg>
+          <div class="af-stat"><span id="af-best" class="mono"></span></div>
+        </div>
+      </div>
+
+      <!-- Go to a catalogue target and track it. -->
+      <div class="card">
+        <h3><span class="stepn">5</span>Go to a target</h3>
+        <p class="tiny dim">
+          Pick a deep-sky object and the head slews to it and tracks. Plate-solve
+          align first, so it lands on target.
+        </p>
+        <input id="tgt-search" type="text" placeholder="search — M42, Andromeda, ring…" autocomplete="off" class="tgtsearch">
+        <select id="tgt-select" size="6" class="tgtlist"></select>
+        <dl class="kv"><dt>Selected</dt><dd id="tgt-info" class="mono">—</dd></dl>
+        <div id="tgt-danger" class="danger" hidden>
+          <label class="switch"><input id="tgt-solar-ok" type="checkbox"><span>⚠ A certified solar filter is fitted</span></label>
+          <p class="tiny">Pointing the camera at the Sun without a proper solar filter destroys the sensor in seconds. GOTO stays locked until you confirm the filter is on.</p>
+        </div>
+        <button id="tgt-goto" class="startbtn" type="button" disabled>Choose a target</button>
+        <p id="tgt-msg" class="tiny dim" hidden></p>
+      </div>
+
+      <!-- Astro capture: the head's own in-head stacking sequence. -->
+      <div class="card">
+        <h3><span class="stepn">6</span>Capture stacked images</h3>
+        <p class="tiny dim">
+          Starts the head's own astro interval sequence — it shoots and stacks
+          in-head. With <b>tilt compensation</b> and <b>auto-guiding</b> on
+          (above), the stack stays aligned and clean on an unlevel tripod.
+        </p>
+        <div class="grid2">
+          <div class="field">
+            <label for="cap-interval">Interval</label>
+            <div class="fieldrow"><input id="cap-interval" type="number" min="1" max="3600" step="1" value="8"><span class="unit">s</span></div>
+          </div>
+          <div class="field">
+            <label for="cap-shots">Frames</label>
+            <div class="fieldrow"><input id="cap-shots" type="number" min="1" max="5000" step="1" placeholder="∞"><button id="cap-inf" class="ghost sm" type="button">∞</button></div>
+          </div>
+        </div>
+        <p class="tiny dim">
+          Heads-up: the Polaris can refuse an externally-started capture while
+          it's tracking. If it doesn't begin, take the first shot in the Benro
+          app and it'll stack from there.
+        </p>
+        <dl id="cap-run" class="kv" hidden><dt>Capture</dt><dd id="cap-status" class="mono">—</dd></dl>
+        <button id="cap-start" class="startbtn" type="button">Start astro capture</button>
+      </div>
+    </div>
+
+      <!-- The always-on diagnostics and machine bridges, folded away so the
+           guided flow above stays short. The details' open state persists. -->
+      <details class="astro-tools" id="astro-tools">
+        <summary>Diagnostics &amp; bridges <span class="dim">— solver, guiding, mount status, protocols</span></summary>
+
+      <!-- Plate solving — the /legacy solver, folded in natively. -->
+      <div class="card">
+        <h3>Plate solving</h3>
+        <p class="tiny dim">
+          Solve a frame against the star catalogue and optionally write the
+          result as the alignment — no compass, more accurate than one.
+        </p>
+        <div class="btnrow">
+          <button id="solve-now" class="ghost" type="button">Capture &amp; solve</button>
+          <button id="solve-latest" class="ghost" type="button">Solve latest frame</button>
+          <button id="solve-apply" class="ghost" type="button">Apply last</button>
+          <button id="solve-cancel" class="ghost" type="button" hidden>Cancel solve</button>
+        </div>
+        <label class="switch inline"><input id="solve-align" type="checkbox" checked><span>Write the solution as the alignment</span></label>
+        <dl class="kv">
+          <dt>Solver</dt><dd id="solve-status">idle</dd>
+          <dt>Solution</dt><dd id="solve-solution" class="mono">—</dd>
+        </dl>
+        <div class="fieldrow">
+          <label for="solve-focal" class="minilbl">Focal</label>
+          <input id="solve-focal" type="text" inputmode="decimal" placeholder="auto" class="focalin">
+          <span class="unit">mm</span>
+          <button id="solve-focal-set" class="ghost sm" type="button">set</button>
+        </div>
+        <p id="solve-focal-note" class="tiny dim"></p>
+        <details class="logbox"><summary>Solver log</summary><pre id="solve-log" class="logpre">—</pre></details>
+      </div>
+
+      <!-- Auto-guiding -->
+      <div class="card">
+        <h3>Auto-guiding</h3>
+        <p class="tiny dim">
+          Once a frame is solved, the guider re-solves on an interval and nudges
+          the mount back when drift crosses the threshold — holding a target
+          centred through long exposures. Needs a solution to guide on.
+        </p>
+        <label class="switch"><input id="guide-on" type="checkbox"><span>Guiding on</span></label>
+        <dl class="kv">
+          <dt>State</dt><dd id="guide-state">off</dd>
+          <dt>Last drift</dt><dd id="guide-drift" class="mono">—</dd>
+          <dt>Every / threshold</dt><dd id="guide-params" class="mono">—</dd>
+        </dl>
+        <canvas id="guide-spark" class="spark" width="320" height="56" hidden></canvas>
+        <details class="logbox"><summary>Guide log</summary><pre id="guide-log" class="logpre">—</pre></details>
+
+        <hr class="hair">
+        <label class="switch"><input id="dither" type="checkbox"><span>Dither between frames</span></label>
+        <p class="tiny dim">
+          Shifts the framing a hair between exposures so stacking averages out
+          hot pixels and fixed-pattern noise — the small nudges happen between
+          frames of a running capture, not now. Persists on the head.
+        </p>
+      </div>
+
+      <!-- Live status -->
+      <div class="card">
+        <h3>Mount status</h3>
+        <dl class="kv">
+          <dt>Mode</dt><dd id="st-mode">—</dd>
+          <dt>Aligned</dt><dd id="st-aligned">—</dd>
+          <dt>Tracking</dt><dd id="st-tracking">—</dd>
+          <dt>Alt / Az</dt><dd id="st-altaz" class="mono">—</dd>
+          <dt>Attitude</dt><dd id="st-att" class="mono">—</dd>
+        </dl>
+        <button id="st-refresh" class="ghost sm" type="button">Read position</button>
+        <p class="tiny dim">Reading the position opens a brief connection to the head; it is refused while unaligned, to avoid nudging the Benro app into a compass-calibration prompt.</p>
+      </div>
+
+      <div class="card">
+        <h3>Observatory bridges</h3>
+        <p class="tiny dim">
+          This server speaks three mount protocols at once, so most astronomy
+          software can drive the Polaris directly: <b>ASCOM Alpaca</b>
+          (auto-discovered — NINA, Stellarium), native <b>INDI</b> (KStars/Ekos,
+          PHD2), and <b>LX200</b> over TCP (Stellarium, SkySafari, or the
+          LX200-generic driver). The INDI server exposes <b>both a mount and a
+          camera</b> — connect the <i>INDI Telescope</i> and <i>INDI CCD</i> to
+          this host and port; the camera returns a live-view frame for framing
+          and plate-solving (full-res light frames are still shot through the
+          Benro app). The original solver dashboard is still at
+          <a href="/legacy">/legacy</a>.
+        </p>
+        <dl class="kv">
+          <dt>Alpaca</dt><dd class="mono">this host : <span id="br-port">—</span> · UDP discovery</dd>
+          <dt>INDI</dt><dd class="mono">this host : <span id="br-indi">7624</span></dd>
+          <dt>LX200</dt><dd class="mono">this host : <span id="br-lx">10001</span></dd>
+        </dl>
+      </div>
+      </details>
+  </section>
+
+  <!-- ───────────────────────────── GALLERY ───────────────────────────── -->
+  <section id="tab-gallery" class="tab" hidden>
+    <div class="galtop">
+      <p class="dim" style="margin:0">
+        Frames captured to the Polaris SD. Thumbnails are made <b>here</b>, on the
+        head, so a grid loads in seconds — the phone app has to pull whole frames
+        one at a time. Full-size copies still live on the camera card too.
+      </p>
+      <button id="gal-refresh" class="ghost sm" type="button">Refresh</button>
+    </div>
+    <div id="gal-filter" class="segbar"></div>
+    <div id="gal-empty" class="card dim" hidden>No captured frames on the SD yet.</div>
+    <div id="gal-grid" class="galgrid"></div>
+
+    <!-- Tap a thumbnail for the full frame. -->
+    <div id="gal-lightbox" class="lightbox" hidden>
+      <button id="gal-lb-close" class="gbtn lbclose" type="button" aria-label="close full view">✕</button>
+      <img id="gal-lb-img" alt="">
+      <div id="gal-lb-cap" class="lbcap mono"></div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────────── SETTINGS ──────────────────────────── -->
+  <section id="tab-settings" class="tab" hidden>
+
+    <!-- Observing site: the lat/lon the solver hint, Alpaca and every alt/az
+         conversion use. Runtime-settable and persisted to site.conf. -->
+    <div class="card">
+      <h3>Observing site</h3>
+      <p class="tiny dim">
+        Your latitude and longitude — the plate solver's search hint, the Alpaca
+        site, and every go-to alt/az conversion use them. Saved on the head, so it
+        survives a reboot.
+      </p>
+      <div class="siterow">
+        <div class="field">
+          <label for="site-lat">Latitude</label>
+          <div class="fieldrow"><input id="site-lat" type="number" min="-90" max="90" step="0.0001" placeholder="40.0000"><span class="unit">°N</span></div>
+        </div>
+        <div class="field">
+          <label for="site-lon">Longitude</label>
+          <div class="fieldrow"><input id="site-lon" type="number" min="-180" max="180" step="0.0001" placeholder="-111.9000"><span class="unit">°E</span></div>
+        </div>
+      </div>
+      <div class="markrow">
+        <button id="site-gps" class="ghost" type="button">Use my location</button>
+        <button id="site-save" class="startbtn" type="button">Save site</button>
+      </div>
+      <p id="site-msg" class="tiny dim" hidden></p>
+    </div>
+
+    <!-- Device identity + clock, read from 780/781. -->
+    <div class="card">
+      <div class="cardhead">
+        <h3>Device</h3>
+        <button id="dev-refresh" class="ghost sm" type="button">Refresh</button>
+      </div>
+      <dl class="kv" id="dev-info"><dd class="dim">Reads from the head when the control link is up.</dd></dl>
+    </div>
+
+    <div class="card">
+      <h3>Head settings</h3>
+      <label class="switch"><input id="camdir" type="checkbox"><span>Rotate the camera plate</span></label>
+      <p class="tiny dim">
+        Flips the camera-plate orientation (portrait ⇄ landscape). It moves the
+        head a little; a small, safe re-orient.
+      </p>
+
+      <hr class="hair">
+      <label class="switch"><input id="limits" type="checkbox"><span>Release rotation limits (restricted angle)</span></label>
+      <p class="tiny dim">
+        Off keeps the head's travel limits enforced — the safe default. Turn this
+        on <b>only</b> to shoot the zenith or a ground angle with the Astro Kit,
+        and only after you've physically checked the kit clears the pitch axis and
+        the tripod. <b>With limits released the head can swing into its own
+        accessory.</b>
+      </p>
+      <div id="limits-danger" class="danger" hidden>
+        <label class="switch"><input id="limits-ok" type="checkbox"><span>⚠ I have physically checked the clearance</span></label>
+        <p class="tiny">Watch the Astro Kit against the pitch axis and the tripod in real time — the head can collide.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Wi-Fi</h3>
+      <label class="switch">
+        <input id="autojoin" type="checkbox">
+        <span>Join my network at power-up</span>
+      </label>
+      <p class="tiny dim">
+        The head keeps its own access point and also joins your network, so it
+        is reachable without switching Wi-Fi. Both radios share one channel —
+        joining forces the AP onto your network's channel.
+      </p>
+      <label class="switch">
+        <input id="keepwifi" type="checkbox">
+        <span>Keep Wi-Fi awake</span>
+      </label>
+      <p class="tiny dim">
+        Sixty seconds after the last client disconnects the head powers its
+        radio down and the network disappears. Holding the control link open
+        prevents that, at the cost of battery — and, while the mount is not
+        aligned, of making the Benro app ask for a compass calibration.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Control link</h3>
+      <dl id="linkstats" class="kv"></dl>
+      <p class="tiny dim">
+        One connection to the head, held open and shared by this page, the
+        solver and the Alpaca bridge.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>About</h3>
+      <dl class="kv">
+        <dt>Live view</dt><dd id="aboutstream" class="mono"></dd>
+        <dt>Solver dashboard</dt><dd><a href="/legacy">/legacy</a></dd>
+      </dl>
+    </div>
+  </section>
+</main>
+
+<nav id="tabs">
+  <button class="on" data-tab="control">Control</button>
+  <button data-tab="programs">Programs</button>
+  <button data-tab="astro">Astro</button>
+  <button data-tab="gallery">Gallery</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<script src="/app.js"></script>
+</body>
+</html>

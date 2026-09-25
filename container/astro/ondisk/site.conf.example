@@ -1,0 +1,108 @@
+# Benro Polaris astro configuration.
+# Copy to site.conf on the microSD:  /app/sd/polaris-astro/site.conf
+# Read at boot by /app/network_telnetd.sh.
+
+# ---- OBSERVING POSITION (optional) ----------------------------------------
+# Your position in decimal degrees (north/east positive). The solver's search
+# hint and the Alpaca site properties come from here. You do NOT have to set it
+# here: leave these commented and set it in the web app instead (Settings >
+# Observing site, via the browser's GPS or by hand) — it is saved back to this
+# file, so it survives a reboot. Alignment and go-to need a position; framing,
+# focus, the gallery and the programmes do not.
+#LAT=00.00000
+#LON=000.00000
+# Lens focal length in mm.
+# FOCAL IS ONLY A FALLBACK. The solver reads the focal length from each frame's
+# EXIF, which is the only thing that tracks a zoom lens. Order of preference:
+#   1. the frame's own EXIF                      (real captures)
+#   2. the focal cached from the last EXIF frame (live view carries no EXIF)
+#   3. this value
+#   4. a search across FOCAL_MIN..FOCAL_MAX
+# A WRONG FOCAL MAKES THE SOLVE IMPOSSIBLE, NOT SLOW: a 70mm frame searched at
+# 400mm hunts 2.3 arcsec/pix when the truth is 13.4, and no quad can match. A
+# whole night failed that way before the solver read EXIF.
+FOCAL=70
+
+# Fallback search range when no focal is known at all. Realistic bounds for a
+# lens on this mount. Costs ~148 s versus ~5 s with a known focal, so it is the
+# safety net rather than the normal path, and gets its own longer budget.
+# NOTE: the shipped index files (4110-4119) cover roughly 14-400mm on full
+# frame. Widening this range does not by itself let a 3000mm lens solve --
+# that needs finer indexes; see fetch-indexes.sh.
+FOCAL_MIN=8
+FOCAL_MAX=3000
+RANGE_TIMEOUT=240
+
+# ---- web UI + Alpaca ------------------------------------------------------
+# 8080 is pgphoto's own MJPG stream; 80, 8081, 9090 and 22 are also taken.
+POLARIS_HTTPD_PORT=8090
+
+# The web server starts at boot so the page is there when you open it. It does
+# not read the mount until the mount is aligned: connecting to an unaligned one
+# makes the Benro app demand a compass calibration, so every endpoint that
+# would open a connection refuses until then and the page shows what it knows
+# passively from the device's own log.
+# Set 1 to not start the server at all until an alignment has completed.
+HTTPD_WAIT_ALIGNED=0
+
+# ---- auto-solve during the app's calibration -------------------------------
+AUTOSOLVE=1
+# 1 = watch and log what it WOULD send, touch nothing. START HERE.
+# 0 = ARMED: corrects the heading (527), slews to centre, confirms (530 step:2).
+# Run dry once, read /app/sd/polaris-autosolve.log, then set 0.
+AUTOSOLVE_DRY_RUN=1
+
+# Solve-quality gates. Below these the daemon does NOTHING and leaves the dialog
+# for you -- a wrong alignment is worse than no alignment.
+MIN_LOGODDS=100
+MIN_MATCHES=12
+
+# How well centred before it will confirm (deg). 0.15 is ~9 arcmin.
+CENTRE_TOL_DEG=0.15
+
+# Refuse to derive a heading above this altitude: azimuth is degenerate near the
+# zenith and the error is amplified by 1/cos(alt).
+MAX_ALIGN_ALT=85         # hard stop near the zenith; the real check is MAX_UNCERT_FRAC
+SOLVE_ARCSEC=60          # assumed solve accuracy (measured 20-40")
+MAX_UNCERT_FRAC=0.25     # refuse if uncertainty exceeds this fraction of the correction
+
+# Seconds to wait before attempting another alignment. The app re-sends its
+# 519/530 while the dialog is open, and without this the daemon re-arms on every
+# repeat and slews the mount each time.
+ARM_COOLDOWN=120
+
+# ---- auto-guiding ----------------------------------------------------------
+# Auto-guiding. GUIDE=1 lets it run at all; GUIDE_ON_TRACK starts it
+# automatically when the mount begins tracking (opcode 531), which is the point
+# at which you are trying to hold a target and therefore want drift corrected.
+# Each run writes its own CSV to polaris-astro/guide-sessions/ so a capture can
+# be audited afterwards.
+GUIDE=0
+GUIDE_ON_TRACK=1
+GUIDE_DRY_RUN=1
+GUIDE_INTERVAL=30        # seconds between drift checks
+GUIDE_THRESH=60          # correct once drift exceeds this many arcsec
+
+# ---- clock -----------------------------------------------------------------
+# The Polaris runs LOCAL time while reporting it as UTC. Seven hours is ~105 deg
+# of hour angle, so this matters enormously. "auto" reads the true offset from
+# the app's own 782 message. Only override if you know why.
+TZ_OFFSET_SEC=auto
+
+# ---- debugging -------------------------------------------------------------
+# Record the app<->device protocol to /app/sd/align-flow.log.
+CAPTURE_ALIGN_FLOW=0
+
+# TEST ONLY: solve this image instead of the camera, at this pretend time.
+# MUST be unset for real use or it solves the same frame no matter where you
+# point. Either one forces dry-run unless DRY_RUN is set explicitly.
+#STUB_FRAME=/app/sd/astro-bench/259A8092.JPG
+#STUB_UTC=2026-01-15T05:30:00
+
+# Master switch. 0 starts nothing except the wifi watchdog -- a clean baseline
+# for telling a device-level fault apart from anything this project does.
+POLARIS_ASTRO=1
+
+# Record AP/hostapd/interface state to /app/sd/wifi-watch.log. Local reads
+# only; opens no sockets. Useful for faults that kill your ssh session too.
+WIFI_WATCH=1

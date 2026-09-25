@@ -18,8 +18,56 @@ things were broken on stock firmware (libgphoto2 2.5.27, ~2021):
    flag on repack.
 
 Result on a real R5 Mark II (flash-verified end-to-end): **immediate detection,
-settings that stick, live view, no "no card" warning, and capture that downloads
-both JPEG and RAW.** See [docs/TESTED.md](docs/TESTED.md).
+settings that stick, live view, no "no card" warning, and capture that writes to
+the camera's own memory card AND downloads to the Polaris.** That last part
+needed two upstream libgphoto2 bugs fixed — see
+[docs/UPSTREAM-LIBGPHOTO2-BUGS.md](docs/UPSTREAM-LIBGPHOTO2-BUGS.md). The RAW
+stays on the camera card; only the JPEG crosses the wire.
+See [docs/TESTED.md](docs/TESTED.md).
+
+
+### Diagnostic build options
+
+`--keep-usb-reset` leaves `resetUsb` unpatched, so the device still performs
+`USBDEVFS_RESET` on connect. The default patch suppresses it to stop a
+re-enumeration storm; this switch exists to test whether that suppression is
+implicated in other faults. See [docs/CAPTURE-PATH.md](docs/CAPTURE-PATH.md).
+
+### Building against your own libgphoto2
+
+The fixes this project carries are patches applied to upstream source (see
+`container/dbg_patch.py`). To build the firmware against a fork, a branch, or a
+specific commit instead of the release tarball:
+
+```bash
+./patch-polaris.sh --fwpkt ./FwPkt \
+  --libgphoto2-repo https://github.com/you/libgphoto2 \
+  --libgphoto2-ref  my-fix-branch
+```
+
+`--libgphoto2-ref` accepts any git ref — branch, tag, or commit hash. It
+switches the build from the release tarball to a git clone, which has no
+`configure` script, so `autoreconf` runs first; `git` is installed into the
+build image on demand and the other autotools are already there. Without these
+flags nothing changes: the ordinary build still uses the upstream release
+tarball for `--libgphoto2 <version>`.
+
+## On-device plate solving (alpha)
+
+The `astro-plate-solving` branch adds astrometric plate solving that runs on the
+Polaris itself: it solves what the camera is actually looking at during the
+app's calibration, corrects the mount's heading, centres the target, confirms
+for you, and then guides out tracking drift. It also serves a web UI and an
+ASCOM Alpaca telescope endpoint so Stellarium/NINA/SkySafari can talk to the
+mount.
+
+Measured, not asserted: 37.5 deg of compass error corrected to 0.122 deg in one
+pass (closed-loop simulation with real motor commands); solver accurate to
+20-40 arcsec at live-view resolution; 35/35 Alpaca conformance checks.
+
+**It has not been tested under real stars yet.** See [docs/ASTRO.md](docs/ASTRO.md)
+for setup, configuration, and an explicit list of what is and is not verified.
+
 
 ## Two modes (full is the default)
 
@@ -172,6 +220,16 @@ they live in the trampolined base binary.
 
 See [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the full technical story
 and [docs/TESTED.md](docs/TESTED.md) for exactly what was verified.
+
+> **In progress (branch `astro-plate-solving`):** **on-device astrometric
+> alignment** — the Polaris taking frames, plate solving them, and syncing itself
+> with no compass and no single-star alignment. The solver itself is **built and
+> validated** (`./build-astro.sh` produces a device bundle; 400 mm on full frame
+> solves in a couple of seconds with a pointing hint), but nothing touches the
+> motors yet and none of it is wired into the patcher. See
+> [docs/PLATE-SOLVING.md](docs/PLATE-SOLVING.md),
+> [docs/BENCH-RESULTS.md](docs/BENCH-RESULTS.md) and
+> [docs/LICENSE-AUDIT.md](docs/LICENSE-AUDIT.md).
 
 ---
 

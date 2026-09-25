@@ -13,6 +13,11 @@
 #
 #  Env:
 #     LIBGPHOTO2_VERSION   libgphoto2 release tag to build (default 2.5.34)
+#     LIBGPHOTO2_REPO      build from this git repo instead of the release
+#                          tarball (default: upstream gphoto/libgphoto2)
+#     LIBGPHOTO2_REF       git branch, tag or commit to build. Setting this
+#                          switches the build to a git clone, which needs
+#                          autotools in the image.
 #     FIX_R5M2_TYPO        1 = correct the upstream "EOS 5Rm2" model-name typo
 #     SELFTEST             1 = qemu-emulate the driver load (needs qemu-arm-static)
 #     SSH_PUBKEY           optional: authorized_keys line(s) to authorise for
@@ -60,7 +65,11 @@ TESTED_PGPHOTO_MD5="a0"  # informational only; verified structurally below
 [ -f /in/camera/config ] || die "/in/camera/config not found"
 
 STOCK_APPFS=/in/camera/appfs.ubifs
-log "libgphoto2 target : $LIBGPHOTO2_VERSION"
+if [ -n "${LIBGPHOTO2_REF:-}" ]; then
+  log "libgphoto2 target : ${LIBGPHOTO2_REPO:-upstream} @ $LIBGPHOTO2_REF (custom fork)"
+else
+  log "libgphoto2 target : $LIBGPHOTO2_VERSION"
+fi
 log "stock appfs.ubifs : $(stat -c %s "$STOCK_APPFS") bytes  md5=$(md5sum "$STOCK_APPFS"|cut -d' ' -f1)"
 
 FWVER="unknown"
@@ -279,7 +288,9 @@ if [ "$MODE" = "ptp2only" ]; then
   python3 /opt/patcher/analyze_pgphoto.py "$PG" --apply "$W/pgphoto.patched" >/dev/null
   DIFFB="$( { cmp -l "$PG" "$W/pgphoto.patched" || true; } | wc -l | tr -d ' ')"
   # 14 = 3 (gates) + 7 (resetUsb: mov r0,#0 + bx lr) + 4 (list-files bl → nop)
-  [ "$DIFFB" = "14" ] || die "pgphoto patch changed $DIFFB bytes (expected 14) — aborting"
+  # KEEP_RESET_USB=1 skips the 7 resetUsb bytes, so the expected count drops.
+  if [ "${KEEP_RESET_USB:-0}" = "1" ]; then EXPECT_DIFF=7; else EXPECT_DIFF=14; fi
+  [ "$DIFFB" = "$EXPECT_DIFF" ] || die "pgphoto patch changed $DIFFB bytes (expected $EXPECT_DIFF) — aborting"
   log "  pgphoto patched: 14 bytes (gates + resetUsb + list-files skip) ✓"
 
   O_UID="$(stat -c %u "$STOCK_PTP2")"; O_GID="$(stat -c %g "$STOCK_PTP2")"; O_MODE="$(stat -c %a "$STOCK_PTP2")"
@@ -302,7 +313,8 @@ else
   log "full-libgphoto2: building reliability-patched base…"
   python3 /opt/patcher/analyze_pgphoto.py "$PG" --apply "$W/pgphoto.base" >/dev/null
   DIFFB="$( { cmp -l "$PG" "$W/pgphoto.base" || true; } | wc -l | tr -d ' ')"
-  [ "$DIFFB" = "14" ] || die "reliability base changed $DIFFB bytes (expected 14) — aborting"
+  if [ "${KEEP_RESET_USB:-0}" = "1" ]; then EXPECT_DIFF=7; else EXPECT_DIFF=14; fi
+  [ "$DIFFB" = "$EXPECT_DIFF" ] || die "reliability base changed $DIFFB bytes (expected $EXPECT_DIFF) — aborting"
   log "  base: 14-byte reliability patch (resetUsb + list-files + 3 gates) md5=$(md5sum "$W/pgphoto.base"|cut -d' ' -f1)"
 
   log "full-libgphoto2: on-disk trampolining 64 boundary entries…"
@@ -406,6 +418,56 @@ if [ -n "${SSH_PUBKEY:-}" ]; then
   install -m "$B_MODE" -o "$B_UID" -g "$B_GID" "$W/ssh_hook.sh" "$APP/$SSH_HOOK"
   log "  added /app/$SSH_HOOK (boot hook, $B_MODE $B_UID:$B_GID — same as bootapp) — appends to /root/.ssh/authorized_keys at boot"
   log "  after flashing: ssh -i <your private key> root@<polaris ip>"
+fi
+
+# ---------------------------------------------------------------------------
+# 7b. OPTIONAL (ASTRO_BAKE): bake the whole astro stack straight INTO the
+#     firmware. /app/astro is populated here from a pre-built bundle (mounted at
+#     /astro) and polaris-astro-boot.sh is installed as the boot hook, so there is
+#     nothing to install on the device and no SSH: the SD card carries only the
+#     (large, static) index files. Flash, drop the astrometry/ dir on the card,
+#     power on, open the page. If SSH was also requested, its hook is preserved as
+#     the boot script's chained pre-hook (/app/network_telnetd.pre-astro.sh).
+# ---------------------------------------------------------------------------
+if [ "${ASTRO_BAKE:-0}" = "1" ]; then
+  log "astro: baking the astro stack into /app/astro…"
+  BOOTAPP="$APP/bootapp"
+  [ -f "$BOOTAPP" ] || die "--astro-autostart: /app/bootapp is missing from this appfs — refusing to guess a boot hook"
+  [ -d /astro ] || die "--astro-autostart: the astro bundle was not mounted at /astro (build it with build-astro.sh)"
+  [ -x /astro/polaris-httpd ] || die "--astro-autostart: /astro/polaris-httpd missing — point --astro-bundle at the polaris-astro/ dir"
+  [ -f /astro/polaris-astro-boot.sh ] || die "--astro-autostart: /astro/polaris-astro-boot.sh missing from the bundle"
+  A_UID="$(stat -c %u "$BOOTAPP")"; A_GID="$(stat -c %g "$BOOTAPP")"; A_MODE="$(stat -c %a "$BOOTAPP")"
+
+  # Copy the binaries + scripts into the appfs. The indexes stay on the SD (too
+  # big for the firmware), and no site.conf is baked (the position is set in the
+  # web app and saved to the card).
+  mkdir -p "$APP/astro"
+  _n=0
+  for f in /astro/*; do
+    [ -f "$f" ] || continue
+    b="$(basename "$f")"
+    case "$b" in astrometry|site.conf|site.conf.example) continue;; esac
+    install -m 755 -o "$A_UID" -g "$A_GID" "$f" "$APP/astro/$b"
+    _n=$((_n + 1))
+  done
+  log "  copied $_n file(s) into /app/astro"
+
+  # Install polaris-astro-boot.sh as the boot hook, chaining any SSH hook.
+  ASTRO_SLOT=""
+  if [ -n "$SSH_HOOK" ]; then
+    install -m "$A_MODE" -o "$A_UID" -g "$A_GID" "$APP/$SSH_HOOK" "$APP/network_telnetd.pre-astro.sh"
+    ASTRO_SLOT="$SSH_HOOK"
+    log "  ssh-key hook chained as /app/network_telnetd.pre-astro.sh (the boot script runs it first)"
+  else
+    for cand in network_telnetd.sh start_agent.sh; do
+      grep -q "$cand" "$BOOTAPP" || continue          # bootapp must actually call it
+      [ -e "$APP/$cand" ] && continue                 # do not clobber an existing hook
+      ASTRO_SLOT="$cand"; break
+    done
+    [ -n "$ASTRO_SLOT" ] || die "--astro-autostart: no free boot hook that /app/bootapp calls (network_telnetd.sh, start_agent.sh)"
+  fi
+  install -m "$A_MODE" -o "$A_UID" -g "$A_GID" "$APP/astro/polaris-astro-boot.sh" "$APP/$ASTRO_SLOT"
+  log "  installed boot hook /app/$ASTRO_SLOT — starts the astro stack at boot; the SD needs only the astrometry/ index files"
 fi
 
 # ---------------------------------------------------------------------------
