@@ -267,7 +267,33 @@ instead of printing `[OK]` over a container that never produced anything.
 Use **the same SD-card firmware-update procedure you already use for official
 Benro updates**, but with the `FwPkt.zip` this tool produced. The device
 verifies the package (MD5), reboots, and U-Boot writes it.
-[https://m.benro.com/en/index.html#/pages/download/download?key=benro-polaris](Instructions from Benro)
+
+> ⚠️ **Use a fast SD card.** The update is sensitive to card speed — a slow card
+> can make the update fail or not start. Confirmed working with a
+> **SanDisk Extreme PLUS**; it did **not** work with a (non-PLUS)
+> **SanDisk Extreme**. If the update doesn't take, try a faster card first.
+
+> ⚠️ **Follow Benro's official update instructions exactly.** Don't skip or
+> reorder steps. See the
+> [instructions from Benro](https://m.benro.com/en/index.html#/pages/download/download?key=benro-polaris)
+> (Firmware tab). At the time of writing they are:
+>
+> Before you start: **fully charge the Polaris** and **format an SD card that
+> hasn't been used on the Polaris in the Benro app**. If you can't format it on
+> the Polaris, format it as **FAT32** on a PC. Then:
+>
+> 1. Download the firmware package (here: the `FwPkt.zip` this tool produced).
+> 2. Unzip the package and move the **folders** to the SD card.
+> 3. Insert the SD card into the Polaris and power it on (**short press, then
+>    long press and release until you hear three beeps**). Watch the **POWER**
+>    indicator: if it's on, the update is starting. If the POWER light isn't on
+>    after one minute, power it on again.
+> 4. The Polaris upgrades automatically. Be patient and **don't operate anything
+>    during the upgrade**.
+> 5. After the upgrade the Polaris turns itself on. When the **POWER** and
+>    **WLAN** lights are on, connect with the app, check the firmware version, and
+>    do some basic operations.
+> 6. Upgrade succeeds.
 
 **To roll back:** run the same procedure with your **original stock `FwPkt`**.
 
