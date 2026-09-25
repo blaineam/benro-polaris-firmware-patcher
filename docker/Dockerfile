@@ -21,7 +21,7 @@ deb http://archive.debian.org/debian-security stretch/updates main\n' > /etc/apt
     apt-get install --no-install-recommends -y \
         gcc-arm-linux-gnueabi g++-arm-linux-gnueabi binutils-arm-linux-gnueabi \
         autoconf automake libtool libtool-bin pkg-config make gettext autopoint \
-        gawk bison patch file xz-utils wget ca-certificates \
+        gawk bison flex patch file xz-utils wget ca-certificates \
         mtd-utils patchelf \
         libexif-dev libltdl-dev zlib1g-dev libpopt-dev libusb-1.0-0-dev \
         qemu-user-static \

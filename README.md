@@ -52,12 +52,20 @@ build image on demand and the other autotools are already there. Without these
 flags nothing changes: the ordinary build still uses the upstream release
 tarball for `--libgphoto2 <version>`.
 
-## On-device plate solving (alpha)
+## On-device astro features (experimental)
 
-The `astro-plate-solving` branch adds astrometric plate solving that runs on the
-Polaris itself: it solves what the camera is actually looking at during the
-app's calibration, corrects the mount's heading, centres the target, confirms
-for you, and then guides out tracking drift. It also serves a web UI and an
+> ⚠️ **EXPERIMENTAL — every astro feature is very experimental.** Plate
+> solving, auto-alignment, guiding, go-to, the web UI, Alpaca/INDI/LX200, the
+> programmes, autofocus, home Wi-Fi join and the baked-in install are all early
+> work. **None of it has been tested under real stars**, several parts have only
+> run in simulation, and it drives the real motors. Stay with the mount while it
+> runs, be ready to power it off, and don't rely on it for a night you care
+> about. It is entirely optional: the camera-driver patch above works without it.
+
+The astro stack adds astrometric plate solving that runs on the Polaris itself:
+it solves what the camera is actually looking at during the app's calibration,
+corrects the mount's heading, centres the target, confirms for you, and then
+guides out tracking drift. It also serves a web UI and an
 ASCOM Alpaca telescope endpoint so Stellarium/NINA/SkySafari can talk to the
 mount.
 
@@ -65,8 +73,12 @@ Measured, not asserted: 37.5 deg of compass error corrected to 0.122 deg in one
 pass (closed-loop simulation with real motor commands); solver accurate to
 20-40 arcsec at live-view resolution; 35/35 Alpaca conformance checks.
 
-**It has not been tested under real stars yet.** See [docs/ASTRO.md](docs/ASTRO.md)
-for setup, configuration, and an explicit list of what is and is not verified.
+It is built separately with `./build-astro.sh` (macOS/Linux only for now, there
+is no PowerShell version) and either copied to the SD card or baked into the
+firmware with `./patch-polaris.sh --astro-autostart`. See
+[docs/ASTRO.md](docs/ASTRO.md) for setup, configuration, and an explicit list of
+what is and is not verified, and [docs/NETWORKING.md](docs/NETWORKING.md) for
+joining your home Wi-Fi.
 
 
 ## Two modes (full is the default)
@@ -280,6 +292,8 @@ Options (both launchers):
 | `--no-fix-typo` / `-NoFixTypo` | off | Keep libgphoto2's upstream `EOS 5Rm2` model-name typo |
 | `--no-usb1` / `-NoUsb1` | off | (ptp2-only) Do **not** swap the `usb1` iolib; patch only the `ptp2` camlib + `pgphoto` |
 | `--ssh-key` / `-SshKey` | off | Authorise a **public** key for root SSH login (see [above](#optional-ssh-debug-access---ssh-key-off-by-default)). Takes a path to a `.pub`/`authorized_keys` file or a literal key line; repeat the flag (bash) or pass a comma-separated list (PowerShell) for several |
+| `--astro-autostart` | off | **Experimental**, macOS/Linux only. Bake the astro stack (built first with `./build-astro.sh`) into the firmware and start it at boot. See [docs/ASTRO.md](docs/ASTRO.md#zero-ssh-install--bake-the-astro-stack-into-the-firmware) |
+| `--astro-bundle DIR` | `out/astro-bundle/COPY-TO-SD-CARD-ROOT/polaris-astro` | With `--astro-autostart`: the `polaris-astro/` bundle to bake in |
 
 ```bash
 ./patch-polaris.sh --fwpkt /path/to/FwPkt --ssh-key ~/.ssh/id_ed25519.pub

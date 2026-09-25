@@ -3,12 +3,14 @@
 #  Build the on-device plate solver bundle (macOS / Linux).
 #
 #     ./build-astro.sh [--focal-min 14] [--focal-max 400] [--sensor-mm 36]
-#                      [--out DIR] [--no-indexes] [--image NAME]
+#                      [--out DIR] [--no-indexes] [--no-wifi] [--image NAME]
 #
 #  Produces out/astro-bundle/ :
 #     COPY-TO-SD-CARD-ROOT/     <- drag the CONTENTS of this onto the microSD
 #         astrometry/           index files      -> /app/sd/astrometry
 #         polaris-astro/        binaries+scripts -> /app/sd/polaris-astro
+#         polaris-wifi/         home-network join -> /app/sd/polaris-wifi
+#                               (iw, wpa_supplicant + scripts; --no-wifi skips)
 #     README.txt                how to install and test it
 #
 #  Put the card back in the Polaris, run
@@ -21,7 +23,7 @@
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-FMIN=14; FMAX=400; SENSOR=36; OUT="$HERE/out/astro-bundle"; IMG="polaris-patcher"; WANT_IDX=1
+FMIN=14; FMAX=400; SENSOR=36; OUT="$HERE/out/astro-bundle"; IMG="polaris-patcher"; WANT_IDX=1; WANT_WIFI=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +32,7 @@ while [ $# -gt 0 ]; do
     --sensor-mm) SENSOR="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --no-indexes) WANT_IDX=0; shift;;
+    --no-wifi) WANT_WIFI=0; shift;;
     --image) IMG="$2"; shift 2;;
     -h|--help) sed -n '2,22p' "$0"; exit 0;;
     *) echo "unknown option: $1" >&2; exit 1;;
@@ -48,7 +51,25 @@ docker run --rm \
   -v "$HERE/container":/opt/patcher:ro \
   -v "$OUT":/out \
   --entrypoint /bin/bash "$IMG" -c \
-  'bash /opt/patcher/astro/build_solver.sh arm /work/out/astro && mkdir -p /out/COPY-TO-SD-CARD-ROOT/polaris-astro && python3 /opt/patcher/astro/embed_webui.py /opt/patcher/astro/webui /tmp/webui.h && for t in polaris-logwatch polaris-match; do arm-linux-gnueabi-gcc -O2 -std=gnu11 -mfloat-abi=soft -Wall -Wextra -Werror /opt/patcher/astro/$t.c -o /work/out/astro/$t -lm || exit 1; done && arm-linux-gnueabi-gcc -O2 -std=gnu11 -mfloat-abi=soft -Wall -Wextra -Werror -I/tmp -I/opt/patcher/astro /opt/patcher/astro/polaris-httpd.c /opt/patcher/astro/polaris-link.c /opt/patcher/astro/polaris-jog.c /opt/patcher/astro/polaris-prog.c /opt/patcher/astro/polaris-astro.c -o /work/out/astro/polaris-httpd -lm && cp /work/out/astro/polaris-solve /work/out/astro/polaris-extract /work/out/astro/polaris-mount /work/out/astro/polaris-skysim /work/out/astro/polaris-httpd /work/out/astro/polaris-logwatch /work/out/astro/polaris-match /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ && cp /opt/patcher/astro/ondisk/*.sh /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ && cp /opt/patcher/astro/ondisk/site.conf.example /out/COPY-TO-SD-CARD-ROOT/polaris-astro/'
+  'bash /opt/patcher/astro/build_solver.sh arm /work/out/astro && mkdir -p /out/COPY-TO-SD-CARD-ROOT/polaris-astro && python3 /opt/patcher/astro/embed_webui.py /opt/patcher/astro/webui /tmp/webui.h && for t in polaris-logwatch polaris-match; do arm-linux-gnueabi-gcc -O2 -std=gnu11 -mfloat-abi=soft -Wall -Wextra -Werror /opt/patcher/astro/$t.c -o /work/out/astro/$t -lm || exit 1; done && arm-linux-gnueabi-gcc -O2 -std=gnu11 -mfloat-abi=soft -Wall -Wextra -Werror -I/tmp -I/opt/patcher/astro /opt/patcher/astro/polaris-httpd.c /opt/patcher/astro/polaris-link.c /opt/patcher/astro/polaris-jog.c /opt/patcher/astro/polaris-prog.c /opt/patcher/astro/polaris-astro.c -o /work/out/astro/polaris-httpd -lm && cp /work/out/astro/polaris-solve /work/out/astro/polaris-extract /work/out/astro/polaris-mount /work/out/astro/polaris-skysim /work/out/astro/polaris-httpd /work/out/astro/polaris-logwatch /work/out/astro/polaris-match /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ && for f in /opt/patcher/astro/ondisk/*.sh; do case "${f##*/}" in polaris-autojoin.sh|polaris-apsta.sh|setup-wifi.sh) ;; *) cp "$f" /out/COPY-TO-SD-CARD-ROOT/polaris-astro/ || exit 1;; esac; done && cp /opt/patcher/astro/ondisk/site.conf.example /out/COPY-TO-SD-CARD-ROOT/polaris-astro/'
+
+# Home-network join (docs/NETWORKING.md). The device ships no station-mode
+# tooling, so iw + wpa_supplicant are cross-built here, and the scripts expect
+# all of it -- plus udhcpc.script, without which the lease is never applied -- in
+# /app/sd/polaris-wifi. Optional: a failure here leaves the rest of the bundle
+# usable, it just has no Home network support.
+if [ "$WANT_WIFI" = "1" ]; then
+  echo "[*] cross-building iw + wpa_supplicant for the home-network join…"
+  if ! docker run --rm \
+      -v "$HERE/container":/opt/patcher:ro \
+      -v "$OUT":/out \
+      --entrypoint /bin/bash "$IMG" -c \
+      'W=/out/COPY-TO-SD-CARD-ROOT/polaris-wifi && bash /opt/patcher/astro/build_wifi.sh arm "$W" && for f in polaris-autojoin.sh polaris-apsta.sh setup-wifi.sh udhcpc.script; do install -m 755 /opt/patcher/astro/ondisk/$f "$W/$f" || exit 1; done'; then
+    rm -rf "$OUT/COPY-TO-SD-CARD-ROOT/polaris-wifi" 2>/dev/null || true
+    echo "[!] Wi-Fi tools failed to build -- the bundle has no polaris-wifi/ (Home network" >&2
+    echo "    join won't work). Everything else is fine. Re-run, or pass --no-wifi." >&2
+  fi
+fi
 
 if [ "$WANT_IDX" = "1" ]; then
   echo "[*] selecting + downloading index files for ${FMIN}-${FMAX}mm…"
@@ -61,6 +82,10 @@ Benro Polaris — on-device plate solver bundle
 =============================================
 Built for ${FMIN}-${FMAX}mm on a ${SENSOR}mm-wide sensor.
 
+!! EXPERIMENTAL. Every astro feature here is very experimental: it has not been
+!! tested under real stars, and it moves real motors. Stay with the mount while
+!! it runs and be ready to power it off. Use at your own risk.
+
 Put it on the device
 --------------------
 Drag the CONTENTS of COPY-TO-SD-CARD-ROOT/ onto the root of the Polaris'
@@ -68,6 +93,7 @@ microSD card, so the card ends up with:
 
     <SD root>/astrometry/index-41xx.fits
     <SD root>/polaris-astro/polaris-solve, polaris-extract, polaris-mount, *.sh
+    <SD root>/polaris-wifi/iw, wpa_supplicant, *.sh   (optional: home network)
 
 Put the card back in the Polaris and run once:
 

@@ -43,7 +43,15 @@ single-radio chip; there is no configuration that avoids it.
 
 ## Setup
 
-Everything lives in `/app/sd/polaris-wifi/`.
+> ⚠️ **Experimental**, like every astro feature. It reconfigures the radio that
+> carries the Benro app; failure is designed to fall back to the stock access
+> point, but it has seen little real-world use.
+
+Everything lives in `/app/sd/polaris-wifi/`. `./build-astro.sh` cross-builds the
+tools and puts the whole folder in
+`out/astro-bundle/COPY-TO-SD-CARD-ROOT/polaris-wifi/`; copy it to the card root.
+This applies to the baked-in install too: the Wi-Fi folder always lives on the
+SD card, because that is where your saved network lives.
 
 **From the dashboard** — the *Home network* card: enter SSID and password, press
 **Save**, then **Join**. Tick **Join automatically at power-up** and it happens

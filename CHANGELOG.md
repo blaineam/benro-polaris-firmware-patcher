@@ -1,6 +1,36 @@
 # Changelog
 
-## Unreleased (branch `astro-plate-solving`) — solver built, motors untouched
+## Unreleased — astro merged into `main` (very experimental)
+
+### Changed
+- **The astro features are now labelled very experimental** in the README,
+  `docs/ASTRO.md`, `docs/NETWORKING.md` and the bundle's `README.txt`. None of it
+  has been tested under real stars.
+- **Installing on the Polaris** calls for a fast SD card (works with a SanDisk
+  Extreme PLUS, not with a SanDisk Extreme) and for following Benro's official
+  update steps exactly.
+
+### Fixed — baked-in install (`--astro-autostart`)
+- `polaris-trackwatch.sh`, `camera-death-watch.sh` and `wifi-watch.sh` never
+  started, because the boot hook only launched them from the SD card's
+  `polaris-astro/`, which this mode doesn't have. They now run from the copy in
+  `/app/astro`. The track watcher feeds the aligned/unaligned state.
+- A location set in the web app, and Keep Awake, were lost at reboot: both are
+  saved under `/app/sd/polaris-astro/`, which didn't exist. The boot hook and
+  `polaris-httpd` now create it.
+
+### Fixed — home Wi-Fi join was never bundled
+- `build-astro.sh` now runs `build_wifi.sh` and produces `polaris-wifi/` (`iw`,
+  `wpa_supplicant`, `wpa_cli`, `wpa_passphrase`, the join scripts and
+  `udhcpc.script`). Before, none of it reached the card. `--no-wifi` skips it;
+  `flex` is now in the Docker image for the libnl build.
+
+### Docs
+- README documents `build-astro.sh`, `--astro-autostart` and `--astro-bundle`,
+  and notes the astro build is macOS/Linux only. `docs/ASTRO.md` lists every
+  shipped script.
+
+## Branch `astro-plate-solving` — solver built, motors untouched
 
 ### Added — a web control app that replaces the phone
 

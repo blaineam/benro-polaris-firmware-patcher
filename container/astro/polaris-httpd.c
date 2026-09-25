@@ -881,6 +881,18 @@ static unsigned long media_hash(const char *s) {   /* djb2 */
     return h;
 }
 
+/* Create the directory that holds `path`. The settings the web app saves live
+ * under /app/sd/polaris-astro, which a baked-in install (--astro-autostart)
+ * never puts on the card; without this every save there fails silently. */
+static void ensure_parent_dir(const char *path) {
+    char d[PATH_MAX], *slash;
+    snprintf(d, sizeof d, "%s", path);
+    slash = strrchr(d, '/');
+    if (!slash || slash == d) return;
+    *slash = 0;
+    mkdir(d, 0755);
+}
+
 /* Persist the observing site to site.conf so a runtime change survives a reboot
  * (the boot script reads LAT=/LON= from it). Rewrites only those two lines and
  * keeps everything else — FOCAL, the start-disabled flag, etc. */
@@ -889,6 +901,7 @@ static void persist_site_latlon(double lat, double lon) {
     const char *path = g_site_conf;
     FILE *in, *out;
     snprintf(tmp, sizeof tmp, "%s.tmp", g_site_conf);
+    ensure_parent_dir(tmp);
     out = fopen(tmp, "w");
     if (!out) return;
     in = fopen(path, "r");
@@ -4101,7 +4114,9 @@ static void handle(int fd) {
             char v[16] = "";
             if (!param(qs, "on", v, sizeof v) && body) param(body, "on", v, sizeof v);
             if (v[0] == '1' || !strcmp(v, "true") || !strcmp(v, "force")) {
-                FILE *f = fopen(KEEPWIFI_FLAG, "w");
+                FILE *f;
+                ensure_parent_dir(KEEPWIFI_FLAG);
+                f = fopen(KEEPWIFI_FLAG, "w");
                 if (f) { fputs("1\n", f); fclose(f); }
                 /* "force" means connect without waiting for alignment. It is a
                  * deliberate choice with a real consequence -- registering while

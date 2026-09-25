@@ -4,10 +4,13 @@ Astrometric plate solving, automatic alignment, auto-guiding, a web UI and an
 ASCOM Alpaca telescope endpoint — all running on the Polaris itself, with no
 laptop in the field.
 
-> **Status: ALPHA.** Every number below was measured on hardware or in a
-> closed-loop simulation, and the gaps are listed explicitly in
-> [What is and is not verified](#what-is-and-is-not-verified). Read that section
-> before trusting this on a night you care about.
+> ⚠️ **Status: VERY EXPERIMENTAL.** Every astro feature in this document is
+> early work: none of it has been tested under real stars, parts of it have only
+> run in simulation, and it drives the real motors. Stay with the mount, be ready
+> to power it off, and use it at your own risk. Every number below was measured
+> on hardware or in a closed-loop simulation, and the gaps are listed explicitly
+> in [What is and is not verified](#what-is-and-is-not-verified). Read that
+> section before trusting this on a night you care about.
 
 ---
 
@@ -49,7 +52,14 @@ Polaris' microSD card:
 <SD root>/astrometry/index-41xx.fits      index files (~44 MB)
 <SD root>/polaris-astro/                  binaries and scripts
 <SD root>/polaris-astro/site.conf         your configuration
+<SD root>/polaris-wifi/                   optional: home Wi-Fi join (iw,
+                                          wpa_supplicant, scripts)
 ```
+
+`polaris-wifi/` is only needed to join your home network
+([NETWORKING.md](NETWORKING.md)); skip it, or build without it using
+`--no-wifi`. The build is macOS/Linux only for now (`build-astro.sh` has no
+PowerShell version).
 
 Then run `install_astro.sh` on the device once (over SSH), or — with no SSH at
 all — patch the firmware with `--astro-autostart` (below) so it self-installs.
@@ -70,8 +80,11 @@ the firmware to flash, and the indexes — and there is no install step at all.
 inside the firmware and installs `polaris-astro-boot.sh` as the boot hook. Then:
 
 1. Flash the patched firmware.
-2. Copy **only** `out/astro-bundle/COPY-TO-SD-CARD-ROOT/astrometry/` to the card
+2. Copy `out/astro-bundle/COPY-TO-SD-CARD-ROOT/astrometry/` to the card
    (`<SD root>/astrometry/index-*.fits`). No `polaris-astro/`, no `site.conf`.
+   Add `polaris-wifi/` too if you want the home-network join. The boot script
+   creates an empty `polaris-astro/` on the card, where the web app saves your
+   location and the Keep Awake setting.
 3. Power on and open `http://<polaris ip>:8090/`. Set your location in the web app.
 
 The indexes stay on the SD because they are too big for the firmware; everything
@@ -1086,9 +1099,26 @@ not apply precession; compare sim-to-sim or mount-to-mount, not across.
 | `polaris-mount` | protocol client |
 | `polaris-httpd` | web UI + Alpaca |
 | `polaris-logwatch` | truncation-safe log follower |
+| `polaris-astro-boot.sh` | boot hook: starts everything below |
+| `install_astro.sh` / `uninstall_astro.sh` | SD-card install and removal |
 | `polaris-autosolve.sh` | the calibration daemon |
+| `polaris-autoalign.sh` | corrects the app's star alignment from a solve |
+| `polaris-align.sh` | one frame in, one sky position out |
 | `polaris-guide.sh` | the guider |
+| `autofocus.sh` | HFR autofocus sweep |
 | `solve-now.sh` | one-shot solve from the command line |
+| `polaris-trackwatch.sh` | keeps `/tmp/polaris-track` (alignment state) current |
+| `wifi-keepalive.sh` | Keep Awake: stops the 60 s Wi-Fi auto-off |
+| `wifi-watch.sh` | records what happens to the access point |
+| `camera-death-watch.sh` | flight recorder for a camera dying mid-session |
+| `site.conf.example` | configuration template |
+| `capture-calibration.sh`, `capture-app-connect.sh` | protocol recorders (debugging) |
+| `aa_rehearsal.sh`, `inject_test.sh` | on-device test harnesses (debugging) |
+
+Home-network join lives separately in `/app/sd/polaris-wifi/`: `iw`,
+`wpa_supplicant`, `wpa_cli`, `wpa_passphrase`, `polaris-autojoin.sh`,
+`polaris-apsta.sh`, `setup-wifi.sh` and `udhcpc.script` — see
+[NETWORKING.md](NETWORKING.md).
 
 Licensing: `polaris-solve` is built from astrometry.net and is GPL; it runs as
 its own process and nothing GPL is linked into `pgphoto` or the MIT loader. See

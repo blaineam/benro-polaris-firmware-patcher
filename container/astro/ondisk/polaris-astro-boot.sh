@@ -28,6 +28,19 @@ PORT=${POLARIS_HTTPD_PORT:-8090}
 LAT=""; LON=""; FOCAL=400
 SITE=/app/sd/polaris-astro/site.conf
 
+# Make a helper script runnable from $ASTRO. With the SD-card install it is
+# refreshed from /app/sd/polaris-astro; with the stack baked into the firmware
+# (--astro-autostart) the card has no polaris-astro/ and the baked copy in
+# $ASTRO is used as-is. Succeeds only if $ASTRO/$1 is executable afterwards.
+stage() {
+    if [ -x "/app/sd/polaris-astro/$1" ]; then
+        mkdir -p "$ASTRO"
+        cp "/app/sd/polaris-astro/$1" "$ASTRO"/ 2>/dev/null
+        chmod 755 "$ASTRO/$1" 2>/dev/null
+    fi
+    [ -x "$ASTRO/$1" ]
+}
+
 {
     echo "$(date) polaris-astro boot hook"
 
@@ -54,6 +67,12 @@ SITE=/app/sd/polaris-astro/site.conf
         echo "site.conf loaded after ${i} tries (lat=$LAT lon=$LON focal=$FOCAL)"
     else
         echo "no $SITE after ${i} tries -- microSD not mounted?"
+    fi
+    # The web app saves the observing site (site.conf) and the Keep Awake flag
+    # under /app/sd/polaris-astro. A baked-in install puts only astrometry/ on
+    # the card, so create the directory or those settings are lost at reboot.
+    if [ -d /app/sd/astrometry ] || [ -f "$SITE" ]; then
+        mkdir -p /app/sd/polaris-astro 2>/dev/null
     fi
 
     # SILENCE THE KERNEL CONSOLE. FIRST, before anything else runs.
@@ -85,10 +104,7 @@ SITE=/app/sd/polaris-astro/site.conf
     # device log continuously, because the log is truncated too fast for anyone
     # to grep it on demand. Everything that gates on "is the mount aligned"
     # reads that file. No connections, no cost.
-    if [ -x /app/sd/polaris-astro/polaris-trackwatch.sh ]; then
-        mkdir -p "$ASTRO"
-        cp /app/sd/polaris-astro/polaris-trackwatch.sh "$ASTRO"/ 2>/dev/null
-        chmod 755 "$ASTRO/polaris-trackwatch.sh" 2>/dev/null
+    if stage polaris-trackwatch.sh; then
         echo "starting trackwatch"
         setsid "$ASTRO/polaris-trackwatch.sh" </dev/null >/dev/null 2>&1 &
     fi
@@ -108,10 +124,7 @@ SITE=/app/sd/polaris-astro/site.conf
     # CAMERA FLIGHT RECORDER. Catches the "camera battery died and the mount
     # drove somewhere bad" event, which cannot be reproduced on demand -- it
     # happens when a battery happens to run out. CAMERA_WATCH=0 to skip.
-    if [ "${CAMERA_WATCH:-1}" = "1" ] && [ -x /app/sd/polaris-astro/camera-death-watch.sh ]; then
-        mkdir -p "$ASTRO"
-        cp /app/sd/polaris-astro/camera-death-watch.sh "$ASTRO"/ 2>/dev/null
-        chmod 755 "$ASTRO/camera-death-watch.sh" 2>/dev/null
+    if [ "${CAMERA_WATCH:-1}" = "1" ] && stage camera-death-watch.sh; then
         echo "starting camera-death-watch"
         setsid "$ASTRO/camera-death-watch.sh" </dev/null >/dev/null 2>&1 &
     fi
@@ -123,10 +136,7 @@ SITE=/app/sd/polaris-astro/site.conf
     # the AP, so this records local state to the microSD where it survives both
     # the fault and the power cycle. It opens no sockets and connects to
     # nothing, so it cannot be causing what it measures. WIFI_WATCH=0 to skip.
-    if [ "${WIFI_WATCH:-1}" = "1" ] && [ -x /app/sd/polaris-astro/wifi-watch.sh ]; then
-        mkdir -p "$ASTRO"
-        cp /app/sd/polaris-astro/wifi-watch.sh "$ASTRO"/ 2>/dev/null
-        chmod 755 "$ASTRO/wifi-watch.sh" 2>/dev/null
+    if [ "${WIFI_WATCH:-1}" = "1" ] && stage wifi-watch.sh; then
         if ! ps 2>/dev/null | grep -q "[w]ifi-watch"; then
             echo "starting wifi-watch"
             setsid "$ASTRO/wifi-watch.sh" </dev/null >/dev/null 2>&1 &
