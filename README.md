@@ -267,6 +267,7 @@ instead of printing `[OK]` over a container that never produced anything.
 Use **the same SD-card firmware-update procedure you already use for official
 Benro updates**, but with the `FwPkt.zip` this tool produced. The device
 verifies the package (MD5), reboots, and U-Boot writes it.
+[https://m.benro.com/en/index.html#/pages/download/download?key=benro-polaris](Instructions from Benro)
 
 **To roll back:** run the same procedure with your **original stock `FwPkt`**.
 
